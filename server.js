@@ -6,6 +6,7 @@ const path = require("path");
 const mapData = require("./map-data");
 const nav = require("./navigation");
 const bandits = require("./bandits");
+const boss = require("./boss");
 
 const app = express();
 const server = http.createServer(app);
@@ -57,6 +58,7 @@ function createRoom(code, modeId) {
         createdAt: Date.now()
     };
     bandits.initRoom(rooms[code]);
+    boss.initRoom(rooms[code]);
     return rooms[code];
 }
 createRoom(PUBLIC_ROOM, DEFAULT_MODE);
@@ -253,7 +255,9 @@ function placeInRoom(socket, p, code) {
 
     if (roomWasEmpty && rooms[code]) {
         bandits.initRoom(rooms[code]);
-        console.log("Room", code, "was empty - bandits reset to", bandits.BANDIT.startCount);
+        boss.initRoom(rooms[code]);
+        console.log("Room", code, "was empty - bandits reset to", bandits.BANDIT.startCount,
+            "| boss in", (boss.BOSS.firstBossMs / 1000) + "s");
     }
 
     // A fresh start in the new room, so nobody arrives already hurt or dead
@@ -291,6 +295,7 @@ io.on("connection", (socket) => {
         deaths: 0,
         lastHitAt: 0,
         lastBanditHitAt: 0,
+        lastBossHitAt: 0,
         lastDeltaAt: 0,
         lastRoomAt: 0
     };
@@ -493,13 +498,58 @@ io.on("connection", (socket) => {
     });
 
     /* =====================================================================
-       LOCAL DAMAGE AND HEALING (step 9)
+       HITS ON THE BOSS (step 12)
 
-       Bandits, the boss and out-of-combat regeneration still run on the client,
-       so the server cannot see them. The client batches the net change and
-       reports it, which keeps the authoritative health value honest enough for
-       player-versus-player to work. This is the one trusted path left, and it
-       closes when the bots themselves move to the server.
+       Same contract as a bandit: the client says it hit and where on the body,
+       the server owns the rest. Kept separate from bandit-hit because the boss
+       is one entity with its own cooldown - otherwise a player could spend the
+       same trigger pull twice, once on each path.
+       ===================================================================== */
+    socket.on("boss-hit", (m) => {
+        const shooter = players[socket.id];
+        if (!shooter || !shooter.alive || !shooter.room) return;
+        const room = rooms[shooter.room];
+        if (!room || !room.boss || !room.boss.alive) return;
+
+        if (!m || typeof m !== "object") return;
+        if (typeof m.w !== "number" || (m.w | 0) !== m.w || m.w < 0 || m.w >= WEAPONS.length) return;
+        const w = WEAPONS[m.w];
+
+        const now = Date.now();
+        if (now - shooter.lastBossHitAt < w.fireCd * 0.7) return;
+
+        const body = strictCount(m.body, w.pellets);
+        const head = strictCount(m.head, w.pellets);
+        if (body < 0 || head < 0) return;
+        if (body + head <= 0 || body + head > w.pellets) return;
+
+        const b = room.boss;
+        if (Math.hypot(shooter.x - b.x, shooter.z - b.z) > w.range * 1.15 + 3) return;
+
+        shooter.lastBossHitAt = now;
+        const typeIndex = b.typeIndex;
+        const res = boss.hurt(room, body * w.body + head * w.head, now);
+        if (res && res.killed) {
+            shooter.kills++;
+            io.to(room.code).emit("boss-died", {
+                by: shooter.id, t: typeIndex,
+                x: Math.round(res.boss.x * 100) / 100,
+                z: Math.round(res.boss.z * 100) / 100,
+                headshot: head > 0,
+                nextIn: boss.BOSS.nextBossMs
+            });
+            console.log("Boss down:", res.boss.type.name, "in", room.code,
+                "by", shooter.id.slice(0, 6));
+        }
+    });
+
+    /* =====================================================================
+       HEALING AND THE LAST TRUSTED PATH (step 9)
+
+       Everything that hurts a player now happens here - bandits since 11c, the
+       boss since 12 - so what is left on this path is out-of-combat recovery
+       and the small top-up for a kill. It is still a client saying a number,
+       so it is still capped: 20 a report, five reports a second.
        ===================================================================== */
     socket.on("health-delta", (m) => {
         const p = players[socket.id];
@@ -546,7 +596,13 @@ setInterval(() => {
 
     for (const code in rooms) {
         const room = rooms[code];
-        const sink = bandits.stepRoom(room, players, now, dt);
+
+        /* One sink for both simulations. The bandits and the boss share the
+           room's bullet list, so they also share the list of what those
+           bullets did - the server applies all of it in one place below. */
+        const sink = boss.emptySink();
+        bandits.stepRoom(room, players, now, dt, sink);
+        boss.stepRoom(room, players, now, dt, sink);
 
         /* A bandit fired: everyone in the room needs to see the muzzle flash
            and the bullet leave. They draw it from this event - the server keeps
@@ -554,6 +610,19 @@ setInterval(() => {
         for (let i = 0; i < sink.shots.length; i++) {
             io.to(code).emit("bandit-shot", sink.shots[i]);
         }
+
+        /* The boss arriving is an event in itself - the clients build the
+           model, name the bar and play the roar off this one. */
+        if (sink.bossSpawn) {
+            io.to(code).emit("boss-spawn", sink.bossSpawn);
+            console.log("Boss in", code + ":", boss.BOSS_TYPES[sink.bossSpawn.t].name);
+        }
+        for (let i = 0; i < sink.bossShots.length; i++) io.to(code).emit("boss-shot", sink.bossShots[i]);
+        for (let i = 0; i < sink.hazards.length; i++) io.to(code).emit("boss-hazard", sink.hazards[i]);
+        for (let i = 0; i < sink.booms.length; i++) io.to(code).emit("boss-boom", sink.booms[i]);
+        for (let i = 0; i < sink.slams.length; i++) io.to(code).emit("boss-slam", sink.slams[i]);
+        for (let i = 0; i < sink.blinks.length; i++) io.to(code).emit("boss-blink", sink.blinks[i]);
+        for (let i = 0; i < sink.roars.length; i++) io.to(code).emit("boss-roar", sink.roars[i]);
 
         /* A bullet reached a player. This is where the last piece of trust
            goes away: the server no longer has to believe a client that says it
@@ -567,7 +636,8 @@ setInterval(() => {
     }
 
     // Snapshot every other tick: 10 a second
-    if ((tickCount++ % 2) === 0) {
+    const tick = tickCount++;
+    if ((tick % 2) === 0) {
         for (const code in rooms) {
             const room = rooms[code];
             if (!room.bandits) continue;
@@ -575,6 +645,17 @@ setInterval(() => {
             for (const id in players) if (players[id].room === code) { occupied = true; break; }
             if (!occupied) continue;
             io.to(code).emit("bandits", { b: bandits.snapshot(room) });
+
+            /* The boss goes out at the same rate while it is alive, and once a
+               second as a countdown while it is not - so a player who walked in
+               halfway through sees the same clock as everybody else, and one
+               who walked in mid-fight can build the model from this alone. */
+            const bs = boss.snapshot(room, now);
+            if (bs) {
+                io.to(code).emit("boss", { t: room.boss.typeIndex, hp: room.boss.maxHealth, b: bs });
+            } else if ((tick % 20) === 0) {
+                io.to(code).emit("boss", { in: boss.secondsToBoss(room, now) });
+            }
         }
     }
 }, bandits.TICK_MS);
@@ -588,4 +669,6 @@ server.listen(PORT, "0.0.0.0", () => {
         nav.blockedCount(), "blocked navigation cells");
     console.log("Bandits simulated here:", bandits.BANDIT.startCount, "to start, one more every",
         (bandits.BANDIT.spawnEveryMs / 1000) + "s, up to", bandits.BANDIT.maxAlive);
+    console.log("Boss simulated here:", boss.BOSS_TYPES.length, "of them, one every",
+        (boss.BOSS.firstBossMs / 1000) + "s");
 });

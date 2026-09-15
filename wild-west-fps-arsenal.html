@@ -408,6 +408,25 @@ function registerBanditHit(id, headshot) {
     if (headshot) netBanditHits[id].head++; else netBanditHits[id].body++;
 }
 
+/* The boss is one target, so it needs no id - but it needs its own tally, or a
+   shotgun that caught the boss and a bandit with the same pull would have its
+   pellets counted twice by a server that only allows eight. */
+const netBossHits = { body: 0, head: 0 };
+
+function registerBossHit(headshot) {
+    if (headshot) netBossHits.head++; else netBossHits.body++;
+}
+
+function sendBossHits() {
+    if (netBossHits.body === 0 && netBossHits.head === 0) return;
+    if (NET.connected && NET.socket) {
+        NET.socket.emit('boss-hit', {
+            w: currentWpn, body: netBossHits.body, head: netBossHits.head
+        });
+    }
+    netBossHits.body = 0; netBossHits.head = 0;
+}
+
 function sendBanditHits() {
     const ids = Object.keys(netBanditHits);
     if (ids.length === 0) return;
@@ -437,8 +456,8 @@ function sendHits() {
     for (let i = 0; i < ids.length; i++) delete netHits[ids[i]];
 }
 
-/* Bandits, the boss and regeneration are still simulated locally, so the change
-   they make to our health has to be told to the server or its copy drifts.
+/* In a room the server does all the hurting, so what is left to report is
+   recovery and the top-up for a kill. Offline this goes nowhere at all.
    Batched to a few times a second rather than sent per frame. */
 let healthDeltaPending = 0;
 let healthDeltaAt = 0;
@@ -688,9 +707,10 @@ function initNetwork() {
                 PLAYERS[p.id] = p;
             }
         });
-        // Our own bandits are not this room's bandits
+        // Our own bandits are not this room's bandits, and neither is our boss
         clearServerBandits();
         clearBanditBullets();
+        clearNetBossState();
         bots.forEach(function (b) { botGroup.remove(b.mesh); });
         bots.length = 0;
         console.log('[NET] room ' + data.code + ' (' + NET.mode.label + ') others=' + Object.keys(PLAYERS).length);
@@ -820,6 +840,84 @@ function initNetwork() {
         }
     });
 
+    /* =====================================================================
+       THE ROOM'S BOSS (step 12)
+
+       Every one of these is the server telling us what already happened. The
+       health it costs has been taken off before the packet left, so none of
+       these handlers touches anybody's health - they draw and they make noise.
+       ===================================================================== */
+    NET.socket.on('boss-spawn', function (m) {
+        if (!m || typeof m.t !== 'number') return;
+        const bt = BOSS_TYPES[m.t % BOSS_TYPES.length];
+        createNetBoss(m.t, m.hp, m.x, m.z);
+        sfxBossRoar(netBoss.mesh.position);
+        pushFeed(bt.name + ' RIDES IN — ' + bt.ability);
+        netFeed('BOSS: ' + bt.name);
+        ui.waveLine.innerText = 'BOSS: ' + bt.name;
+    });
+
+    NET.socket.on('boss', function (m) { onBossState(m); });
+
+    NET.socket.on('boss-shot', function (m) {
+        if (!m || !m.o || !m.d) return;
+        const flashAt = new THREE.Vector3(m.o[0], m.o[1], m.o[2]);
+        if (netBoss.rig && netBoss.rig.parts.muzzle) {
+            // it is drawn slightly in the past, so the flash belongs on its gun
+            netBoss.rig.parts.muzzle.getWorldPosition(flashAt);
+            netBoss.recoil = 0.5;
+        }
+        muzzleFlashAt(flashAt, 3.2);
+        if (m.k === 'snipe') sfxSniper(flashAt);
+        else if (m.k === 'spray') sfxSmg(flashAt);
+        else sfxRifleShot(flashAt);
+        spawnBanditBullet([flashAt.x, flashAt.y, flashAt.z], m.d,
+            m.k === 'snipe' ? 72 : (m.k === 'spray' ? 48 : 42));
+    });
+
+    NET.socket.on('boss-hazard', function (m) { spawnNetHazard(m); });
+    NET.socket.on('boss-boom', function (m) { onBossBoom(m); });
+
+    NET.socket.on('boss-slam', function (m) {
+        if (!m || !m.p) return;
+        const p = new THREE.Vector3(m.p[0], 0.15, m.p[1]);
+        spawnParticles(p.clone().setY(0.25), m.k === 'charge' ? 0xffd08a : 0xffaa33, 24, 5);
+        spawnDust(p.clone().setY(0.08), 20);
+        sfxExplosion(p);
+        const d = camera.position.distanceTo(p);
+        if (d < 10) camShake = Math.min(0.7, camShake + 0.4 * (1 - d / 10));
+    });
+
+    NET.socket.on('boss-blink', function (m) {
+        if (!m || !m.p) return;
+        // a puff where it was, and one where it turned up
+        if (netBoss.mesh) spawnParticles(netBoss.mesh.position.clone().setY(1.4), 0xccaaff, 16, 3);
+        spawnParticles(new THREE.Vector3(m.p[0], 1.4, m.p[1]), 0xccaaff, 16, 3);
+        netBoss.buf.length = 0;          // it did not walk there - do not slide it there
+        netBoss.hasPrev = false;
+    });
+
+    NET.socket.on('boss-roar', function (m) {
+        if (!m || !m.p) return;
+        const p = new THREE.Vector3(m.p[0], 1.2, m.p[1]);
+        sfxBossRoar(p);
+        spawnDust(p.clone().setY(0.1), 12);
+    });
+
+    NET.socket.on('boss-died', function (m) {
+        if (!m) return;
+        const bt = BOSS_TYPES[(m.t || 0) % BOSS_TYPES.length];
+        const at = netBoss.mesh ? netBoss.mesh.position.clone().setY(1.6)
+                                : new THREE.Vector3(m.x || 0, 1.6, m.z || 0);
+        sfxBotDeath(at);
+        spawnParticles(at, 0x8a2a1a, 30, 5);
+        spawnDust(at.clone().setY(0.2), 20);
+        startNetBossDeath();
+        pushFeed((m.headshot ? 'HEADSHOT! ' : '') + bt.name + ' IS DOWN');
+        if (m.by === NET.id) { kills++; onKillReward(); }
+        applyBossReward();
+    });
+
     /* --- Remote gunfire (step 7). Cosmetic: no damage is applied. --- */
     NET.socket.on('player-shot', function (m) { playRemoteShot(m); });
 
@@ -850,6 +948,7 @@ function initNetwork() {
         NET.room = null;
         clearServerBandits();
         clearBanditBullets();
+        clearNetBossState();
         refreshRoomUI();
         clearPlayers();
         setNetStatus('DISCONNECTED', 'off');
@@ -3210,7 +3309,7 @@ const banditBulletMat = new THREE.MeshBasicMaterial({ color: 0xffd070 });
 const BANDIT_BULLET_SPEED = 42;
 const BANDIT_BULLET_LIFE = 3.5;
 
-function spawnBanditBullet(o, d) {
+function spawnBanditBullet(o, d, speed) {
     const m = new THREE.Mesh(banditBulletGeo, banditBulletMat);
     m.position.set(o[0], o[1], o[2]);
     scene.add(m);
@@ -3218,7 +3317,8 @@ function spawnBanditBullet(o, d) {
         mesh: m,
         dir: new THREE.Vector3(d[0], d[1], d[2]),
         life: 0,
-        whizzed: false
+        whizzed: false,
+        speed: speed || BANDIT_BULLET_SPEED      // the boss does not fire one round
     });
     if (banditBullets.length > 60) {          // never let a stall pile them up
         const old = banditBullets.shift();
@@ -3229,7 +3329,7 @@ function spawnBanditBullet(o, d) {
 function updateBanditBullets(delta) {
     for (let i = banditBullets.length - 1; i >= 0; i--) {
         const b = banditBullets[i];
-        const travel = BANDIT_BULLET_SPEED * delta;
+        const travel = (b.speed || BANDIT_BULLET_SPEED) * delta;
         const nx = b.mesh.position.x + b.dir.x * travel;
         const ny = b.mesh.position.y + b.dir.y * travel;
         const nz = b.mesh.position.z + b.dir.z * travel;
@@ -3329,6 +3429,276 @@ function updateServerBandits(delta) {
 
         animateRemoteBody(body, delta);
     }
+}
+
+/* =========================================================================
+   THE ROOM'S BOSS (multiplayer, step 12)
+
+   Offline the boss is ours: we spawn it, run its brain, and take its damage.
+   In a room none of that is true. The server picks which of the eight arrives
+   and when, walks it, fires it, throws its dynamite and decides what all of
+   that costs. Everything below is drawing and sound.
+
+   BOSS_TYPES is the shared table - the server sends an index into it, so the
+   order of that array is part of the wire format. Do not sort it.
+   ========================================================================= */
+const netBoss = {
+    active: false, alive: false, typeIndex: -1, type: null,
+    rig: null, mesh: null, buf: [],
+    health: 0, maxHealth: 1,
+    ghost: false, charging: false, ghostShown: false,
+    walkPhase: Math.random() * 6.28, speed: 0, recoil: 0,
+    deathT: -1, deathDir: 1,
+    prevPos: new THREE.Vector3(), hasPrev: false,
+    countdown: -1
+};
+
+function createNetBoss(typeIndex, hp, x, z) {
+    destroyNetBoss();
+    const bt = BOSS_TYPES[typeIndex % BOSS_TYPES.length];
+
+    /* The same model the local boss uses, lifted straight back out of the local
+       bot system so its brain never gets a turn. */
+    const rig = createBandit(true, bt);
+    const idx = bots.indexOf(rig);
+    if (idx > -1) bots.splice(idx, 1);
+    botGroup.remove(rig.mesh);
+    banditGroup.add(rig.mesh);
+    rig.mesh.traverse(function (o) {
+        if (o.isMesh) {
+            delete o.userData.bot;
+            o.userData.bossHit = true;
+        }
+    });
+
+    netBoss.active = true;
+    netBoss.alive = true;
+    netBoss.typeIndex = typeIndex % BOSS_TYPES.length;
+    netBoss.type = bt;
+    netBoss.rig = rig;
+    netBoss.mesh = rig.mesh;
+    netBoss.buf = [];
+    netBoss.health = hp || bt.hp;
+    netBoss.maxHealth = hp || bt.hp;
+    netBoss.ghost = false; netBoss.ghostShown = false; netBoss.charging = false;
+    netBoss.deathT = -1; netBoss.hasPrev = false; netBoss.speed = 0;
+    if (x !== undefined) rig.mesh.position.set(x, 0, z);
+    rig.parts.barBg.visible = false;
+    rig.parts.barFill.visible = false;
+
+    ui.bossBar.style.display = 'block';
+    ui.bossName.innerText = '☠ ' + bt.name + ' ☠';
+    ui.bossAbility.innerText = bt.ability;
+    updateBossBar();
+    return netBoss;
+}
+
+function destroyNetBoss() {
+    if (netBoss.mesh) {
+        banditGroup.remove(netBoss.mesh);
+        netBoss.mesh.traverse(function (o) {
+            if (o.isMesh) {
+                if (o.geometry) o.geometry.dispose();
+                if (o.material) {
+                    if (Array.isArray(o.material)) o.material.forEach(function (mm) { mm.dispose(); });
+                    else o.material.dispose();
+                }
+            }
+        });
+    }
+    netBoss.active = false; netBoss.alive = false;
+    netBoss.rig = null; netBoss.mesh = null;
+    netBoss.buf = [];
+    netBoss.deathT = -1;
+    netBoss.typeIndex = -1; netBoss.type = null;
+    if (!bossActive) ui.bossBar.style.display = 'none';
+}
+
+/* Either the fight or the clock. `b` is a live boss row, `in` is how many
+   seconds until the next one - the same countdown for everybody in the room. */
+function onBossState(m) {
+    if (!m) return;
+    if (m.b) {
+        if (!netBoss.active || netBoss.typeIndex !== m.t || !netBoss.alive) {
+            createNetBoss(m.t, m.hp, m.b[0], m.b[1]);
+        }
+        const r = m.b;
+        netBoss.health = r[3];
+        netBoss.ghost = r[4] === 1;
+        netBoss.charging = r[5] === 1;
+        netBoss.buf.push({ t: performance.now(), x: r[0], z: r[1], yaw: r[2] });
+        if (netBoss.buf.length > 14) netBoss.buf.shift();
+        netBoss.countdown = -1;
+        updateBossBar();
+        showNetBossHealth();
+    } else {
+        netBoss.countdown = typeof m.in === 'number' ? m.in : -1;
+        // Alive here but gone there: we joined after it died, or missed the event
+        if (netBoss.active && netBoss.alive) destroyNetBoss();
+    }
+}
+
+function showNetBossHealth() {
+    if (!netBoss.rig) return;
+    const pct = Math.max(0, Math.min(1, netBoss.health / netBoss.maxHealth));
+    const P = netBoss.rig.parts;
+    const show = netBoss.alive && pct < 1 && pct > 0;
+    P.barBg.visible = show;
+    P.barFill.visible = show;
+    P.barFill.scale.x = 0.94 * netBoss.rig.scale * pct;
+    P.barFillMat.color.setHex(pct > 0.5 ? 0x5ec24a : (pct > 0.25 ? 0xe0a83c : 0xd94a2b));
+}
+
+function startNetBossDeath() {
+    if (!netBoss.active) return;
+    netBoss.alive = false;
+    netBoss.deathT = 0;
+    netBoss.deathDir = Math.random() > 0.5 ? 1 : -1;
+    netBoss.rig.parts.barBg.visible = false;
+    netBoss.rig.parts.barFill.visible = false;
+    ui.bossBar.style.display = 'none';
+}
+
+function updateNetBoss(delta) {
+    if (!netBoss.active || !netBoss.rig) return;
+
+    if (!netBoss.alive) {
+        if (netBoss.deathT >= 0) {
+            netBoss.deathT += delta;
+            const t = Math.min(1, netBoss.deathT / 0.75);
+            const e = 1 - Math.pow(1 - t, 3);
+            const P = netBoss.rig.parts;
+            P.bob.rotation.x = e * Math.PI * 0.46 * netBoss.deathDir;
+            P.bob.rotation.z = e * 0.25 * netBoss.deathDir;
+            P.bob.position.y = -e * 0.55 * netBoss.rig.scale;
+            P.armL.rotation.x = -e * 0.9;
+            P.armR.rotation.x = -e * 1.2;
+            if (netBoss.deathT > 2.4) destroyNetBoss();
+        }
+        return;
+    }
+
+    /* Vanishing: the server says when, we say what it looks like. */
+    if (netBoss.ghost !== netBoss.ghostShown) {
+        netBoss.ghostShown = netBoss.ghost;
+        const op = netBoss.ghost ? 0.22 : 1;
+        netBoss.rig.parts.materials.forEach(function (mat) {
+            mat.transparent = true;
+            mat.opacity = op;
+        });
+    }
+
+    const shown = sampleAt(netBoss.buf, performance.now() - INTERP_DELAY);
+    if (!shown) return;
+    const m = netBoss.mesh;
+    m.position.set(shown.x, 0, shown.z);
+    m.rotation.y = shown.yaw;
+
+    let inst = 0;
+    if (delta > 0 && netBoss.hasPrev) {
+        inst = Math.hypot(m.position.x - netBoss.prevPos.x, m.position.z - netBoss.prevPos.z) / delta;
+    }
+    netBoss.prevPos.copy(m.position);
+    netBoss.hasPrev = true;
+    netBoss.speed += (inst - netBoss.speed) * Math.min(1, 12 * delta);
+
+    animateRemoteBody(netBoss, delta);
+}
+
+/* ---- What the boss throws -------------------------------------------------
+   The server owns the arc and the fuse; we fly a copy with the same numbers so
+   the stick is where the bang is. The explosion arrives as its own event, at
+   the server's position, so a slow frame cannot put it in the wrong place. */
+const netHazards = {};
+const netClouds = [];
+const HAZARD_GRAVITY = 18;
+
+function spawnNetHazard(m) {
+    if (!m || !m.o || !m.v) return;
+    const kind = m.k === 'tnt' ? 'tnt' : 'poison';
+    const geo = kind === 'tnt'
+        ? new THREE.CylinderGeometry(0.12, 0.12, 0.32, 8)
+        : new THREE.SphereGeometry(0.22, 8, 6);
+    const mat = new THREE.MeshStandardMaterial({
+        color: kind === 'tnt' ? 0xc03020 : 0x33aa44,
+        emissive: kind === 'tnt' ? 0x661000 : 0x116622,
+        emissiveIntensity: 0.7
+    });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.position.set(m.o[0], m.o[1], m.o[2]);
+    scene.add(mesh);
+    netHazards[m.i] = {
+        mesh: mesh, kind: kind,
+        vel: new THREE.Vector3(m.v[0], m.v[1], m.v[2]),
+        life: m.f || 1.15
+    };
+    muzzleFlashAt(mesh.position, kind === 'tnt' ? 3.5 : 2.2);
+    if (kind === 'tnt') sfxRifleShot(mesh.position); else sfxRevolver(mesh.position);
+}
+
+function dropNetHazard(id) {
+    const h = netHazards[id];
+    if (!h) return;
+    scene.remove(h.mesh);
+    if (h.mesh.geometry) h.mesh.geometry.dispose();
+    if (h.mesh.material) h.mesh.material.dispose();
+    delete netHazards[id];
+}
+
+function updateNetHazards(delta) {
+    const ids = Object.keys(netHazards);
+    for (let i = 0; i < ids.length; i++) {
+        const h = netHazards[ids[i]];
+        h.life -= delta;
+        h.vel.y -= HAZARD_GRAVITY * delta;
+        h.mesh.position.addScaledVector(h.vel, delta);
+        h.mesh.rotation.x += delta * 6;
+        if (h.mesh.position.y < 0.12) {
+            h.mesh.position.y = 0.12;
+            h.vel.y *= -0.2; h.vel.x *= 0.4; h.vel.z *= 0.4;
+        }
+        // If the explosion event is late, stop drawing it flying for ever
+        if (h.life < -0.5) dropNetHazard(ids[i]);
+    }
+
+    /* The cloud is the one thing the browser never drew - it was invisible and
+       it hurt, which is fine when you are the only one it can reach. In a room
+       everybody has to be able to see where not to stand. */
+    for (let i = netClouds.length - 1; i >= 0; i--) {
+        const c = netClouds[i];
+        c.life -= delta;
+        c.puff -= delta;
+        if (c.puff <= 0) {
+            c.puff = 0.5;
+            spawnParticles(c.pos.clone().setY(0.5 + Math.random()), 0x44ff66, 5, 1.2);
+        }
+        if (c.life <= 0) netClouds.splice(i, 1);
+    }
+}
+
+/* The server decided this went off here, and has already taken the health off
+   whoever it caught. All that is left is the noise and the dust. */
+function onBossBoom(m) {
+    if (!m || !m.p) return;
+    dropNetHazard(m.i);
+    const p = new THREE.Vector3(m.p[0], m.p[1], m.p[2]);
+    if (m.k === 'tnt') {
+        spawnParticles(p.clone(), 0xff6622, 28, 7);
+        spawnDust(p.clone().setY(0.1), 18);
+        sfxExplosion(p);
+        if (camera.position.distanceTo(p) < 12) camShake = Math.min(0.7, camShake + 0.35);
+    } else {
+        spawnParticles(p.clone(), 0x44ff66, 20, 3);
+        sfxRevolver(p);
+        netClouds.push({ pos: p.clone(), life: 5.2, puff: 0 });
+    }
+}
+
+function clearNetBossState() {
+    destroyNetBoss();
+    Object.keys(netHazards).forEach(dropNetHazard);
+    netClouds.length = 0;
+    netBoss.countdown = -1;
 }
 
 /* ---------- Bot damage / death ---------- */
@@ -4442,8 +4812,10 @@ function updateBoard() {
     ui.aliveCount.innerText = n;
 }
 function updateBossBar() {
-    if (!bossObj) return;
-    ui.bossFill.style.width = Math.max(0, (bossObj.health / bossObj.maxHealth) * 100) + '%';
+    // Online the bar follows the room's boss; offline it follows ours
+    const src = netBoss.active ? netBoss : bossObj;
+    if (!src) return;
+    ui.bossFill.style.width = Math.max(0, (src.health / src.maxHealth) * 100) + '%';
 }
 function pushFeed(text) {
     const d = document.createElement('div');
@@ -4533,6 +4905,8 @@ function resetGame() {
     // Online the room's bandits come from the server; only spawn our own when
     // there is nobody else running them.
     if (!onlineBandits()) { createBandit(false); createBandit(false); createBandit(false); }
+    // The room's boss is not ours to end - if one is up, its bar stays up
+    if (netBoss.active && netBoss.alive) { ui.bossBar.style.display = 'block'; updateBossBar(); }
     gameStartTime = performance.now();
     nextWaveAt = gameStartTime + 45000;
     nextBossAt = gameStartTime + 90000;
@@ -4557,13 +4931,10 @@ function spawnBoss() {
     pushFeed(bt.name + ' RIDES IN — ' + bt.ability);
     ui.waveLine.innerText = 'BOSS: ' + bt.name;
 }
-function onBossDefeated() {
-    bossActive = false; bossDefeated = true;
-    ui.bossBar.style.display = 'none';
-    const fallen = bossObj;
-    const idx = bots.indexOf(bossObj);
-    if (idx > -1) bots.splice(idx, 1);
-    setTimeout(function () { if (fallen) botGroup.remove(fallen.mesh); }, 2500);
+/* What killing a boss is worth. Online everybody in the room gets it, because
+   everybody in the room was in the fight - the server decided it died, and it
+   died once. */
+function applyBossReward() {
     if (unlockedWeapons < ARSENAL.length) {
         unlockedWeapons++;
         const nw = ARSENAL[unlockedWeapons - 1];
@@ -4577,13 +4948,23 @@ function onBossDefeated() {
         reserve = wpnAmmo[currentWpn].reserve;
         pushFeed('ARSENAL COMPLETE — extra ammo + DEAD-EYE');
     }
-    if (bots.filter(function (b) { return !b.isBoss; }).length < 4) {
-        for (let i = 0; i < 2; i++) createBandit(false);
-    }
     wave++;
     nextWaveAt = performance.now() + 45000;
     ui.waveLine.innerText = 'WAVE ' + wave;
     updateAmmoUI(); updateBoard(); updateLoadoutUI();
+}
+
+function onBossDefeated() {
+    bossActive = false; bossDefeated = true;
+    ui.bossBar.style.display = 'none';
+    const fallen = bossObj;
+    const idx = bots.indexOf(bossObj);
+    if (idx > -1) bots.splice(idx, 1);
+    setTimeout(function () { if (fallen) botGroup.remove(fallen.mesh); }, 2500);
+    if (bots.filter(function (b) { return !b.isBoss; }).length < 4) {
+        for (let i = 0; i < 2; i++) createBandit(false);
+    }
+    applyBossReward();
 }
 
 /* =========================================================================
@@ -4612,6 +4993,7 @@ function fireOneRay(spread, dmgBody, dmgHead, range) {
             const sb = serverBandits[bIds[i]];
             if (sb.alive) targets.push(sb.mesh);
         }
+        if (netBoss.active && netBoss.alive && netBoss.mesh) targets.push(netBoss.mesh);
     } else {
         for (let i = 0; i < bots.length; i++) if (bots[i].alive) targets.push(bots[i].mesh);
     }
@@ -4635,6 +5017,18 @@ function fireOneRay(spread, dmgBody, dmgHead, range) {
     if (hits.length) {
         const h = hits[0];
         end = h.point;
+        if (h.object.userData.bossHit && netBoss.active && netBoss.alive) {
+            const head = !!h.object.userData.isHead;
+            showHitmarker();
+            sfxHitMarker();
+            sfxFleshHit(h.point);
+            spawnParticles(h.point, head ? 0xff5050 : 0xc03a2a, head ? 18 : 11, 3.5);
+            registerBossHit(head);
+            spawnTracer(muzzleWorld, end, 0xffe8a0, 0.06);
+            netShotEnds.push(end.x, end.y, end.z);
+            return;
+        }
+
         const banditId = h.object.userData.banditId;
         if (banditId !== undefined && serverBandits[banditId]) {
             const head = !!h.object.userData.isHead;
@@ -4728,6 +5122,7 @@ function shoot(manual) {
     sendShot(w);
     sendHits();
     sendBanditHits();
+    sendBossHits();
     w.sfx(null);
     WPN.recoilPos = w.recoil;
     WPN.recoilRot = w.recoil * 1.1;
@@ -4977,6 +5372,9 @@ function drawMinimap() {
             if (!sb.alive) continue;
             plotBandit(sb.mesh.position.x, sb.mesh.position.z, false);
         }
+        if (netBoss.active && netBoss.alive && netBoss.mesh) {
+            plotBandit(netBoss.mesh.position.x, netBoss.mesh.position.z, true);
+        }
     } else {
         for (let i = 0; i < bots.length; i++) {
             const b = bots[i];
@@ -5211,7 +5609,17 @@ function updateProps(delta, now) {
 
 function updateWaves(now) {
     if (gameStartTime === 0) return;
-    if (onlineBandits()) return;        // the server runs the waves in a room
+
+    /* In a room the clock is the server's. We only read it out, so everyone is
+       looking at the same countdown to the same boss. */
+    if (onlineBandits()) {
+        if (netBoss.active && netBoss.alive && netBoss.type) {
+            ui.waveLine.innerText = 'BOSS: ' + netBoss.type.name;
+        } else if (netBoss.countdown >= 0) {
+            ui.waveLine.innerText = 'WAVE ' + wave + ' - BOSS IN ' + netBoss.countdown + 's';
+        }
+        return;
+    }
 
     // Reinforcements arrive on their own clock, independent of the boss
     if (now > nextBanditAt) {
@@ -5252,6 +5660,8 @@ function animate() {
     sendMyState(now);
     updateRemoteBodies(delta);
     updateServerBandits(delta);
+    updateNetBoss(delta);
+    updateNetHazards(delta);
     updateBanditBullets(delta);
     refreshNetDebug(now);
 

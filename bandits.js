@@ -6,8 +6,9 @@
    standing where his bandit was not. Now one simulation runs here, per room,
    and the clients only draw what it reports.
 
-   What lives here: spawning, pathing, chasing, shooting and dying.
-   What does not, yet: the boss and the wave timer.
+   What lives here: spawning, pathing, chasing, shooting and dying. The boss
+   is its own module next door, and shares this file's bullet list.
+   What does not, yet: the wave timer.
 
    Their bullets travel rather than hitting instantly, exactly as they did in
    the browser, because being able to see a shot coming and step out of its way
@@ -178,10 +179,13 @@ function round3(v) { return Math.round(v * 1000) / 1000; }
 /* Bullets move, hit the town, hit a player, or run out of road. */
 function stepBullets(room, players, dt, sink) {
     if (!room.bullets) room.bullets = [];
-    const travel = BANDIT.bulletSpeed * dt;
 
     for (let i = room.bullets.length - 1; i >= 0; i--) {
         const bl = room.bullets[i];
+        /* The boss shares this list, and its rounds are not all the same round:
+           a sniper's travels faster and costs more than a bandit's. A bullet
+           that does not say carries the bandit's numbers. */
+        const travel = (bl.spd || BANDIT.bulletSpeed) * dt;
         const nx = bl.x + bl.dx * travel;
         const ny = bl.y + bl.dy * travel;
         const nz = bl.z + bl.dz * travel;
@@ -195,7 +199,11 @@ function stepBullets(room, players, dt, sink) {
             if (p.room !== room.code || !p.alive) continue;
             const d = segmentDistance(p.x, p.y || 1.72, p.z, bl.x, bl.y, bl.z, nx, ny, nz);
             if (d < BANDIT.hitRadius) {
-                sink.hits.push({ playerId: p.id, damage: BANDIT.bulletDamage, from: bl.from });
+                sink.hits.push({
+                    playerId: p.id,
+                    damage: bl.dmg || BANDIT.bulletDamage,
+                    from: bl.from
+                });
                 struck = true;
                 break;
             }
@@ -242,7 +250,10 @@ function nearestPlayer(room, players, fromX, fromZ) {
 
 function stepBandit(room, b, players, now, dt, sink) {
     if (!b.alive) {
-        if (b.respawnAt && now >= b.respawnAt) {
+        /* Nobody comes back while a boss is on the field - the browser held
+           them back the same way, so a boss fight is a boss fight and not a
+           boss fight plus a fresh dozen. */
+        if (b.respawnAt && now >= b.respawnAt && !room.bossAlive) {
             const p = pickBanditSpawn(room, players);
             b.x = p.x; b.z = p.z;
             b.health = BANDIT.maxHealth;

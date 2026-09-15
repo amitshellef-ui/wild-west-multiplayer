@@ -4883,16 +4883,42 @@ function drawMinimap() {
         if (Math.abs(dx) > 90 || Math.abs(dz) > 90) continue;
         mm.fillRect(dx - b.w * scale / 2, dz - b.d * scale / 2, b.w * scale, b.d * scale);
     }
-    // bandits
-    for (let i = 0; i < bots.length; i++) {
-        const b = bots[i];
-        if (!b.alive) continue;
-        const dx = (b.mesh.position.x - camera.position.x) * scale;
-        const dz = (b.mesh.position.z - camera.position.z) * scale;
-        if (dx * dx + dz * dz > R * R) continue;
-        mm.fillStyle = b.isBoss ? '#ff5522' : '#e8654a';
+    // bandits - the server's when we are in a room, ours when we are not
+    function plotBandit(wx, wz, boss) {
+        const dx = (wx - camera.position.x) * scale;
+        const dz = (wz - camera.position.z) * scale;
+        if (dx * dx + dz * dz > R * R) return;
+        mm.fillStyle = boss ? '#ff5522' : '#e8654a';
         mm.beginPath();
-        mm.arc(dx, dz, b.isBoss ? 4.5 : 3, 0, 7);
+        mm.arc(dx, dz, boss ? 4.5 : 3, 0, 7);
+        mm.fill();
+    }
+    if (onlineBandits()) {
+        const sbIds = Object.keys(serverBandits);
+        for (let i = 0; i < sbIds.length; i++) {
+            const sb = serverBandits[sbIds[i]];
+            if (!sb.alive) continue;
+            plotBandit(sb.mesh.position.x, sb.mesh.position.z, false);
+        }
+    } else {
+        for (let i = 0; i < bots.length; i++) {
+            const b = bots[i];
+            if (!b.alive) continue;
+            plotBandit(b.mesh.position.x, b.mesh.position.z, b.isBoss);
+        }
+    }
+
+    // other players
+    const pIds = Object.keys(remoteBodies);
+    for (let i = 0; i < pIds.length; i++) {
+        const rb = remoteBodies[pIds[i]];
+        if (rb.alive === false) continue;
+        const dx = (rb.mesh.position.x - camera.position.x) * scale;
+        const dz = (rb.mesh.position.z - camera.position.z) * scale;
+        if (dx * dx + dz * dz > R * R) continue;
+        mm.fillStyle = '#' + rb.color.toString(16).padStart(6, '0');
+        mm.beginPath();
+        mm.arc(dx, dz, 3.5, 0, 7);
         mm.fill();
     }
     mm.restore();

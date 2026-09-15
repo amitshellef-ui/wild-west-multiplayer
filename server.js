@@ -216,6 +216,14 @@ function kill(victim, attackerId) {
 /* ---- Moving between rooms ---- */
 function placeInRoom(socket, p, code) {
     const previous = p.room;
+
+    /* Walking into an empty room should feel like starting a game, not like
+       joining someone else's siege. Bandits only ever accumulate - by the time
+       a room has been sitting for a few minutes it is at the cap, and the first
+       person through the door would have arrived to a dozen of them. So the
+       room is reset the moment it goes from nobody to somebody, exactly the
+       way the single player game resets when you press start. */
+    const roomWasEmpty = roomCount(code) === 0;
     if (previous) {
         socket.leave(previous);
         socket.to(previous).emit("player-left", { id: p.id });
@@ -223,6 +231,11 @@ function placeInRoom(socket, p, code) {
 
     p.room = code;
     socket.join(code);
+
+    if (roomWasEmpty && rooms[code]) {
+        bandits.initRoom(rooms[code]);
+        console.log("Room", code, "was empty - bandits reset to", bandits.BANDIT.startCount);
+    }
 
     // A fresh start in the new room, so nobody arrives already hurt or dead
     const s = pickSpawn();

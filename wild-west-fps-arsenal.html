@@ -163,6 +163,36 @@
     @keyframes pulse { 0%,100% { box-shadow: 0 0 0 rgba(232,182,76,0) } 50% { box-shadow: 0 0 22px rgba(232,182,76,0.4) } }
     #keys { margin-top: 30px; font-size: 12px; color: #9c8156; line-height: 2.2; font-family: 'Segoe UI', Tahoma, sans-serif; }
     #keys b { color: #e8b64c; background: rgba(0,0,0,0.4); padding: 2px 8px; border-radius: 3px; border: 1px solid #5a3a18; }
+    /* Room controls live on the menu screen, which is the only time the
+       pointer is free enough to click anything. */
+    #room-box {
+        margin-top: 26px; pointer-events: auto;
+        font-family: 'Segoe UI', Tahoma, sans-serif;
+        background: rgba(30,18,6,0.72); border: 1px solid #6b451f;
+        border-radius: 5px; padding: 14px 18px; min-width: 330px;
+    }
+    #room-line { font-size: 13px; color: #9c8156; margin-bottom: 10px; }
+    #room-line b {
+        color: #ffd77a; font-size: 19px; letter-spacing: 3px;
+        font-family: 'Rye', serif;
+    }
+    #room-actions { display: flex; gap: 7px; justify-content: center; flex-wrap: wrap; }
+    #room-box button {
+        font-family: 'Segoe UI', Tahoma, sans-serif; font-size: 12px;
+        color: #ffe1a0; background: rgba(80,48,16,0.75);
+        border: 1px solid #8b5a2b; border-radius: 3px;
+        padding: 7px 13px; cursor: pointer;
+    }
+    #room-box button:hover { background: rgba(120,72,24,0.85); }
+    #room-input {
+        font-family: 'Segoe UI', Tahoma, sans-serif; font-size: 13px;
+        width: 86px; text-align: center; text-transform: uppercase;
+        letter-spacing: 3px; color: #ffd77a; background: rgba(0,0,0,0.45);
+        border: 1px solid #6b451f; border-radius: 3px; padding: 7px 8px;
+    }
+    #room-msg { font-size: 11px; color: #c47a52; margin-top: 9px; min-height: 14px; }
+    #room-msg.ok { color: #79cc79; }
+
     #loading { position: absolute; bottom: 24px; color: #6b5330; font-size: 11px; font-family: 'Segoe UI', Tahoma, sans-serif; }
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -254,6 +284,18 @@
         <b>&#1500;&#1495;&#1497;&#1510;&#1492; &#1513;&#1502;&#1488;&#1500;&#1497;&#1514;</b> &#1497;&#1512;&#1497; &nbsp;&nbsp; <b>&#1500;&#1495;&#1497;&#1510;&#1492; &#1497;&#1502;&#1504;&#1497;&#1514;</b> &#1499;&#1493;&#1493;&#1504;&#1514; &nbsp;&nbsp; <b>R</b> &#1496;&#1506;&#1497;&#1504;&#1492;<br>
         <b>1-6</b> &#1492;&#1495;&#1500;&#1507;&#1514; &#1504;&#1513;&#1511; &nbsp;&nbsp; &#1489;&#1493;&#1505; &#1499;&#1500; 90 &#1513;&#1504;&#1497;&#1493;&#1514; = &#1504;&#1513;&#1511; &#1495;&#1491;&#1513;
     </div>
+    <div id="room-box">
+        <div id="room-line">&#1495;&#1491;&#1512;: <b id="room-code">---</b> <span id="room-mode"></span></div>
+        <div id="room-actions">
+            <button id="btn-create">&#1510;&#1493;&#1512; &#1495;&#1491;&#1512; &#1508;&#1512;&#1496;&#1497;</button>
+            <input id="room-input" maxlength="5" placeholder="&#1511;&#1493;&#1491;">
+            <button id="btn-join">&#1492;&#1510;&#1496;&#1512;&#1507;</button>
+            <button id="btn-copy">&#1492;&#1506;&#1514;&#1511; &#1511;&#1497;&#1513;&#1493;&#1512;</button>
+            <button id="btn-leave">&#1495;&#1494;&#1512;&#1492; &#1500;&#1500;&#1493;&#1489;&#1497;</button>
+        </div>
+        <div id="room-msg"></div>
+    </div>
+
     <div id="loading">Winchester + SMG + Sniper + AR + Shotgun + Deagle</div>
 </div>
 
@@ -276,6 +318,7 @@ const NET = {
        is the safe default: if the mode never arrives we would rather bullets
        pass through team mates than hurt them. */
     mode: { id: 'coop', label: 'CO-OP', friendlyFire: false },
+    room: null,
     available: (typeof io === 'function'),
     sent: 0,
     recv: 0,
@@ -487,8 +530,88 @@ function refreshPlayerStatus() {
     if (!NET.connected) return;
     const n = playerCount();
     setNetStatus('ONLINE - ' + n + (n === 1 ? ' PLAYER' : ' PLAYERS') +
-        ' - ' + NET.mode.label, 'on');
+        ' - ' + NET.mode.label + (NET.room ? ' - ' + NET.room : ''), 'on');
 }
+
+/* ---------- Room panel ---------- */
+const roomCodeEl = document.getElementById('room-code');
+const roomModeEl = document.getElementById('room-mode');
+const roomMsgEl = document.getElementById('room-msg');
+const roomInputEl = document.getElementById('room-input');
+
+function setRoomMsg(text, good) {
+    if (!roomMsgEl) return;
+    roomMsgEl.textContent = text || '';
+    roomMsgEl.className = good ? 'ok' : '';
+}
+
+function refreshRoomUI() {
+    if (roomCodeEl) roomCodeEl.textContent = NET.room || '---';
+    if (roomModeEl) roomModeEl.textContent = NET.room ? ('· ' + NET.mode.label) : '';
+    setRoomMsg('', false);
+}
+
+function shareLink() {
+    if (!NET.room || NET.room === 'PUBLIC') return location.href.split('#')[0];
+    return location.href.split('#')[0] + '#' + NET.room;
+}
+
+(function wireRoomPanel() {
+    const box = document.getElementById('room-box');
+    if (!box) return;
+    // The menu itself grabs the pointer lock on click, so the panel must not
+    // let its own clicks reach it.
+    box.addEventListener('click', function (e) { e.stopPropagation(); });
+
+    const create = document.getElementById('btn-create');
+    const join = document.getElementById('btn-join');
+    const copy = document.getElementById('btn-copy');
+    const leave = document.getElementById('btn-leave');
+
+    function needServer() {
+        if (NET.connected) return false;
+        setRoomMsg('אין חיבור לשרת', false);
+        return true;
+    }
+
+    if (create) create.addEventListener('click', function () {
+        if (needServer()) return;
+        NET.socket.emit('create-room', {});
+        setRoomMsg('יוצר חדר...', true);
+    });
+
+    if (join) join.addEventListener('click', function () {
+        if (needServer()) return;
+        const code = (roomInputEl.value || '').trim().toUpperCase();
+        if (!code) { setRoomMsg('הכנס קוד', false); return; }
+        NET.socket.emit('join-room', { code: code });
+        setRoomMsg('מצטרף ל-' + code + '...', true);
+    });
+
+    if (roomInputEl) roomInputEl.addEventListener('keydown', function (e) {
+        e.stopPropagation();
+        if (e.code === 'Enter' && join) join.click();
+    });
+
+    if (copy) copy.addEventListener('click', function () {
+        const link = shareLink();
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(link).then(function () {
+                setRoomMsg('הקישור הועתק', true);
+            }, function () {
+                setRoomMsg(link, true);
+            });
+        } else {
+            setRoomMsg(link, true);
+        }
+    });
+
+    if (leave) leave.addEventListener('click', function () {
+        if (needServer()) return;
+        NET.socket.emit('leave-room');
+        setRoomMsg('חוזר ללובי...', true);
+    });
+})();
 
 /* Join/leave notices reuse the existing kill feed. Guarded because the feed
    belongs to a later section of the script. */
@@ -499,12 +622,16 @@ function netFeed(text) {
 function initNetwork() {
     if (!NET.available) {
         setNetStatus('OFFLINE - SINGLE PLAYER', 'off');
+        setRoomMsg('משחק מקומי - אין שרת', false);
         console.warn('[NET] socket.io client not loaded (opened from disk?) - staying offline');
         return;
     }
 
     setNetStatus('CONNECTING', 'wait');
-    NET.socket = io();
+    // A shared link looks like  ...arsenal.html#K7QM  - hand the code to the
+    // server during the handshake so the friend lands straight in the room.
+    const linkCode = (location.hash || '').replace('#', '').trim().toUpperCase();
+    NET.socket = linkCode ? io({ query: { room: linkCode } }) : io();
 
     NET.socket.on('connect', function () {
         NET.connected = true;
@@ -518,11 +645,21 @@ function initNetwork() {
         });
     });
 
-    /* --- Roster (step 2). The server decides; we only mirror it. --- */
+    /* --- Identity. The roster arrives with the room, not with this. --- */
     NET.socket.on('welcome', function (data) {
         if (!data) return;
         NET.id = data.id;
+        console.log('[NET] welcome. you=' + NET.id);
+        refreshPlayerStatus();
+    });
+
+    /* --- Rooms. Joining one replaces the whole roster: anyone we were
+           tracking belongs to the room we just left. --- */
+    NET.socket.on('room-joined', function (data) {
+        if (!data) return;
+        NET.room = data.code;
         if (data.mode) NET.mode = data.mode;
+
         clearPlayers();
         (data.players || []).forEach(function (p) {
             if (p && p.id !== NET.id) {
@@ -530,8 +667,22 @@ function initNetwork() {
                 PLAYERS[p.id] = p;
             }
         });
-        console.log('[NET] welcome. you=' + NET.id + ' others=' + Object.keys(PLAYERS).length);
+        console.log('[NET] room ' + data.code + ' (' + NET.mode.label + ') others=' + Object.keys(PLAYERS).length);
+        refreshRoomUI();
         refreshPlayerStatus();
+        netFeed('ROOM ' + data.code);
+    });
+
+    NET.socket.on('room-error', function (e) {
+        const reason = (e && e.reason) || 'ERROR';
+        const text = {
+            BAD_CODE: 'קוד לא תקין',
+            NO_SUCH_ROOM: 'לא נמצא חדר עם הקוד הזה',
+            ROOM_FULL: 'החדר מלא',
+            ALREADY_HERE: 'אתה כבר בחדר הזה',
+            FULL: 'אין כרגע קודים פנויים'
+        }[reason] || reason;
+        setRoomMsg(text, false);
     });
 
     NET.socket.on('player-joined', function (p) {
@@ -634,6 +785,8 @@ function initNetwork() {
 
     NET.socket.on('disconnect', function (reason) {
         NET.connected = false;
+        NET.room = null;
+        refreshRoomUI();
         clearPlayers();
         setNetStatus('DISCONNECTED', 'off');
         console.warn('[NET] disconnected: ' + reason);

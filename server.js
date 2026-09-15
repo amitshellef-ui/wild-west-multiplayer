@@ -15,42 +15,81 @@ app.get("/", (req, res) => {
 });
 
 /* =========================================================================
-   PLAYER REGISTRY
-
-   The server is the single source of truth for who is in the game, how much
-   health they have, and when they die. A client never invents a player and
-   never decides its own death - it only reacts to these events:
-
-     welcome        -> the newcomer alone: your id + everyone present
-     player-joined  -> everyone else, when someone arrives
-     player-left    -> everyone, when someone disconnects
-     player-moved   -> everyone else, when someone moves          (step 3+4)
-     player-shot    -> everyone else, when someone fires           (step 7)
-     player-health  -> everyone, whenever a health value changes   (step 8+9)
-     player-died    -> everyone, when health reaches zero          (step 8+9)
-     player-respawn -> everyone, when a dead player comes back     (step 8+9)
-
-   A player record carries its own transform, so welcome and player-joined
-   already tell a newcomer where everybody is standing and how hurt they are.
-   ========================================================================= */
-const players = {};   // socket.id -> player record
-
-const MAX_HEALTH = 100;
-const RESPAWN_MS = 4000;
-
-/* =========================================================================
    GAME MODES
 
    Everything that differs between modes lives here, so adding one later is a
-   new entry rather than a hunt through the file. The active mode is sent to
-   every client in the welcome payload, and the client uses it to decide what
-   its bullets are allowed to collide with in the first place.
+   new entry rather than a hunt through the file. A mode belongs to a room, not
+   to the server, so two groups can play different things at the same time.
    ========================================================================= */
 const MODES = {
     coop: { id: "coop", label: "CO-OP", friendlyFire: false },
     ffa: { id: "ffa", label: "FREE FOR ALL", friendlyFire: true }
 };
-const MODE = MODES.coop;
+const DEFAULT_MODE = "coop";
+
+/* =========================================================================
+   ROOMS
+
+   Every player is always inside exactly one room, and every broadcast is
+   scoped to that room. PUBLIC is the lobby everybody lands in, so the game
+   still works for someone who just opens the link; a private room is created
+   on demand and addressed by a short code.
+
+   Codes avoid characters that get misread when spoken or typed: no O or 0,
+   no I or 1, no B or 8.
+   ========================================================================= */
+const PUBLIC_ROOM = "PUBLIC";
+const CODE_ALPHABET = "ACDEFGHJKLMNPQRSTUVWXYZ23456789";
+const CODE_LENGTH = 4;
+const ROOM_LIMIT = 8;                  // players per private room
+
+const rooms = {};                      // code -> room record
+const players = {};                    // socket.id -> player record
+
+function createRoom(code, modeId) {
+    rooms[code] = {
+        code: code,
+        mode: MODES[modeId] || MODES[DEFAULT_MODE],
+        createdAt: Date.now()
+    };
+    return rooms[code];
+}
+createRoom(PUBLIC_ROOM, DEFAULT_MODE);
+
+function makeRoomCode() {
+    for (let attempt = 0; attempt < 200; attempt++) {
+        let code = "";
+        for (let i = 0; i < CODE_LENGTH; i++) {
+            code += CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)];
+        }
+        if (!rooms[code]) return code;
+    }
+    return null;
+}
+
+function playersIn(code) {
+    return Object.keys(players)
+        .filter((id) => players[id].room === code)
+        .map((id) => players[id]);
+}
+
+function roomCount(code) {
+    let n = 0;
+    for (const id in players) if (players[id].room === code) n++;
+    return n;
+}
+
+/* A private room disappears once the last person walks out of it. */
+function dropRoomIfEmpty(code) {
+    if (code === PUBLIC_ROOM) return;
+    if (roomCount(code) === 0 && rooms[code]) {
+        delete rooms[code];
+        console.log("Room closed:", code);
+    }
+}
+
+const MAX_HEALTH = 100;
+const RESPAWN_MS = 4000;
 
 /* Verified against the map's own collision and navigation data: every one of
    these is clear of geometry, sits on a walkable navigation cell, and has a
@@ -70,10 +109,6 @@ const WEAPONS = [
     { id: "shotgun", body: 14, head: 20, pellets: 8, range: 45, fireCd: 720 },
     { id: "deagle", body: 58, head: 115, pellets: 1, range: 120, fireCd: 260 }
 ];
-
-function playerList() {
-    return Object.keys(players).map((id) => players[id]);
-}
 
 function pickSpawn() {
     return SPAWNS[Math.floor(Math.random() * SPAWNS.length)];
@@ -124,10 +159,18 @@ function readShot(m) {
     return { w: m.w | 0, o: m.o, e: m.e };
 }
 
+function readCode(v) {
+    if (typeof v !== "string") return null;
+    const code = v.trim().toUpperCase();
+    if (code.length < 3 || code.length > 8) return null;
+    if (!/^[A-Z0-9]+$/.test(code)) return null;
+    return code;
+}
+
 /* ---- Health ---- */
 function setHealth(p, value, attackerId, headshot) {
     p.health = Math.max(0, Math.min(MAX_HEALTH, value));
-    io.emit("player-health", {
+    io.to(p.room).emit("player-health", {
         id: p.id,
         health: p.health,
         by: attackerId || null,
@@ -142,12 +185,13 @@ function kill(victim, attackerId) {
     const killer = attackerId ? players[attackerId] : null;
     if (killer && killer.id !== victim.id) killer.kills++;
 
-    io.emit("player-died", {
+    io.to(victim.room).emit("player-died", {
         id: victim.id,
         by: killer ? killer.id : null,
         respawnIn: RESPAWN_MS
     });
-    console.log("Kill:", (killer ? killer.id.slice(0, 6) : "bots/world"), "->", victim.id.slice(0, 6));
+    console.log("Kill:", (killer ? killer.id.slice(0, 6) : "bots/world"),
+        "->", victim.id.slice(0, 6), "in", victim.room);
 
     setTimeout(() => {
         const p = players[victim.id];
@@ -158,10 +202,39 @@ function kill(victim, attackerId) {
         p.pitch = 0;
         p.health = MAX_HEALTH;
         p.alive = true;
-        io.emit("player-respawn", {
+        io.to(p.room).emit("player-respawn", {
             id: p.id, x: p.x, y: p.y, z: p.z, yaw: p.yaw, health: p.health
         });
     }, RESPAWN_MS);
+}
+
+/* ---- Moving between rooms ---- */
+function placeInRoom(socket, p, code) {
+    const previous = p.room;
+    if (previous) {
+        socket.leave(previous);
+        socket.to(previous).emit("player-left", { id: p.id });
+    }
+
+    p.room = code;
+    socket.join(code);
+
+    // A fresh start in the new room, so nobody arrives already hurt or dead
+    const s = pickSpawn();
+    p.x = s[0]; p.y = 1.72; p.z = s[1];
+    p.yaw = 0; p.pitch = 0;
+    p.health = MAX_HEALTH;
+    p.alive = true;
+
+    socket.emit("room-joined", {
+        code: code,
+        mode: rooms[code].mode,
+        players: playersIn(code)
+    });
+    socket.to(code).emit("player-joined", p);
+
+    if (previous) dropRoomIfEmpty(previous);
+    console.log("Player", p.id.slice(0, 6), "->", code, "(" + roomCount(code) + " inside)");
 }
 
 io.on("connection", (socket) => {
@@ -171,6 +244,7 @@ io.on("connection", (socket) => {
     players[socket.id] = {
         id: socket.id,
         joinedAt: Date.now(),
+        room: null,
         x: spawn[0], y: 1.72, z: spawn[1],
         yaw: 0, pitch: 0,
         movedAt: Date.now(),
@@ -179,23 +253,73 @@ io.on("connection", (socket) => {
         kills: 0,
         deaths: 0,
         lastHitAt: 0,
-        lastDeltaAt: 0
+        lastDeltaAt: 0,
+        lastRoomAt: 0
     };
+    const me = players[socket.id];
 
-    socket.emit("welcome", { id: socket.id, mode: MODE, players: playerList() });
-    socket.broadcast.emit("player-joined", players[socket.id]);
-    console.log("Players online:", Object.keys(players).length);
+    /* A shared link carries its room code in the connection query, so a friend
+       who clicks it lands straight inside instead of in the lobby. */
+    const wanted = readCode(socket.handshake.query && socket.handshake.query.room);
+    const startRoom = (wanted && rooms[wanted]) ? wanted : PUBLIC_ROOM;
+
+    socket.emit("welcome", { id: socket.id });
+    placeInRoom(socket, me, startRoom);
+
+    /* ---- Room controls ---- */
+    socket.on("create-room", (m) => {
+        const p = players[socket.id];
+        if (!p) return;
+        const now = Date.now();
+        if (now - p.lastRoomAt < 1000) return;      // no hammering
+        p.lastRoomAt = now;
+
+        const code = makeRoomCode();
+        if (!code) { socket.emit("room-error", { reason: "FULL" }); return; }
+
+        const modeId = (m && typeof m.mode === "string" && MODES[m.mode]) ? m.mode : DEFAULT_MODE;
+        createRoom(code, modeId);
+        console.log("Room created:", code, rooms[code].mode.label);
+        placeInRoom(socket, p, code);
+    });
+
+    socket.on("join-room", (m) => {
+        const p = players[socket.id];
+        if (!p) return;
+        const now = Date.now();
+        if (now - p.lastRoomAt < 1000) return;
+        p.lastRoomAt = now;
+
+        const code = readCode(m && m.code);
+        if (!code) { socket.emit("room-error", { reason: "BAD_CODE" }); return; }
+        if (!rooms[code]) { socket.emit("room-error", { reason: "NO_SUCH_ROOM", code: code }); return; }
+        if (code === p.room) { socket.emit("room-error", { reason: "ALREADY_HERE", code: code }); return; }
+        if (code !== PUBLIC_ROOM && roomCount(code) >= ROOM_LIMIT) {
+            socket.emit("room-error", { reason: "ROOM_FULL", code: code });
+            return;
+        }
+        placeInRoom(socket, p, code);
+    });
+
+    socket.on("leave-room", () => {
+        const p = players[socket.id];
+        if (!p || p.room === PUBLIC_ROOM) return;
+        const now = Date.now();
+        if (now - p.lastRoomAt < 1000) return;
+        p.lastRoomAt = now;
+        placeInRoom(socket, p, PUBLIC_ROOM);
+    });
 
     /* ---- Position + rotation relay (steps 3 and 4) ---- */
     socket.on("move", (m) => {
         const p = players[socket.id];
-        if (!p) return;
+        if (!p || !p.room) return;
         const move = readMove(m);
         if (!move) return;
         p.x = move.x; p.y = move.y; p.z = move.z;
         p.yaw = move.yaw; p.pitch = move.pitch;
         p.movedAt = Date.now();
-        socket.broadcast.emit("player-moved", {
+        socket.to(p.room).emit("player-moved", {
             id: socket.id,
             x: move.x, y: move.y, z: move.z,
             yaw: move.yaw, pitch: move.pitch
@@ -204,10 +328,11 @@ io.on("connection", (socket) => {
 
     /* ---- Shot relay (step 7): muzzle flash, tracers and sound only ---- */
     socket.on("shoot", (m) => {
-        if (!players[socket.id]) return;
+        const p = players[socket.id];
+        if (!p || !p.room) return;
         const shot = readShot(m);
         if (!shot) return;
-        socket.broadcast.emit("player-shot", {
+        socket.to(p.room).emit("player-shot", {
             id: socket.id, w: shot.w, o: shot.o, e: shot.e
         });
     });
@@ -217,35 +342,31 @@ io.on("connection", (socket) => {
 
        The client says who it hit and with how many pellets; the server owns
        what that costs. Checked before anything is applied:
-         - shooter and victim both exist and are alive
-         - one damage report per weapon cooldown (a burst cannot be replayed)
-         - pellet count fits the weapon
+         - the room's mode allows players to hurt each other at all
+         - shooter and victim are in the same room and both alive
+         - one damage report per weapon cooldown
+         - the pellet count fits the weapon
          - the victim is inside the weapon's range
 
        Line of sight is deliberately not checked: doing it honestly needs the
-       map geometry on the server, which arrives with step 11. Until then a
-       determined cheater can still claim a hit through a wall - but not an
-       impossible weapon, an impossible rate, or an impossible distance.
+       map geometry on the server, which arrives with the shared bots.
        ===================================================================== */
     socket.on("hit", (m) => {
-        // In a co-operative mode players cannot hurt each other at all. Enforced
-        // here and not only on the client, so a modified client cannot shoot its
-        // team mates either.
-        if (!MODE.friendlyFire) return;
-
         const shooter = players[socket.id];
-        if (!shooter || !shooter.alive) return;
-        if (!m || typeof m !== "object") return;
+        if (!shooter || !shooter.alive || !shooter.room) return;
 
+        const room = rooms[shooter.room];
+        if (!room || !room.mode.friendlyFire) return;   // co-operative: nothing to do
+
+        if (!m || typeof m !== "object") return;
         if (typeof m.w !== "number" || (m.w | 0) !== m.w || m.w < 0 || m.w >= WEAPONS.length) return;
         const w = WEAPONS[m.w];
 
         const now = Date.now();
-        if (now - shooter.lastHitAt < w.fireCd * 0.7) return;   // rate limit, with jitter slack
+        if (now - shooter.lastHitAt < w.fireCd * 0.7) return;
 
         if (!Array.isArray(m.targets) || m.targets.length === 0 || m.targets.length > 8) return;
 
-        // First pass: validate everything and total the pellets
         const accepted = [];
         let pellets = 0;
         for (let i = 0; i < m.targets.length; i++) {
@@ -253,10 +374,11 @@ io.on("connection", (socket) => {
             if (!t || typeof t.id !== "string") continue;
             const victim = players[t.id];
             if (!victim || !victim.alive || victim.id === shooter.id) continue;
+            if (victim.room !== shooter.room) continue;       // no shooting across rooms
 
             const body = strictCount(t.body, w.pellets);
             const head = strictCount(t.head, w.pellets);
-            if (body < 0 || head < 0) return;        // impossible claim: drop the packet
+            if (body < 0 || head < 0) return;
             if (body + head <= 0) continue;
 
             if (distanceBetween(shooter, victim) > w.range * 1.15 + 3) continue;
@@ -264,34 +386,24 @@ io.on("connection", (socket) => {
             pellets += body + head;
             accepted.push({ victim: victim, body: body, head: head });
         }
-        // One trigger pull can never land more pellets than the weapon fires.
-        // The winchester's boss reward throws two extra rays; they simply do not
-        // count against players, which is cheaper than trusting a client to say
-        // whether it has earned the reward.
         if (accepted.length === 0 || pellets > w.pellets) return;
 
         shooter.lastHitAt = now;
-
-        // Second pass: apply
         for (let i = 0; i < accepted.length; i++) {
             const a = accepted[i];
-            const damage = a.body * w.body + a.head * w.head;
-            setHealth(a.victim, a.victim.health - damage, shooter.id, a.head > 0);
+            setHealth(a.victim, a.victim.health - (a.body * w.body + a.head * w.head),
+                shooter.id, a.head > 0);
         }
     });
 
     /* =====================================================================
        LOCAL DAMAGE AND HEALING (step 9)
 
-       Bandits, the boss and out-of-combat regeneration all still run on the
-       client, so the server cannot see them. The client batches the net change
-       and reports it, which keeps the authoritative health value honest enough
-       for player-versus-player to work.
-
-       This part is trusted, and it is the one hole left: a modified client
-       could under-report bandit damage. It closes in step 11, when the bots
-       themselves move to the server. The caps below at least stop the absurd
-       cases - no instant full heal, no more than a few reports a second.
+       Bandits, the boss and out-of-combat regeneration still run on the client,
+       so the server cannot see them. The client batches the net change and
+       reports it, which keeps the authoritative health value honest enough for
+       player-versus-player to work. This is the one trusted path left, and it
+       closes when the bots themselves move to the server.
        ===================================================================== */
     socket.on("health-delta", (m) => {
         const p = players[socket.id];
@@ -299,7 +411,7 @@ io.on("connection", (socket) => {
         if (!m || typeof m.d !== "number" || !Number.isFinite(m.d)) return;
 
         const now = Date.now();
-        if (now - p.lastDeltaAt < 200) return;      // at most 5 a second
+        if (now - p.lastDeltaAt < 200) return;
         p.lastDeltaAt = now;
 
         const d = Math.max(-MAX_HEALTH, Math.min(20, m.d));
@@ -308,16 +420,20 @@ io.on("connection", (socket) => {
     });
 
     socket.on("disconnect", () => {
+        const p = players[socket.id];
+        const room = p ? p.room : null;
         console.log("Player disconnected:", socket.id);
         delete players[socket.id];
-        io.emit("player-left", { id: socket.id });
-        console.log("Players online:", Object.keys(players).length);
+        if (room) {
+            io.to(room).emit("player-left", { id: socket.id });
+            dropRoomIfEmpty(room);
+        }
     });
 });
 
 const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on port ${PORT}`);
-    console.log("Game mode:", MODE.label, "| friendly fire:", MODE.friendlyFire);
+    console.log("Server running on port " + PORT);
+    console.log("Rooms enabled. Lobby:", PUBLIC_ROOM, "| default mode:", MODES[DEFAULT_MODE].label);
 });

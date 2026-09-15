@@ -407,7 +407,10 @@ function initNetwork() {
         NET.id = data.id;
         clearPlayers();
         (data.players || []).forEach(function (p) {
-            if (p && p.id !== NET.id) PLAYERS[p.id] = p;
+            if (p && p.id !== NET.id) {
+                p.buf = [{ t: performance.now(), x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch }];
+                PLAYERS[p.id] = p;
+            }
         });
         console.log('[NET] welcome. you=' + NET.id + ' others=' + Object.keys(PLAYERS).length);
         refreshPlayerStatus();
@@ -415,6 +418,7 @@ function initNetwork() {
 
     NET.socket.on('player-joined', function (p) {
         if (!p || !p.id || p.id === NET.id) return;
+        p.buf = [{ t: performance.now(), x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch }];
         PLAYERS[p.id] = p;
         console.log('[NET] player joined: ' + p.id + ' (total ' + playerCount() + ')');
         netFeed('PLAYER JOINED - ' + p.id.slice(0, 6));
@@ -429,6 +433,9 @@ function initNetwork() {
         p.x = m.x; p.y = m.y; p.z = m.z;
         p.yaw = m.yaw; p.pitch = m.pitch;
         p.lastUpdate = performance.now();
+        if (!p.buf) p.buf = [];
+        p.buf.push({ t: p.lastUpdate, x: m.x, y: m.y, z: m.z, yaw: m.yaw, pitch: m.pitch });
+        if (p.buf.length > BUFFER_MAX) p.buf.shift();
         NET.recv++;
     });
 
@@ -2425,7 +2432,11 @@ function createRemoteBody(id) {
     const plate = makeNamePlate(id.slice(0, 6), color);
     rig.mesh.add(plate);
 
-    const body = { id: id, rig: rig, mesh: rig.mesh, plate: plate, color: color };
+    const body = {
+        id: id, rig: rig, mesh: rig.mesh, plate: plate, color: color,
+        walkPhase: Math.random() * 6.28, speed: 0,
+        prevPos: new THREE.Vector3(), hasPrev: false
+    };
     remoteBodies[id] = body;
     console.log('[NET] body created for ' + id.slice(0, 6));
     return body;
@@ -2450,25 +2461,126 @@ function destroyRemoteBody(id) {
     console.log('[NET] body removed for ' + id.slice(0, 6));
 }
 
-/* Straight placement from the last packet - deliberately not smoothed yet, so
-   the raw update rate is visible. Interpolation and the walk cycle are step 6. */
-function applyRemoteTransform(p, body) {
-    if (p.x === undefined) return;
-    // p.y is the remote camera height, so drop by eye height to put feet down
-    body.mesh.position.set(p.x, p.y - EYE_HEIGHT, p.z);
-    // The rig faces +Z; the player's forward is -Z rotated by yaw
-    body.mesh.rotation.y = p.yaw + Math.PI;
-    const head = body.rig.parts.head;
-    if (head) head.rotation.x = THREE.MathUtils.clamp(-p.pitch, -0.7, 0.7);
+/* =========================================================================
+   SMOOTHING (multiplayer, step 6)
+
+   Packets land 20 times a second; the screen draws 60. Rather than snapping to
+   the newest packet, every remote body is drawn slightly in the past - far
+   enough back that there is almost always a packet on either side of the
+   moment being drawn, so the body moves along a real path instead of jumping.
+
+   The cost is INTERP_DELAY milliseconds of lag on top of the network latency.
+   110ms is roughly two packet intervals: enough to survive one dropped packet,
+   small enough that aiming still feels honest.
+   ========================================================================= */
+const INTERP_DELAY = 110;
+const BUFFER_MAX = 14;
+
+function shortestAngle(from, to) {
+    let d = (to - from) % (Math.PI * 2);
+    if (d > Math.PI) d -= Math.PI * 2;
+    if (d < -Math.PI) d += Math.PI * 2;
+    return d;
 }
 
-function updateRemoteBodies() {
+/* Find where a player was at time t, between the two packets that bracket it. */
+function sampleAt(buf, t) {
+    if (!buf || buf.length === 0) return null;
+    if (buf.length === 1 || t <= buf[0].t) return buf[0];
+    const last = buf[buf.length - 1];
+    if (t >= last.t) return last;                 // starved: hold, never guess
+    for (let i = buf.length - 2; i >= 0; i--) {
+        const a = buf[i], b = buf[i + 1];
+        if (t >= a.t && t <= b.t) {
+            const span = b.t - a.t;
+            const f = span > 0 ? (t - a.t) / span : 0;
+            return {
+                x: a.x + (b.x - a.x) * f,
+                y: a.y + (b.y - a.y) * f,
+                z: a.z + (b.z - a.z) * f,
+                yaw: a.yaw + shortestAngle(a.yaw, b.yaw) * f,
+                pitch: a.pitch + (b.pitch - a.pitch) * f
+            };
+        }
+    }
+    return last;
+}
+
+/* The same walk cycle the bandits use, driven by measured speed instead of by
+   an AI state, so a remote player's legs match how fast they are actually going. */
+function animateRemoteBody(body, delta) {
+    const P = body.rig.parts;
+    const speed = body.speed;
+    const running = speed > 6.2;
+    const moving = speed > 0.35;
+
+    if (moving) {
+        const rate = running ? 8.2 : 5.6;
+        const prev = Math.sin(body.walkPhase);
+        body.walkPhase += rate * delta;
+        const sw = Math.sin(body.walkPhase);
+        if (prev > 0 && sw <= 0 || prev < 0 && sw >= 0) sfxStep(body.mesh.position, running);
+
+        const amp = running ? 0.72 : 0.45;
+        P.legL.rotation.x = sw * amp;
+        P.legR.rotation.x = -sw * amp;
+        P.legL.userData.shin.rotation.x = Math.max(0, -Math.cos(body.walkPhase)) * 0.75;
+        P.legR.userData.shin.rotation.x = Math.max(0, Math.cos(body.walkPhase)) * 0.75;
+        P.bob.position.y = Math.abs(sw) * 0.075;
+        P.bob.rotation.z = sw * 0.035;
+        P.torso.rotation.y = sw * 0.1;
+        P.armL.rotation.x = -sw * amp * 0.8;
+        P.armL.rotation.z = 0.12;
+        P.armR.rotation.x = sw * amp * 0.45 - 0.2;   // the gun hand swings less
+        P.armR.rotation.z = -0.14;
+    } else {
+        body.walkPhase += delta * 1.6;
+        const br = Math.sin(body.walkPhase) * 0.5 + 0.5;
+        P.legL.rotation.x *= 0.85; P.legR.rotation.x *= 0.85;
+        P.legL.userData.shin.rotation.x *= 0.85;
+        P.legR.userData.shin.rotation.x *= 0.85;
+        P.bob.position.y = br * 0.018;
+        P.bob.rotation.z *= 0.85;
+        P.torso.rotation.y *= 0.85;
+        P.armL.rotation.x = -0.05 - br * 0.05;
+        P.armL.rotation.z = 0.12;
+        P.armR.rotation.x += (-0.2 - P.armR.rotation.x) * 0.15;
+        P.armR.rotation.z = -0.14;
+    }
+}
+
+function applyRemoteTransform(p, body, delta) {
+    const shown = sampleAt(p.buf, performance.now() - INTERP_DELAY);
+    if (!shown) return;
+
+    const m = body.mesh;
+    m.position.set(shown.x, shown.y - EYE_HEIGHT, shown.z);
+    // The rig faces +Z; the player's forward is -Z rotated by yaw
+    m.rotation.y = shown.yaw + Math.PI;
+    const head = body.rig.parts.head;
+    if (head) head.rotation.x = THREE.MathUtils.clamp(-shown.pitch, -0.7, 0.7);
+
+    // Speed is measured from what was actually drawn, so a late packet slows the
+    // legs down instead of making them skate.
+    let inst = 0;
+    if (delta > 0 && body.hasPrev) {
+        inst = Math.hypot(m.position.x - body.prevPos.x, m.position.z - body.prevPos.z) / delta;
+    }
+    body.prevPos.copy(m.position);
+    body.hasPrev = true;
+    body.speed += (inst - body.speed) * Math.min(1, 12 * delta);
+
+    animateRemoteBody(body, delta);
+}
+
+function updateRemoteBodies(delta) {
+    const d = delta || 0.016;
     const ids = Object.keys(PLAYERS);
     for (let i = 0; i < ids.length; i++) {
         const id = ids[i];
         let body = remoteBodies[id];
         if (!body) body = createRemoteBody(id);
-        applyRemoteTransform(PLAYERS[id], body);
+        applyRemoteTransform(PLAYERS[id], body, d);
     }
     // Anything with a body but no roster entry has left
     const live = Object.keys(remoteBodies);
@@ -3500,6 +3612,13 @@ let deadEye = false;
 let lastShotTime = 0, lastDamageTime = 0;
 let FIRE_CD = 430;
 let gameStartTime = 0, wave = 1, nextWaveAt = 0;
+/* A bandit joins the fight every 15 seconds whether or not a boss is up.
+   The cap keeps the AI affordable: every bandit runs its own A* and its own
+   line-of-sight raycasts, so an uncapped timer would grind the frame rate
+   down after a few minutes. */
+const BANDIT_SPAWN_MS = 15000;
+const MAX_BANDITS = 12;
+let nextBanditAt = 0;
 let bossActive = false, bossDefeated = false, bossObj = null;
 let nextBossAt = 0, bossIndex = 0;
 let yaw = 0, pitch = 0;
@@ -3642,10 +3761,11 @@ function resetGame() {
     bossHazards.length = 0;
     camera.position.set(0, EYE_HEIGHT, 3);
     yaw = 0; pitch = 0; velY = 0;
-    createBandit(false); createBandit(false);
+    createBandit(false); createBandit(false); createBandit(false);
     gameStartTime = performance.now();
     nextWaveAt = gameStartTime + 45000;
     nextBossAt = gameStartTime + 90000;
+    nextBanditAt = gameStartTime + BANDIT_SPAWN_MS;
     updateHealthUI(); updateSprintUI(); updateAmmoUI(); updateBoard(); updateLoadoutUI();
     ui.cta.innerText = 'לחץ כדי לשלוף';
 }
@@ -4238,6 +4358,12 @@ function updateProps(delta, now) {
 function updateWaves(now) {
     if (gameStartTime === 0) return;
 
+    // Reinforcements arrive on their own clock, independent of the boss
+    if (now > nextBanditAt) {
+        nextBanditAt = now + BANDIT_SPAWN_MS;
+        if (bots.length < MAX_BANDITS) createBandit(false);
+    }
+
     if (!bossActive && now >= nextBossAt) {
         spawnBoss();
         nextBossAt = now + 90000;
@@ -4247,8 +4373,7 @@ function updateWaves(now) {
         wave++;
         let aliveCount = 0;
         for (let i = 0; i < bots.length; i++) if (bots[i].alive) aliveCount++;
-        if (bots.length < 8) createBandit(false);
-        pushFeed('WAVE ' + wave + ' - more bandits');
+        pushFeed('WAVE ' + wave + ' - ammo drop');
         ui.waveLine.innerText = 'WAVE ' + wave;
         wpnAmmo[currentWpn].reserve = reserve = reserve + 16;
         updateAmmoUI();
@@ -4270,7 +4395,7 @@ function animate() {
     updateProps(delta, now);
     updateCaveLighting(delta);
     sendMyState(now);
-    updateRemoteBodies();
+    updateRemoteBodies(delta);
     refreshNetDebug(now);
 
     if (isLocked && playerHealth > 0) {

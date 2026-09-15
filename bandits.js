@@ -20,6 +20,7 @@
    game always felt, just from one authority instead of several.
    ========================================================================= */
 const nav = require("./navigation");
+const waves = require("./waves");
 
 const BANDIT = {
     maxHealth: 100,
@@ -33,7 +34,8 @@ const BANDIT = {
     respawnMs: 2600,
     startCount: 3,
     spawnEveryMs: 15000,
-    maxAlive: 12,
+    /* How many may be alive at once is not a constant any more - it is what the
+       room's current wave allows. See waves.js. */
 
     /* Shooting - the same numbers the browser used */
     fireDelay: 1750,
@@ -105,6 +107,7 @@ function spawnBandit(room, players) {
         lastZ: p.z,
         moving: false,
         strafeAt: 0,
+        wedgedFor: 0,
         strafeDir: Math.random() > 0.5 ? 1 : -1,
         lastShot: Date.now() + Math.random() * 1200
     };
@@ -352,12 +355,21 @@ function stepBandit(room, b, players, now, dt, sink) {
     /* --- stuck recovery: same idea as the browser had --- */
     if (now >= b.stuckCheckAt) {
         b.stuckCheckAt = now + 800;
+        /* The same two-stage recovery the boss uses, and it matters more than it
+           used to: a bandit wedged in a wall is not just an odd sight, it is
+           holding one of the slots the wave allows, so the room is quietly
+           easier than the wave says it is. */
         if (moved && Math.hypot(b.x - b.lastX, b.z - b.lastZ) < 0.22) {
-            const spot = nav.randomNavPoint();
+            b.wedgedFor = (b.wedgedFor || 0) + 800;
             b.path = null;
             b.repathAt = 0;
-            // a short hop rather than a teleport across the map
-            if (Math.hypot(spot.x - b.x, spot.z - b.z) < 6) { b.x = spot.x; b.z = spot.z; }
+            if (b.wedgedFor >= 1600) {
+                const spot = nav.freeSpotNear(b.x, b.z, 2, 12, BANDIT.radius);
+                if (spot) { b.x = spot.x; b.z = spot.z; }
+                b.wedgedFor = 0;
+            }
+        } else {
+            b.wedgedFor = 0;
         }
         b.lastX = b.x; b.lastZ = b.z;
     }
@@ -394,7 +406,7 @@ function stepRoom(room, players, now, dt, sink) {
 
     if (now >= room.nextSpawnAt) {
         room.nextSpawnAt = now + BANDIT.spawnEveryMs;
-        if (Object.keys(room.bandits).length < BANDIT.maxAlive) spawnBandit(room, players);
+        if (Object.keys(room.bandits).length < waves.capFor(room)) spawnBandit(room, players);
     }
 
     for (const id in room.bandits) stepBandit(room, room.bandits[id], players, now, dt, sink);
@@ -420,6 +432,22 @@ function snapshot(room) {
     return out;
 }
 
+/* A wave turning over does not wait fifteen seconds to be felt: the room is
+   brought up to its new allowance there and then. Capped per call so a bug in
+   the wave counter cannot empty the spawn table into one tick. */
+function fillTo(room, players, cap, limit) {
+    const room_cap = typeof cap === "number" ? cap : waves.capFor(room);
+    /* Six covers the biggest honest jump - a room still on its opening three
+       when the first wave turns over and asks for eight. */
+    const most = limit || 6;
+    let added = 0;
+    while (Object.keys(room.bandits).length < room_cap && added < most) {
+        spawnBandit(room, players);
+        added++;
+    }
+    return added;
+}
+
 function hurt(room, banditId, amount) {
     const b = room.bandits && room.bandits[banditId];
     if (!b || !b.alive) return null;
@@ -436,4 +464,6 @@ function hurt(room, banditId, amount) {
     return { killed: false, bandit: b };
 }
 
-module.exports = { BANDIT, TICK_MS, initRoom, stepRoom, snapshot, hurt, aliveCount, banditList };
+module.exports = {
+    BANDIT, TICK_MS, initRoom, stepRoom, snapshot, hurt, aliveCount, banditList, fillTo
+};

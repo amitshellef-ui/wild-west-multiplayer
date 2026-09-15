@@ -7,6 +7,7 @@ const mapData = require("./map-data");
 const nav = require("./navigation");
 const bandits = require("./bandits");
 const boss = require("./boss");
+const waves = require("./waves");
 
 const app = express();
 const server = http.createServer(app);
@@ -59,6 +60,7 @@ function createRoom(code, modeId) {
     };
     bandits.initRoom(rooms[code]);
     boss.initRoom(rooms[code]);
+    waves.initRoom(rooms[code]);
     return rooms[code];
 }
 createRoom(PUBLIC_ROOM, DEFAULT_MODE);
@@ -256,7 +258,9 @@ function placeInRoom(socket, p, code) {
     if (roomWasEmpty && rooms[code]) {
         bandits.initRoom(rooms[code]);
         boss.initRoom(rooms[code]);
-        console.log("Room", code, "was empty - bandits reset to", bandits.BANDIT.startCount,
+        waves.initRoom(rooms[code]);
+        console.log("Room", code, "was empty - back to wave 1:", bandits.BANDIT.startCount,
+            "bandits, up to", waves.capFor(rooms[code]),
             "| boss in", (boss.BOSS.firstBossMs / 1000) + "s");
     }
 
@@ -270,7 +274,9 @@ function placeInRoom(socket, p, code) {
     socket.emit("room-joined", {
         code: code,
         mode: rooms[code].mode,
-        players: playersIn(code)
+        players: playersIn(code),
+        wave: rooms[code].wave || 1,
+        cap: waves.capFor(rooms[code])
     });
     socket.to(code).emit("player-joined", p);
 
@@ -531,6 +537,11 @@ io.on("connection", (socket) => {
         const res = boss.hurt(room, body * w.body + head * w.head, now);
         if (res && res.killed) {
             shooter.kills++;
+            /* Winning is worth a wave. The browser did this too - it is the
+               reason the number moves at all when a fight runs long. */
+            const up = waves.advance(room, players, now, "boss");
+            bandits.fillTo(room, players, up.cap);
+            io.to(room.code).emit("wave", up);
             io.to(room.code).emit("boss-died", {
                 by: shooter.id, t: typeIndex,
                 x: Math.round(res.boss.x * 100) / 100,
@@ -603,6 +614,16 @@ setInterval(() => {
         const sink = boss.emptySink();
         bandits.stepRoom(room, players, now, dt, sink);
         boss.stepRoom(room, players, now, dt, sink);
+        waves.stepRoom(room, players, now, sink);
+
+        /* The wave turned over: everyone is told once, and the room is brought
+           up to the strength its new wave allows. */
+        if (sink.wave) {
+            bandits.fillTo(room, players, sink.wave.cap);
+            io.to(code).emit("wave", sink.wave);
+            console.log("Room", code, "-> wave", sink.wave.n, "(up to",
+                sink.wave.cap, "bandits)");
+        }
 
         /* A bandit fired: everyone in the room needs to see the muzzle flash
            and the bullet leave. They draw it from this event - the server keeps
@@ -656,6 +677,16 @@ setInterval(() => {
             } else if ((tick % 20) === 0) {
                 io.to(code).emit("boss", { in: boss.secondsToBoss(room, now) });
             }
+
+            /* Once a second, so somebody who joined mid-wave is looking at the
+               same number as everybody else rather than counting on their own. */
+            if ((tick % 20) === 0) {
+                io.to(code).emit("wave", {
+                    n: room.wave || 1,
+                    cap: waves.capFor(room),
+                    in: waves.secondsToWave(room, now)
+                });
+            }
         }
     }
 }, bandits.TICK_MS);
@@ -668,7 +699,9 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log("Map loaded:", mapData.FINGERPRINT, "|", mapData.COLLIDERS.length, "colliders |",
         nav.blockedCount(), "blocked navigation cells");
     console.log("Bandits simulated here:", bandits.BANDIT.startCount, "to start, one more every",
-        (bandits.BANDIT.spawnEveryMs / 1000) + "s, up to", bandits.BANDIT.maxAlive);
+        (bandits.BANDIT.spawnEveryMs / 1000) + "s");
+    console.log("Waves:", (waves.WAVE.everyMs / 1000) + "s each,", waves.WAVE.startCap,
+        "bandits in wave 1, +" + waves.WAVE.perWave, "a wave, up to", waves.WAVE.maxCap);
     console.log("Boss simulated here:", boss.BOSS_TYPES.length, "of them, one every",
         (boss.BOSS.firstBossMs / 1000) + "s");
 });

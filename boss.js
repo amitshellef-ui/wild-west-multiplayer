@@ -151,6 +151,7 @@ function spawnBoss(room, players, now) {
         stuckCheckAt: 0,
         lastX: p.x, lastZ: p.z,
         strafeAt: 0,
+        wedgedFor: 0,
         strafeDir: Math.random() > 0.5 ? 1 : -1,
         lastShot: now + 900,        // a breath before the first round
         abilityAt: now + 2000,
@@ -447,17 +448,32 @@ function stepBoss(room, b, players, now, dt, sink) {
         moved = true;
     }
 
-    /* --- stuck recovery --- */
+    /* --- stuck recovery ---
+       Two different kinds of stuck. Shuffling on the spot is the common one and
+       a short hop fixes it. Not moving *at all* while trying to is the rare one
+       - wedged in a pocket the body does not fit through - and a hop does not
+       fix that, because there is nowhere within six metres to hop to.
+
+       The browser never had to care: a wedged boss was one player's bad round.
+       Here it is the whole room's: while it stands there nothing kills it, so
+       no wave turns over and no next boss ever arrives. So it gets moved. */
     if (now >= b.stuckCheckAt) {
         b.stuckCheckAt = now + 800;
+        /* `moved` only means it tried. Going nowhere for two checks running is
+           a body that does not fit where the path wants it to go: the first
+           check throws the route away and asks for a new one, and if that does
+           not help either, it is lifted to the nearest ground it fits on. */
         if (moved && Math.hypot(b.x - b.lastX, b.z - b.lastZ) < 0.22) {
-            const spot = nav.randomNavPoint();
+            b.wedgedFor += 800;
             b.path = null;
             b.repathAt = 0;
-            if (Math.hypot(spot.x - b.x, spot.z - b.z) < 6 &&
-                !nav.collidesAt(spot.x, spot.z, BOSS.radius)) {
-                b.x = spot.x; b.z = spot.z;
+            if (b.wedgedFor >= 1600) {
+                const spot = nav.freeSpotNear(b.x, b.z, 2, 14, BOSS.radius);
+                if (spot) { b.x = spot.x; b.z = spot.z; }
+                b.wedgedFor = 0;
             }
+        } else {
+            b.wedgedFor = 0;
         }
         b.lastX = b.x; b.lastZ = b.z;
     }
@@ -513,7 +529,8 @@ function stepRoom(room, players, now, dt, sink) {
 function emptySink() {
     return {
         shots: [], hits: [], bossShots: [], hazards: [],
-        booms: [], slams: [], blinks: [], roars: [], bossSpawn: null, bossDied: null
+        booms: [], slams: [], blinks: [], roars: [],
+        bossSpawn: null, bossDied: null, wave: null
     };
 }
 

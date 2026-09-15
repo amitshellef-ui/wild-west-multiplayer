@@ -228,6 +228,35 @@ function randomNavPoint() {
     return { x: 0, z: 0 };
 }
 
+/* The nearest place a body of this size can stand that is NOT where it is
+   standing now. Rings outward on the grid, so something wedged inside a
+   building comes out by the shortest way available.
+
+   This exists because the recovery both bots used was to pick a random point
+   on the map and take it only if it happened to land within six metres. From
+   the middle of a building that is a one-in-five-hundred draw, so in practice
+   anything that got properly wedged stayed wedged. */
+function freeSpotNear(x, z, minCells, maxCells, radius) {
+    const cx = toCellX(x), cz = toCellZ(z);
+    const r0 = minCells || 2, r1 = maxCells || 12;
+    const rad = radius === undefined ? 0.55 : radius;
+    for (let r = r0; r <= r1; r++) {
+        const found = [];
+        for (let dx = -r; dx <= r; dx++) {
+            for (let dz = -r; dz <= r; dz++) {
+                if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+                if (isBlocked(cx + dx, cz + dz)) continue;
+                const fx = cellCenterX(cx + dx), fz = cellCenterZ(cz + dz);
+                if (collidesAt(fx, fz, rad)) continue;
+                found.push({ x: fx, z: fz });
+            }
+        }
+        // a ring, not a fixed corner, so a crowd does not all pop to one place
+        if (found.length) return found[Math.floor(Math.random() * found.length)];
+    }
+    return null;
+}
+
 function blockedCount() {
     let n = 0;
     for (let i = 0; i < blocked.length; i++) n += blocked[i];
@@ -237,5 +266,5 @@ function blockedCount() {
 module.exports = {
     collidesAt, isBlocked, toCellX, toCellZ,
     cellCenterX, cellCenterZ, nearestFree,
-    findPath, lineClear, losClear, randomNavPoint, blockedCount, NAV
+    findPath, lineClear, losClear, randomNavPoint, freeSpotNear, blockedCount, NAV
 };

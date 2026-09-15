@@ -699,6 +699,12 @@ function initNetwork() {
         if (!data) return;
         NET.room = data.code;
         if (data.mode) NET.mode = data.mode;
+        // we are on the room's wave now, not on the one we were counting
+        if (typeof data.wave === 'number') {
+            wave = data.wave;
+            netWaveCap = data.cap || banditCap(data.wave);
+            ui.waveLine.innerText = 'WAVE ' + wave;
+        }
 
         clearPlayers();
         (data.players || []).forEach(function (p) {
@@ -858,6 +864,21 @@ function initNetwork() {
     });
 
     NET.socket.on('boss', function (m) { onBossState(m); });
+
+    /* The room's wave. `up` marks the moment it turned over - that one gets the
+       feed line and the ammo; the rest are the once-a-second heartbeat that
+       keeps a latecomer's number honest. */
+    NET.socket.on('wave', function (m) {
+        if (!m || typeof m.n !== 'number') return;
+        netWaveIn = typeof m.in === 'number' ? m.in : -1;
+        if (m.up) {
+            applyWaveReward(m.n, m.cap);
+            netFeed('WAVE ' + m.n);
+        } else {
+            wave = m.n;
+            netWaveCap = m.cap || banditCap(m.n);
+        }
+    });
 
     NET.socket.on('boss-shot', function (m) {
         if (!m || !m.o || !m.d) return;
@@ -4724,13 +4745,33 @@ let deadEye = false;
 let lastShotTime = 0, lastDamageTime = 0;
 let FIRE_CD = 430;
 let gameStartTime = 0, wave = 1, nextWaveAt = 0;
-/* A bandit joins the fight every 15 seconds whether or not a boss is up.
-   The cap keeps the AI affordable: every bandit runs its own A* and its own
-   line-of-sight raycasts, so an uncapped timer would grind the frame rate
-   down after a few minutes. */
+/* A bandit joins the fight every 15 seconds whether or not a boss is up, and
+   how many may be standing at once is what the wave allows:
+
+     wave 1  6      wave 3  10      wave 5  14
+     wave 2  8      wave 4  12      wave 6  16 and no further
+
+   The ceiling is not taste, it is arithmetic. Every bandit runs its own A* and
+   its own line-of-sight work, here and on the server; past sixteen the slow
+   ticks start overrunning their budget and everybody sees bandits skate.
+
+   These three numbers are duplicated in waves.js. If one side changes and the
+   other does not, an online room and an offline game stop being the same game.
+   ONLINE THE SERVER'S NUMBER WINS - `wave` is overwritten by its packets. */
 const BANDIT_SPAWN_MS = 15000;
-const MAX_BANDITS = 12;
+const WAVE_START_CAP = 6;
+const WAVE_CAP_STEP = 2;
+const WAVE_MAX_CAP = 16;
+const WAVE_MS = 45000;
+
+function banditCap(w) {
+    const n = (typeof w === 'number' && w > 0) ? w : 1;
+    return Math.min(WAVE_MAX_CAP, WAVE_START_CAP + (n - 1) * WAVE_CAP_STEP);
+}
+
 let nextBanditAt = 0;
+let netWaveCap = WAVE_START_CAP;      // what the server says the room allows
+let netWaveIn = -1;                   // and how long is left of this wave
 let bossActive = false, bossDefeated = false, bossObj = null;
 let nextBossAt = 0, bossIndex = 0;
 let yaw = 0, pitch = 0;
@@ -4817,6 +4858,18 @@ function updateBossBar() {
     if (!src) return;
     ui.bossFill.style.width = Math.max(0, (src.health / src.maxHealth) * 100) + '%';
 }
+/* What a wave is worth, and what it says. Called from the offline clock and
+   from the server's packet, so the two look identical to a player. */
+function applyWaveReward(n, cap) {
+    wave = n;
+    netWaveCap = cap || banditCap(n);
+    pushFeed('WAVE ' + n + ' - ammo drop - up to ' + netWaveCap + ' bandits');
+    ui.waveLine.innerText = 'WAVE ' + n;
+    wpnAmmo[currentWpn].reserve = reserve = reserve + 16;
+    updateAmmoUI();
+    sfxPickup();
+}
+
 function pushFeed(text) {
     const d = document.createElement('div');
     d.className = 'feed-item';
@@ -4908,7 +4961,7 @@ function resetGame() {
     // The room's boss is not ours to end - if one is up, its bar stays up
     if (netBoss.active && netBoss.alive) { ui.bossBar.style.display = 'block'; updateBossBar(); }
     gameStartTime = performance.now();
-    nextWaveAt = gameStartTime + 45000;
+    nextWaveAt = gameStartTime + WAVE_MS;
     nextBossAt = gameStartTime + 90000;
     nextBanditAt = gameStartTime + BANDIT_SPAWN_MS;
     updateHealthUI(); updateSprintUI(); updateAmmoUI(); updateBoard(); updateLoadoutUI();
@@ -4948,9 +5001,14 @@ function applyBossReward() {
         reserve = wpnAmmo[currentWpn].reserve;
         pushFeed('ARSENAL COMPLETE — extra ammo + DEAD-EYE');
     }
-    wave++;
-    nextWaveAt = performance.now() + 45000;
-    ui.waveLine.innerText = 'WAVE ' + wave;
+    /* Offline, killing the boss buys a wave. Online the server hands that out
+       and its `wave` packet is already on its way - counting it here as well
+       would put us one ahead of the room. */
+    if (!onlineBandits()) {
+        wave++;
+        nextWaveAt = performance.now() + WAVE_MS;
+        ui.waveLine.innerText = 'WAVE ' + wave;
+    }
     updateAmmoUI(); updateBoard(); updateLoadoutUI();
 }
 
@@ -5617,6 +5675,10 @@ function updateWaves(now) {
             ui.waveLine.innerText = 'BOSS: ' + netBoss.type.name;
         } else if (netBoss.countdown >= 0) {
             ui.waveLine.innerText = 'WAVE ' + wave + ' - BOSS IN ' + netBoss.countdown + 's';
+        } else if (netWaveIn >= 0) {
+            ui.waveLine.innerText = 'WAVE ' + wave + ' - NEXT IN ' + netWaveIn + 's';
+        } else {
+            ui.waveLine.innerText = 'WAVE ' + wave;
         }
         return;
     }
@@ -5624,7 +5686,7 @@ function updateWaves(now) {
     // Reinforcements arrive on their own clock, independent of the boss
     if (now > nextBanditAt) {
         nextBanditAt = now + BANDIT_SPAWN_MS;
-        if (bots.length < MAX_BANDITS) createBandit(false);
+        if (bots.length < banditCap(wave)) createBandit(false);
     }
 
     if (!bossActive && now >= nextBossAt) {
@@ -5632,14 +5694,12 @@ function updateWaves(now) {
         nextBossAt = now + 90000;
     }
     if (!bossActive && now > nextWaveAt) {
-        nextWaveAt = now + 45000;
+        nextWaveAt = now + WAVE_MS;
         wave++;
-        let aliveCount = 0;
-        for (let i = 0; i < bots.length; i++) if (bots[i].alive) aliveCount++;
-        pushFeed('WAVE ' + wave + ' - ammo drop');
-        ui.waveLine.innerText = 'WAVE ' + wave;
-        wpnAmmo[currentWpn].reserve = reserve = reserve + 16;
-        updateAmmoUI();
+        applyWaveReward(wave, banditCap(wave));
+        // the new allowance arrives now, not one every fifteen seconds
+        let guard = 0;
+        while (bots.length < banditCap(wave) && guard++ < 6) createBandit(false);
     }
     if (!bossActive) {
         const left = Math.max(0, Math.ceil((nextBossAt - now) / 1000));

@@ -690,6 +690,7 @@ function initNetwork() {
         });
         // Our own bandits are not this room's bandits
         clearServerBandits();
+        clearBanditBullets();
         bots.forEach(function (b) { botGroup.remove(b.mesh); });
         bots.length = 0;
         console.log('[NET] room ' + data.code + ' (' + NET.mode.label + ') others=' + Object.keys(PLAYERS).length);
@@ -727,7 +728,8 @@ function initNetwork() {
             const dropped = m.health < playerHealth;
             playerHealth = m.health;
             updateHealthUI();
-            if (dropped && m.by) {
+            // by is null when a bandit did it - it still hurts
+            if (dropped) {
                 lastDamageTime = performance.now();
                 sfxPain();
                 ui.flash.style.opacity = '0.75';
@@ -790,6 +792,20 @@ function initNetwork() {
         NET.banditPackets++;
     });
 
+    NET.socket.on('bandit-shot', function (m) {
+        if (!m || !m.o || !m.d) return;
+        const body = serverBandits[m.id];
+        const flashAt = new THREE.Vector3(m.o[0], m.o[1], m.o[2]);
+        if (body && body.rig.parts.muzzle) {
+            // the drawn bandit lags the server slightly, so flash at its gun
+            body.rig.parts.muzzle.getWorldPosition(flashAt);
+            body.recoil = 0.35;
+        }
+        muzzleFlashAt(flashAt, 2.0);
+        sfxRevolver(flashAt);
+        spawnBanditBullet([flashAt.x, flashAt.y, flashAt.z], m.d);
+    });
+
     NET.socket.on('bandit-died', function (m) {
         if (!m) return;
         const body = serverBandits[m.id];
@@ -833,6 +849,7 @@ function initNetwork() {
         NET.connected = false;
         NET.room = null;
         clearServerBandits();
+        clearBanditBullets();
         refreshRoomUI();
         clearPlayers();
         setNetStatus('DISCONNECTED', 'off');
@@ -3183,6 +3200,66 @@ function onBanditSnapshot(rows) {
     });
 }
 
+/* The server fires, the server decides what it hits, and we draw the bullet
+   travelling so it can be seen coming and stepped out of the way. These carry
+   no damage of their own - if one of them reaches you, the health value the
+   server sends is what actually happened. */
+const banditBullets = [];
+const banditBulletGeo = new THREE.SphereGeometry(0.075, 6, 5);
+const banditBulletMat = new THREE.MeshBasicMaterial({ color: 0xffd070 });
+const BANDIT_BULLET_SPEED = 42;
+const BANDIT_BULLET_LIFE = 3.5;
+
+function spawnBanditBullet(o, d) {
+    const m = new THREE.Mesh(banditBulletGeo, banditBulletMat);
+    m.position.set(o[0], o[1], o[2]);
+    scene.add(m);
+    banditBullets.push({
+        mesh: m,
+        dir: new THREE.Vector3(d[0], d[1], d[2]),
+        life: 0,
+        whizzed: false
+    });
+    if (banditBullets.length > 60) {          // never let a stall pile them up
+        const old = banditBullets.shift();
+        scene.remove(old.mesh);
+    }
+}
+
+function updateBanditBullets(delta) {
+    for (let i = banditBullets.length - 1; i >= 0; i--) {
+        const b = banditBullets[i];
+        const travel = BANDIT_BULLET_SPEED * delta;
+        const nx = b.mesh.position.x + b.dir.x * travel;
+        const ny = b.mesh.position.y + b.dir.y * travel;
+        const nz = b.mesh.position.z + b.dir.z * travel;
+
+        let done = false;
+        if (ny <= 0.03) {
+            spawnDust(new THREE.Vector3(nx, 0.03, nz), 5);
+            done = true;
+        } else if (collidesAt(nx, nz, 0.08)) {
+            const p = new THREE.Vector3(nx, ny, nz);
+            spawnParticles(p, 0x9c8156, 5, 2.4);
+            sfxWoodHit(p);
+            done = true;
+        } else {
+            b.mesh.position.set(nx, ny, nz);
+            b.life += delta;
+            const d = b.mesh.position.distanceTo(camera.position);
+            if (!b.whizzed && d < 2.2) { b.whizzed = true; sfxRicochet(b.mesh.position); }
+            if (b.life > BANDIT_BULLET_LIFE || d < 0.62) done = true;
+        }
+
+        if (done) { scene.remove(b.mesh); banditBullets.splice(i, 1); }
+    }
+}
+
+function clearBanditBullets() {
+    for (let i = 0; i < banditBullets.length; i++) scene.remove(banditBullets[i].mesh);
+    banditBullets.length = 0;
+}
+
 function showBanditHealth(body) {
     const pct = Math.max(0, Math.min(1, body.health / 100));
     const P = body.rig.parts;
@@ -5175,6 +5252,7 @@ function animate() {
     sendMyState(now);
     updateRemoteBodies(delta);
     updateServerBandits(delta);
+    updateBanditBullets(delta);
     refreshNetDebug(now);
 
     if (isLocked && playerHealth > 0) {

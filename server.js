@@ -115,8 +115,27 @@ const WEAPONS = [
     { id: "deagle", body: 58, head: 115, pellets: 1, range: 120, fireCd: 260 }
 ];
 
-function pickSpawn() {
-    return SPAWNS[Math.floor(Math.random() * SPAWNS.length)];
+/* Coming back to life inside somebody's line of fire is not a fight, it is a
+   punishment. Pick the spawn that is furthest from the bandits currently alive
+   in that room, and fall back to a random one if the room has none. */
+function pickSpawn(room) {
+    if (!room || !room.bandits) return SPAWNS[Math.floor(Math.random() * SPAWNS.length)];
+
+    let best = null, bestScore = -1;
+    for (let i = 0; i < SPAWNS.length; i++) {
+        const s = SPAWNS[i];
+        let nearest = Infinity;
+        for (const id in room.bandits) {
+            const b = room.bandits[id];
+            if (!b.alive) continue;
+            const d = Math.hypot(b.x - s[0], b.z - s[1]);
+            if (d < nearest) nearest = d;
+        }
+        // a little noise so the same corner is not used every single time
+        const score = (nearest === Infinity ? 999 : nearest) + Math.random() * 6;
+        if (score > bestScore) { bestScore = score; best = s; }
+    }
+    return best || SPAWNS[Math.floor(Math.random() * SPAWNS.length)];
 }
 
 function distanceBetween(a, b) {
@@ -201,7 +220,7 @@ function kill(victim, attackerId) {
     setTimeout(() => {
         const p = players[victim.id];
         if (!p || p.alive) return;           // left, or already brought back
-        const s = pickSpawn();
+        const s = pickSpawn(rooms[p.room]);
         p.x = s[0]; p.y = 1.72; p.z = s[1];
         p.yaw = Math.random() * Math.PI * 2;
         p.pitch = 0;
@@ -238,7 +257,7 @@ function placeInRoom(socket, p, code) {
     }
 
     // A fresh start in the new room, so nobody arrives already hurt or dead
-    const s = pickSpawn();
+    const s = pickSpawn(rooms[code]);
     p.x = s[0]; p.y = 1.72; p.z = s[1];
     p.yaw = 0; p.pitch = 0;
     p.health = MAX_HEALTH;
@@ -527,7 +546,24 @@ setInterval(() => {
 
     for (const code in rooms) {
         const room = rooms[code];
-        bandits.stepRoom(room, players, now, dt);
+        const sink = bandits.stepRoom(room, players, now, dt);
+
+        /* A bandit fired: everyone in the room needs to see the muzzle flash
+           and the bullet leave. They draw it from this event - the server keeps
+           its own copy of the bullet and is the one that decides what it hits. */
+        for (let i = 0; i < sink.shots.length; i++) {
+            io.to(code).emit("bandit-shot", sink.shots[i]);
+        }
+
+        /* A bullet reached a player. This is where the last piece of trust
+           goes away: the server no longer has to believe a client that says it
+           was shot, because the server is the one that fired. */
+        for (let i = 0; i < sink.hits.length; i++) {
+            const h = sink.hits[i];
+            const victim = players[h.playerId];
+            if (!victim || !victim.alive) continue;
+            setHealth(victim, victim.health - h.damage, null, false);
+        }
     }
 
     // Snapshot every other tick: 10 a second

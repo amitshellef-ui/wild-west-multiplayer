@@ -6,9 +6,13 @@
    standing where his bandit was not. Now one simulation runs here, per room,
    and the clients only draw what it reports.
 
-   What lives here: spawning, pathing, chasing and dying.
-   What does not, yet: bandits shooting back, the boss, and waves. Those are
-   the next step, so for now a bandit will hunt you down and then stand there.
+   What lives here: spawning, pathing, chasing, shooting and dying.
+   What does not, yet: the boss and the wave timer.
+
+   Their bullets travel rather than hitting instantly, exactly as they did in
+   the browser, because being able to see a shot coming and step out of its way
+   is most of what the fight feels like. The server moves them and decides what
+   they hit; the clients are told where each one started and draw it flying.
 
    The movement rules are the same ones the browser used - same speeds, same
    repath interval, same stuck recovery - so the bandits behave the way the
@@ -28,7 +32,17 @@ const BANDIT = {
     respawnMs: 2600,
     startCount: 3,
     spawnEveryMs: 15000,
-    maxAlive: 12
+    maxAlive: 12,
+
+    /* Shooting - the same numbers the browser used */
+    fireDelay: 1750,
+    fireRange: 38,
+    aimSpread: 0.035,          // grows with distance, see fire()
+    spreadPerMetre: 0.0016,
+    bulletSpeed: 42,
+    bulletDamage: 10,
+    bulletLife: 3.5,
+    hitRadius: 0.62
 };
 
 const TICK_MS = 50;            // 20 simulation steps a second
@@ -36,6 +50,7 @@ const TICK_MS = 50;            // 20 simulation steps a second
 /* ---- Room lifecycle ---------------------------------------------------- */
 function initRoom(room) {
     room.bandits = {};
+    room.bullets = [];
     room.nextBanditId = 1;
     room.nextSpawnAt = Date.now() + BANDIT.spawnEveryMs;
     for (let i = 0; i < BANDIT.startCount; i++) spawnBandit(room);
@@ -89,9 +104,106 @@ function spawnBandit(room, players) {
         lastZ: p.z,
         moving: false,
         strafeAt: 0,
-        strafeDir: Math.random() > 0.5 ? 1 : -1
+        strafeDir: Math.random() > 0.5 ? 1 : -1,
+        lastShot: Date.now() + Math.random() * 1200
     };
     return room.bandits[id];
+}
+
+/* ---- Shooting ----------------------------------------------------------
+   A bullet is aimed at where the player is standing now, with a spread that
+   widens with range, and then it is on its own: it does not steer. Walking
+   sideways beats it, which is the point. */
+function fire(room, b, target, sink) {
+    const ox = b.x, oy = BANDIT.eyeHeight, oz = b.z;
+    const tx = target.x, ty = target.y || 1.72, tz = target.z;
+
+    let dx = tx - ox, dy = ty - oy, dz = tz - oz;
+    const len = Math.hypot(dx, dy, dz) || 1;
+    dx /= len; dy /= len; dz /= len;
+
+    const dist = Math.hypot(tx - ox, tz - oz);
+    const spread = BANDIT.aimSpread + dist * BANDIT.spreadPerMetre;
+    dx += (Math.random() - 0.5) * spread * 2;
+    dy += (Math.random() - 0.5) * spread * 1.5;
+    dz += (Math.random() - 0.5) * spread * 2;
+    const n = Math.hypot(dx, dy, dz) || 1;
+    dx /= n; dy /= n; dz /= n;
+
+    room.bullets.push({
+        x: ox, y: oy, z: oz,
+        dx: dx, dy: dy, dz: dz,
+        life: 0,
+        from: b.id
+    });
+
+    sink.shots.push({
+        id: b.id,
+        o: [round2(ox), round2(oy), round2(oz)],
+        d: [round3(dx), round3(dy), round3(dz)]
+    });
+}
+
+/* How close did a segment pass to a point? A bullet crosses 2.1 metres in a
+   single server tick while a player is barely a metre wide, so testing only
+   the places the bullet lands misses more than a third of the shots that
+   actually went through someone. Testing the whole path it swept does not. */
+function segmentDistance(px, py, pz, ax, ay, az, bx, by, bz) {
+    const abx = bx - ax, aby = by - ay, abz = bz - az;
+    const ab2 = abx * abx + aby * aby + abz * abz;
+    let t = 0;
+    if (ab2 > 0) {
+        t = ((px - ax) * abx + (py - ay) * aby + (pz - az) * abz) / ab2;
+        t = t < 0 ? 0 : (t > 1 ? 1 : t);
+    }
+    const cx = ax + abx * t, cy = ay + aby * t, cz = az + abz * t;
+    return Math.hypot(px - cx, py - cy, pz - cz);
+}
+
+/* Same reasoning for the town: sample along the sweep so a fast bullet cannot
+   step straight through a wall. */
+function pathBlocked(ax, az, bx, bz) {
+    const dist = Math.hypot(bx - ax, bz - az);
+    const steps = Math.max(1, Math.ceil(dist / 0.5));
+    for (let i = 1; i <= steps; i++) {
+        const t = i / steps;
+        if (nav.collidesAt(ax + (bx - ax) * t, az + (bz - az) * t, 0.08)) return true;
+    }
+    return false;
+}
+
+function round2(v) { return Math.round(v * 100) / 100; }
+function round3(v) { return Math.round(v * 1000) / 1000; }
+
+/* Bullets move, hit the town, hit a player, or run out of road. */
+function stepBullets(room, players, dt, sink) {
+    if (!room.bullets) room.bullets = [];
+    const travel = BANDIT.bulletSpeed * dt;
+
+    for (let i = room.bullets.length - 1; i >= 0; i--) {
+        const bl = room.bullets[i];
+        const nx = bl.x + bl.dx * travel;
+        const ny = bl.y + bl.dy * travel;
+        const nz = bl.z + bl.dz * travel;
+
+        if (ny <= 0.03) { room.bullets.splice(i, 1); continue; }
+        if (pathBlocked(bl.x, bl.z, nx, nz)) { room.bullets.splice(i, 1); continue; }
+
+        let struck = false;
+        for (const id in players) {
+            const p = players[id];
+            if (p.room !== room.code || !p.alive) continue;
+            const d = segmentDistance(p.x, p.y || 1.72, p.z, bl.x, bl.y, bl.z, nx, ny, nz);
+            if (d < BANDIT.hitRadius) {
+                sink.hits.push({ playerId: p.id, damage: BANDIT.bulletDamage, from: bl.from });
+                struck = true;
+                break;
+            }
+        }
+        bl.x = nx; bl.y = ny; bl.z = nz;
+        bl.life += dt;
+        if (struck || bl.life > BANDIT.bulletLife) room.bullets.splice(i, 1);
+    }
 }
 
 /* ---- Movement ---------------------------------------------------------- */
@@ -128,7 +240,7 @@ function nearestPlayer(room, players, fromX, fromZ) {
     return best ? { player: best, dist: bestD } : null;
 }
 
-function stepBandit(room, b, players, now, dt) {
+function stepBandit(room, b, players, now, dt, sink) {
     if (!b.alive) {
         if (b.respawnAt && now >= b.respawnAt) {
             const p = pickBanditSpawn(room, players);
@@ -239,6 +351,13 @@ function stepBandit(room, b, players, now, dt) {
         b.lastX = b.x; b.lastZ = b.z;
     }
 
+    /* --- shooting --- */
+    if (b.hasLos && near && near.dist < BANDIT.fireRange &&
+        now - b.lastShot > BANDIT.fireDelay) {
+        b.lastShot = now + (Math.random() - 0.5) * 350;
+        fire(room, b, near.player, sink);
+    }
+
     /* --- facing --- */
     let faceX, faceZ;
     if (b.state === "chase" && near) { faceX = near.player.x; faceZ = near.player.z; }
@@ -252,20 +371,24 @@ function stepBandit(room, b, players, now, dt) {
     }
 }
 
-function stepRoom(room, players, now, dt) {
+function stepRoom(room, players, now, dt, sink) {
     if (!room.bandits) initRoom(room);
+    if (!room.bullets) room.bullets = [];
+    sink = sink || { shots: [], hits: [] };
 
     // reinforcements keep coming, but only while somebody is there to fight
     let occupied = false;
     for (const id in players) if (players[id].room === room.code) { occupied = true; break; }
-    if (!occupied) return;
+    if (!occupied) return sink;      // nothing happened, but the caller still needs the shape
 
     if (now >= room.nextSpawnAt) {
         room.nextSpawnAt = now + BANDIT.spawnEveryMs;
         if (Object.keys(room.bandits).length < BANDIT.maxAlive) spawnBandit(room, players);
     }
 
-    for (const id in room.bandits) stepBandit(room, room.bandits[id], players, now, dt);
+    for (const id in room.bandits) stepBandit(room, room.bandits[id], players, now, dt, sink);
+    stepBullets(room, players, dt, sink);
+    return sink;
 }
 
 /* What the clients need in order to draw them. Kept short on purpose: this

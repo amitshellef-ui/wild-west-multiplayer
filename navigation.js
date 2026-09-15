@@ -197,6 +197,20 @@ function findPath(sx, sz, gx, gz) {
     return null;
 }
 
+/* Can one point see another? The browser casts a real 3D ray from the bandit's
+   eyes to the camera; here we sample the same segment against the collision
+   boxes at body height. Slightly coarser, far cheaper, and it agrees with the
+   client about every wall that matters. */
+function losClear(ax, az, bx, bz) {
+    const dist = Math.hypot(bx - ax, bz - az);
+    const steps = Math.max(2, Math.ceil(dist / 0.6));
+    for (let i = 1; i < steps; i++) {
+        const t = i / steps;
+        if (collidesAt(ax + (bx - ax) * t, az + (bz - az) * t, 0.05)) return false;
+    }
+    return true;
+}
+
 /* The mine shaft reaches past the normal boundary, so it is allowed explicitly
    - exactly as the client does it. */
 const MINE = { x0: 0.6, x1: 15.4 };
@@ -223,5 +237,5 @@ function blockedCount() {
 module.exports = {
     collidesAt, isBlocked, toCellX, toCellZ,
     cellCenterX, cellCenterZ, nearestFree,
-    findPath, lineClear, randomNavPoint, blockedCount, NAV
+    findPath, lineClear, losClear, randomNavPoint, blockedCount, NAV
 };

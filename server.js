@@ -5,6 +5,7 @@ const path = require("path");
 
 const mapData = require("./map-data");
 const nav = require("./navigation");
+const bandits = require("./bandits");
 
 const app = express();
 const server = http.createServer(app);
@@ -55,6 +56,7 @@ function createRoom(code, modeId) {
         mode: MODES[modeId] || MODES[DEFAULT_MODE],
         createdAt: Date.now()
     };
+    bandits.initRoom(rooms[code]);
     return rooms[code];
 }
 createRoom(PUBLIC_ROOM, DEFAULT_MODE);
@@ -256,6 +258,7 @@ io.on("connection", (socket) => {
         kills: 0,
         deaths: 0,
         lastHitAt: 0,
+        lastBanditHitAt: 0,
         lastDeltaAt: 0,
         lastRoomAt: 0
     };
@@ -400,6 +403,64 @@ io.on("connection", (socket) => {
     });
 
     /* =====================================================================
+       HITS ON BANDITS (step 11b)
+
+       The bandits belong to the room, so the shot is checked against the same
+       weapon table the players are checked against: a real weapon, a plausible
+       rate, a plausible distance, and a pellet count the gun could actually
+       throw. A client cannot invent a kill.
+       ===================================================================== */
+    socket.on("bandit-hit", (m) => {
+        const shooter = players[socket.id];
+        if (!shooter || !shooter.alive || !shooter.room) return;
+        const room = rooms[shooter.room];
+        if (!room || !room.bandits) return;
+
+        if (!m || typeof m !== "object") return;
+        if (typeof m.w !== "number" || (m.w | 0) !== m.w || m.w < 0 || m.w >= WEAPONS.length) return;
+        const w = WEAPONS[m.w];
+
+        const now = Date.now();
+        if (now - shooter.lastBanditHitAt < w.fireCd * 0.7) return;
+
+        if (!Array.isArray(m.targets) || m.targets.length === 0 || m.targets.length > 8) return;
+
+        const accepted = [];
+        let pellets = 0;
+        for (let i = 0; i < m.targets.length; i++) {
+            const t = m.targets[i];
+            if (!t || typeof t.id !== "number") continue;
+            const b = room.bandits[t.id];
+            if (!b || !b.alive) continue;
+
+            const body = strictCount(t.body, w.pellets);
+            const head = strictCount(t.head, w.pellets);
+            if (body < 0 || head < 0) return;
+            if (body + head <= 0) continue;
+
+            const dist = Math.hypot(shooter.x - b.x, shooter.z - b.z);
+            if (dist > w.range * 1.15 + 3) continue;
+
+            pellets += body + head;
+            accepted.push({ b: b, body: body, head: head });
+        }
+        if (accepted.length === 0 || pellets > w.pellets) return;
+
+        shooter.lastBanditHitAt = now;
+        for (let i = 0; i < accepted.length; i++) {
+            const a = accepted[i];
+            const damage = a.body * w.body + a.head * w.head;
+            const res = bandits.hurt(room, a.b.id, damage);
+            if (res && res.killed) {
+                shooter.kills++;
+                io.to(room.code).emit("bandit-died", {
+                    id: a.b.id, by: shooter.id, x: a.b.x, z: a.b.z, headshot: a.head > 0
+                });
+            }
+        }
+    });
+
+    /* =====================================================================
        LOCAL DAMAGE AND HEALING (step 9)
 
        Bandits, the boss and out-of-combat regeneration still run on the client,
@@ -434,6 +495,41 @@ io.on("connection", (socket) => {
     });
 });
 
+/* =========================================================================
+   THE SIMULATION LOOP
+
+   One timer drives every room. It steps the bandits at a fixed rate so their
+   speed never depends on how busy the server is, and sends a snapshot at half
+   that rate - the clients smooth between snapshots the same way they already
+   smooth other players, so ten a second is plenty and costs a fraction of the
+   bandwidth.
+   ========================================================================= */
+let lastTick = Date.now();
+let tickCount = 0;
+
+setInterval(() => {
+    const now = Date.now();
+    const dt = Math.min(0.25, (now - lastTick) / 1000);
+    lastTick = now;
+
+    for (const code in rooms) {
+        const room = rooms[code];
+        bandits.stepRoom(room, players, now, dt);
+    }
+
+    // Snapshot every other tick: 10 a second
+    if ((tickCount++ % 2) === 0) {
+        for (const code in rooms) {
+            const room = rooms[code];
+            if (!room.bandits) continue;
+            let occupied = false;
+            for (const id in players) if (players[id].room === code) { occupied = true; break; }
+            if (!occupied) continue;
+            io.to(code).emit("bandits", { b: bandits.snapshot(room) });
+        }
+    }
+}, bandits.TICK_MS);
+
 const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, "0.0.0.0", () => {
@@ -441,4 +537,6 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log("Rooms enabled. Lobby:", PUBLIC_ROOM, "| default mode:", MODES[DEFAULT_MODE].label);
     console.log("Map loaded:", mapData.FINGERPRINT, "|", mapData.COLLIDERS.length, "colliders |",
         nav.blockedCount(), "blocked navigation cells");
+    console.log("Bandits simulated here:", bandits.BANDIT.startCount, "to start, one more every",
+        (bandits.BANDIT.spawnEveryMs / 1000) + "s, up to", bandits.BANDIT.maxAlive);
 });

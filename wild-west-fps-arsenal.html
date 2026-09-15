@@ -324,7 +324,8 @@ const NET = {
     recv: 0,
     shotsSent: 0,
     shotsRecv: 0,
-    hitsSent: 0
+    hitsSent: 0,
+    banditPackets: 0
 };
 
 /* Remote players only - never contains us. The server is the only thing that
@@ -394,11 +395,31 @@ function sendMyState(now) {
    instead of eight, which lets the server rate-limit cleanly.
    ========================================================================= */
 const netHits = {};          // victim id -> { body, head }
+const netBanditHits = {};    // bandit id -> { body, head }
 
 function registerPlayerHit(id, headshot) {
     if (!NET.mode.friendlyFire) return;
     if (!netHits[id]) netHits[id] = { body: 0, head: 0 };
     if (headshot) netHits[id].head++; else netHits[id].body++;
+}
+
+function registerBanditHit(id, headshot) {
+    if (!netBanditHits[id]) netBanditHits[id] = { body: 0, head: 0 };
+    if (headshot) netBanditHits[id].head++; else netBanditHits[id].body++;
+}
+
+function sendBanditHits() {
+    const ids = Object.keys(netBanditHits);
+    if (ids.length === 0) return;
+    if (NET.connected && NET.socket) {
+        NET.socket.emit('bandit-hit', {
+            w: currentWpn,
+            targets: ids.map(function (id) {
+                return { id: parseInt(id, 10), body: netBanditHits[id].body, head: netBanditHits[id].head };
+            })
+        });
+    }
+    for (let i = 0; i < ids.length; i++) delete netBanditHits[ids[i]];
 }
 
 function sendHits() {
@@ -667,6 +688,10 @@ function initNetwork() {
                 PLAYERS[p.id] = p;
             }
         });
+        // Our own bandits are not this room's bandits
+        clearServerBandits();
+        bots.forEach(function (b) { botGroup.remove(b.mesh); });
+        bots.length = 0;
         console.log('[NET] room ' + data.code + ' (' + NET.mode.label + ') others=' + Object.keys(PLAYERS).length);
         refreshRoomUI();
         refreshPlayerStatus();
@@ -758,6 +783,27 @@ function initNetwork() {
         }
     });
 
+    /* --- The room's bandits (step 11b) --- */
+    NET.socket.on('bandits', function (m) {
+        if (!m || !Array.isArray(m.b)) return;
+        onBanditSnapshot(m.b);
+        NET.banditPackets++;
+    });
+
+    NET.socket.on('bandit-died', function (m) {
+        if (!m) return;
+        const body = serverBandits[m.id];
+        const at = body ? body.mesh.position.clone().setY(1.2)
+                        : new THREE.Vector3(m.x || 0, 1.2, m.z || 0);
+        sfxBotDeath(at);
+        spawnParticles(at, 0x8a2a1a, 20, 4);
+        spawnDust(at.clone().setY(0.2), 14);
+        if (m.by === NET.id) {
+            kills++; onKillReward(); updateBoard();
+            netFeed((m.headshot ? 'HEADSHOT! ' : '') + 'Bandit eliminated');
+        }
+    });
+
     /* --- Remote gunfire (step 7). Cosmetic: no damage is applied. --- */
     NET.socket.on('player-shot', function (m) { playRemoteShot(m); });
 
@@ -786,6 +832,7 @@ function initNetwork() {
     NET.socket.on('disconnect', function (reason) {
         NET.connected = false;
         NET.room = null;
+        clearServerBandits();
         refreshRoomUI();
         clearPlayers();
         setNetStatus('DISCONNECTED', 'off');
@@ -2879,6 +2926,7 @@ function shortestAngle(from, to) {
 function sampleAt(buf, t) {
     if (!buf || buf.length === 0) return null;
     if (buf.length === 1 || t <= buf[0].t) return buf[0];
+    // bandits send no pitch; treat it as zero so the same sampler serves both
     const last = buf[buf.length - 1];
     if (t >= last.t) return last;                 // starved: hold, never guess
     for (let i = buf.length - 2; i >= 0; i--) {
@@ -2891,7 +2939,7 @@ function sampleAt(buf, t) {
                 y: a.y + (b.y - a.y) * f,
                 z: a.z + (b.z - a.z) * f,
                 yaw: a.yaw + shortestAngle(a.yaw, b.yaw) * f,
-                pitch: a.pitch + (b.pitch - a.pitch) * f
+                pitch: (a.pitch || 0) + ((b.pitch || 0) - (a.pitch || 0)) * f
             };
         }
     }
@@ -3037,6 +3085,172 @@ function updateRemoteBodies(delta) {
     const live = Object.keys(remoteBodies);
     for (let i = 0; i < live.length; i++) {
         if (!PLAYERS[live[i]]) destroyRemoteBody(live[i]);
+    }
+}
+
+/* =========================================================================
+   SERVER BANDITS (multiplayer, step 11b)
+
+   When we are in a room the bandits are not ours to think about: the server
+   owns where they are, what they are doing and whether they are alive, and we
+   draw what it tells us. The local bandit brain is switched off entirely in
+   that case - see the guards in resetGame, updateWaves and the render loop.
+
+   Offline the old local simulation still runs, untouched, so the single player
+   game is exactly the game it was.
+   ========================================================================= */
+const serverBandits = {};      // server id -> { rig, mesh, buf, ... }
+const banditGroup = new THREE.Group();
+scene.add(banditGroup);
+
+function onlineBandits() {
+    return NET.connected && !!NET.room;
+}
+
+function createServerBandit(id) {
+    // The same rig the local bandits use, lifted out of the local bot system
+    const rig = createBandit(false);
+    const idx = bots.indexOf(rig);
+    if (idx > -1) bots.splice(idx, 1);
+    botGroup.remove(rig.mesh);
+    banditGroup.add(rig.mesh);
+
+    rig.mesh.traverse(function (o) {
+        if (o.isMesh) {
+            delete o.userData.bot;       // the local AI must never touch it
+            o.userData.banditId = id;
+        }
+    });
+
+    const body = {
+        id: id, rig: rig, mesh: rig.mesh,
+        buf: [], alive: true, health: 100,
+        walkPhase: Math.random() * 6.28, speed: 0, recoil: 0,
+        deathT: -1, deathDir: 1,
+        prevPos: new THREE.Vector3(), hasPrev: false
+    };
+    serverBandits[id] = body;
+    return body;
+}
+
+function destroyServerBandit(id) {
+    const body = serverBandits[id];
+    if (!body) return;
+    banditGroup.remove(body.mesh);
+    body.mesh.traverse(function (o) {
+        if (o.isMesh) {
+            if (o.geometry) o.geometry.dispose();
+            if (o.material) {
+                if (Array.isArray(o.material)) o.material.forEach(function (m) { m.dispose(); });
+                else o.material.dispose();
+            }
+        }
+    });
+    delete serverBandits[id];
+}
+
+function clearServerBandits() {
+    Object.keys(serverBandits).forEach(destroyServerBandit);
+}
+
+/* A snapshot row is [id, x, z, yaw, health, state] where state is
+   0 dead, 1 patrolling, 2 chasing. */
+function onBanditSnapshot(rows) {
+    const nowT = performance.now();
+    const present = {};
+    for (let i = 0; i < rows.length; i++) {
+        const r = rows[i];
+        const id = r[0];
+        present[id] = true;
+        let body = serverBandits[id];
+        if (!body) body = createServerBandit(id);
+
+        const wasAlive = body.alive;
+        body.health = r[4];
+        body.alive = r[5] !== 0;
+        body.chasing = r[5] === 2;
+
+        if (wasAlive && !body.alive) startBanditDeath(body);
+        if (!wasAlive && body.alive) reviveBandit(body);
+
+        body.buf.push({ t: nowT, x: r[1], z: r[2], yaw: r[3] });
+        if (body.buf.length > 14) body.buf.shift();
+        showBanditHealth(body);
+    }
+    // Anything the server stopped mentioning has gone for good
+    Object.keys(serverBandits).forEach(function (id) {
+        if (!present[id]) destroyServerBandit(id);
+    });
+}
+
+function showBanditHealth(body) {
+    const pct = Math.max(0, Math.min(1, body.health / 100));
+    const P = body.rig.parts;
+    const show = body.alive && pct < 1 && pct > 0;
+    P.barBg.visible = show;
+    P.barFill.visible = show;
+    P.barFill.scale.x = 0.94 * pct;
+    P.barFillMat.color.setHex(pct > 0.5 ? 0x5ec24a : (pct > 0.25 ? 0xe0a83c : 0xd94a2b));
+}
+
+function startBanditDeath(body) {
+    body.deathT = 0;
+    body.deathDir = Math.random() > 0.5 ? 1 : -1;
+    body.rig.parts.barBg.visible = false;
+    body.rig.parts.barFill.visible = false;
+}
+
+function reviveBandit(body) {
+    body.deathT = -1;
+    body.mesh.visible = true;
+    const P = body.rig.parts;
+    P.bob.rotation.set(0, 0, 0);
+    P.bob.position.y = 0;
+    P.armL.rotation.set(0, 0, 0.12);
+    P.armR.rotation.set(0, 0, -0.14);
+    P.legL.rotation.x = 0; P.legR.rotation.x = 0;
+    body.buf.length = 0;
+    body.hasPrev = false;
+    body.speed = 0;
+}
+
+function updateServerBandits(delta) {
+    const ids = Object.keys(serverBandits);
+    for (let i = 0; i < ids.length; i++) {
+        const body = serverBandits[ids[i]];
+
+        if (!body.alive) {
+            if (body.deathT >= 0) {
+                body.deathT += delta;
+                const t = Math.min(1, body.deathT / 0.75);
+                const e = 1 - Math.pow(1 - t, 3);
+                const P = body.rig.parts;
+                P.bob.rotation.x = e * Math.PI * 0.46 * body.deathDir;
+                P.bob.rotation.z = e * 0.25 * body.deathDir;
+                P.bob.position.y = -e * 0.55;
+                P.armL.rotation.x = -e * 0.9;
+                P.armR.rotation.x = -e * 1.2;
+                if (body.deathT > 1.9) { body.mesh.visible = false; body.deathT = -1; }
+            }
+            continue;
+        }
+
+        // Same interpolation the other players get: draw slightly in the past
+        const shown = sampleAt(body.buf, performance.now() - INTERP_DELAY);
+        if (!shown) continue;
+        const m = body.mesh;
+        m.position.set(shown.x, 0, shown.z);
+        m.rotation.y = shown.yaw;
+
+        let inst = 0;
+        if (delta > 0 && body.hasPrev) {
+            inst = Math.hypot(m.position.x - body.prevPos.x, m.position.z - body.prevPos.z) / delta;
+        }
+        body.prevPos.copy(m.position);
+        body.hasPrev = true;
+        body.speed += (inst - body.speed) * Math.min(1, 12 * delta);
+
+        animateRemoteBody(body, delta);
     }
 }
 
@@ -4142,7 +4356,12 @@ function updateLoadoutUI() {
 function updateBoard() {
     ui.meStats.innerText = kills + ' / ' + deaths;
     let n = 0;
-    for (let i = 0; i < bots.length; i++) if (bots[i].alive) n++;
+    if (onlineBandits()) {
+        const ids = Object.keys(serverBandits);
+        for (let i = 0; i < ids.length; i++) if (serverBandits[ids[i]].alive) n++;
+    } else {
+        for (let i = 0; i < bots.length; i++) if (bots[i].alive) n++;
+    }
     ui.aliveCount.innerText = n;
 }
 function updateBossBar() {
@@ -4234,7 +4453,9 @@ function resetGame() {
     bossHazards.length = 0;
     camera.position.set(0, EYE_HEIGHT, 3);
     yaw = 0; pitch = 0; velY = 0;
-    createBandit(false); createBandit(false); createBandit(false);
+    // Online the room's bandits come from the server; only spawn our own when
+    // there is nobody else running them.
+    if (!onlineBandits()) { createBandit(false); createBandit(false); createBandit(false); }
     gameStartTime = performance.now();
     nextWaveAt = gameStartTime + 45000;
     nextBossAt = gameStartTime + 90000;
@@ -4307,7 +4528,16 @@ function fireOneRay(spread, dmgBody, dmgHead, range) {
     shootRay.set(camera.position, dir);
     shootRay.far = range || 200;
     const targets = [];
-    for (let i = 0; i < bots.length; i++) if (bots[i].alive) targets.push(bots[i].mesh);
+    // Online the bandits belong to the server; offline they are the local ones
+    if (onlineBandits()) {
+        const bIds = Object.keys(serverBandits);
+        for (let i = 0; i < bIds.length; i++) {
+            const sb = serverBandits[bIds[i]];
+            if (sb.alive) targets.push(sb.mesh);
+        }
+    } else {
+        for (let i = 0; i < bots.length; i++) if (bots[i].alive) targets.push(bots[i].mesh);
+    }
     // Other players are only in the line of fire when the mode allows it. With
     // friendly fire off they are not targets at all, so shots pass straight
     // through a team mate to the bandit behind them.
@@ -4328,6 +4558,19 @@ function fireOneRay(spread, dmgBody, dmgHead, range) {
     if (hits.length) {
         const h = hits[0];
         end = h.point;
+        const banditId = h.object.userData.banditId;
+        if (banditId !== undefined && serverBandits[banditId]) {
+            const head = !!h.object.userData.isHead;
+            showHitmarker();
+            sfxHitMarker();
+            sfxFleshHit(h.point);
+            spawnParticles(h.point, head ? 0xff5050 : 0xc03a2a, head ? 18 : 11, 3.5);
+            registerBanditHit(banditId, head);
+            spawnTracer(muzzleWorld, end, 0xffe8a0, 0.06);
+            netShotEnds.push(end.x, end.y, end.z);
+            return;
+        }
+
         const remoteId = h.object.userData.remoteId;
         if (remoteId && PLAYERS[remoteId]) {
             const head = !!h.object.userData.isHead;
@@ -4407,6 +4650,7 @@ function shoot(manual) {
 
     sendShot(w);
     sendHits();
+    sendBanditHits();
     w.sfx(null);
     WPN.recoilPos = w.recoil;
     WPN.recoilRot = w.recoil * 1.1;
@@ -4864,6 +5108,7 @@ function updateProps(delta, now) {
 
 function updateWaves(now) {
     if (gameStartTime === 0) return;
+    if (onlineBandits()) return;        // the server runs the waves in a room
 
     // Reinforcements arrive on their own clock, independent of the boss
     if (now > nextBanditAt) {
@@ -4903,12 +5148,15 @@ function animate() {
     updateCaveLighting(delta);
     sendMyState(now);
     updateRemoteBodies(delta);
+    updateServerBandits(delta);
     refreshNetDebug(now);
 
     if (isLocked && playerHealth > 0) {
         updatePlayer(delta, now);
         updateWaves(now);
-        for (let i = 0; i < bots.length; i++) updateBot(bots[i], delta, now);
+        if (!onlineBandits()) {
+            for (let i = 0; i < bots.length; i++) updateBot(bots[i], delta, now);
+        }
         updateBotBullets(delta);
         updateBossHazards(delta);
 

@@ -283,6 +283,7 @@ const PLAYERS = {};
 
 function clearPlayers() {
     Object.keys(PLAYERS).forEach(function (id) { delete PLAYERS[id]; });
+    // Bodies are torn down by updateRemoteBodies on the next frame
 }
 function playerCount() {
     return Object.keys(PLAYERS).length + (NET.connected ? 1 : 0);
@@ -2337,6 +2338,145 @@ function placeBotAtSpawn(bot) {
     bot.lastShot = performance.now() + Math.random() * 800;
 }
 
+/* =========================================================================
+   REMOTE PLAYERS (multiplayer, step 5)
+
+   A remote player wears the same articulated cowboy model the bandits use, so
+   there is one rig to maintain. Rather than editing createBandit, we let it
+   build a normal bandit and then lift the result out of the bot system: the
+   record is spliced out of `bots`, the mesh moves to its own group, and the
+   userData.bot tags are dropped. From that moment nothing in the AI, the wave
+   logic or the player's own weapon raycast can see it.
+
+   That means remote players are not shootable yet, which is correct for this
+   step - damage arrives in step 8 together with server validation.
+   ========================================================================= */
+const remoteGroup = new THREE.Group();
+scene.add(remoteGroup);
+const remoteBodies = {};          // socket id -> body record
+
+/* Bright, saturated colours so a player never reads as a bandit, and derived
+   from the id so every client paints the same player the same colour. A hue is
+   hashed out of the id rather than picked from a fixed list, so two players
+   sharing a colour is rare instead of likely. */
+function colorForId(id) {
+    let h = 0;
+    for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+    return new THREE.Color().setHSL((h % 360) / 360, 0.72, 0.56).getHex();
+}
+
+function makeNamePlate(text, colorHex) {
+    const hex = '#' + colorHex.toString(16).padStart(6, '0');
+    const c = document.createElement('canvas');
+    c.width = 256; c.height = 64;
+    const x = c.getContext('2d');
+    x.fillStyle = 'rgba(18,11,4,0.74)';
+    x.fillRect(0, 0, 256, 64);
+    x.strokeStyle = hex; x.lineWidth = 5;
+    x.strokeRect(3, 3, 250, 58);
+    x.fillStyle = hex;
+    x.font = 'bold 32px Segoe UI, Tahoma, sans-serif';
+    x.textAlign = 'center'; x.textBaseline = 'middle';
+    x.fillText(text, 128, 34);
+
+    const spr = new THREE.Sprite(new THREE.SpriteMaterial({
+        map: new THREE.CanvasTexture(c),
+        // Visible through walls on purpose while we are still proving the
+        // networking out. Flip to true to make geometry hide it.
+        depthTest: false,
+        transparent: true
+    }));
+    spr.scale.set(1.5, 0.375, 1);
+    spr.position.y = 2.45;
+    spr.renderOrder = 10;
+    spr.raycast = function () { };
+    return spr;
+}
+
+function createRemoteBody(id) {
+    // Build with the existing rig, then take it out of the bot system
+    const rig = createBandit(false);
+
+    const idx = bots.indexOf(rig);
+    if (idx > -1) bots.splice(idx, 1);
+    botGroup.remove(rig.mesh);
+    remoteGroup.add(rig.mesh);
+
+    const color = colorForId(id);
+    rig.mesh.traverse(function (o) {
+        if (o.isMesh) {
+            delete o.userData.bot;     // invisible to weapons and AI
+            o.userData.remoteId = id;
+        }
+    });
+
+    // Player colours. The coat and hat carry the identity; the shirt takes a
+    // darker shade of the same hue so the torso keeps its shape instead of
+    // reading as one flat slab of colour.
+    const mats = rig.parts.materials;
+    const dark = new THREE.Color(color).multiplyScalar(0.42);
+    if (mats[0]) mats[0].color.copy(dark);                    // shirt
+    if (mats[2]) mats[2].color.setHex(color);                 // coat
+    if (mats[3]) { mats[3].color.setHex(color); mats[3].emissive.setHex(color); mats[3].emissiveIntensity = 0.22; }
+
+    rig.parts.barBg.visible = false;
+    rig.parts.barFill.visible = false;
+
+    const plate = makeNamePlate(id.slice(0, 6), color);
+    rig.mesh.add(plate);
+
+    const body = { id: id, rig: rig, mesh: rig.mesh, plate: plate, color: color };
+    remoteBodies[id] = body;
+    console.log('[NET] body created for ' + id.slice(0, 6));
+    return body;
+}
+
+function destroyRemoteBody(id) {
+    const body = remoteBodies[id];
+    if (!body) return;
+    remoteGroup.remove(body.mesh);
+    body.mesh.traverse(function (o) {
+        if (o.isMesh) {
+            if (o.geometry) o.geometry.dispose();
+            if (o.material) {
+                if (Array.isArray(o.material)) o.material.forEach(function (m) { m.dispose(); });
+                else o.material.dispose();
+            }
+        }
+    });
+    if (body.plate.material.map) body.plate.material.map.dispose();
+    body.plate.material.dispose();
+    delete remoteBodies[id];
+    console.log('[NET] body removed for ' + id.slice(0, 6));
+}
+
+/* Straight placement from the last packet - deliberately not smoothed yet, so
+   the raw update rate is visible. Interpolation and the walk cycle are step 6. */
+function applyRemoteTransform(p, body) {
+    if (p.x === undefined) return;
+    // p.y is the remote camera height, so drop by eye height to put feet down
+    body.mesh.position.set(p.x, p.y - EYE_HEIGHT, p.z);
+    // The rig faces +Z; the player's forward is -Z rotated by yaw
+    body.mesh.rotation.y = p.yaw + Math.PI;
+    const head = body.rig.parts.head;
+    if (head) head.rotation.x = THREE.MathUtils.clamp(-p.pitch, -0.7, 0.7);
+}
+
+function updateRemoteBodies() {
+    const ids = Object.keys(PLAYERS);
+    for (let i = 0; i < ids.length; i++) {
+        const id = ids[i];
+        let body = remoteBodies[id];
+        if (!body) body = createRemoteBody(id);
+        applyRemoteTransform(PLAYERS[id], body);
+    }
+    // Anything with a body but no roster entry has left
+    const live = Object.keys(remoteBodies);
+    for (let i = 0; i < live.length; i++) {
+        if (!PLAYERS[live[i]]) destroyRemoteBody(live[i]);
+    }
+}
+
 /* ---------- Bot damage / death ---------- */
 function damageBot(bot, amount, point, headshot) {
     if (!bot.alive) return;
@@ -4130,6 +4270,7 @@ function animate() {
     updateProps(delta, now);
     updateCaveLighting(delta);
     sendMyState(now);
+    updateRemoteBodies();
     refreshNetDebug(now);
 
     if (isLocked && playerHealth > 0) {

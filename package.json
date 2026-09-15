@@ -7,7 +7,7 @@
     "start": "node server.js"
   },
   "dependencies": {
-    "express": "latest",
-    "socket.io": "latest"
+    "express": "^5.2.1",
+    "socket.io": "^4.8.3"
   }
 }

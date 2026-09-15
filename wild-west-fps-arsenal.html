@@ -1270,6 +1270,38 @@ const bounceLight = new THREE.DirectionalLight(0xc07838, 0.22);
 bounceLight.position.set(50, -25, 60); scene.add(bounceLight);
 
 /* =========================================================================
+   DETERMINISTIC WORLD
+
+   Every scrap of this map - the plank grain, where each rock landed, which
+   mesa sits beside the mine - came out of Math.random(). That was fine for one
+   player, but online it means two people are looking at two different towns:
+   you take cover behind a boulder that does not exist on your friend's screen,
+   and the server has no way to know which version is real.
+
+   So for the length of map construction only, Math.random is replaced by a
+   small seeded generator. Same seed, same town, on every machine - and the
+   collision data can then be baked once and handed to the server. The real
+   Math.random is put back immediately afterwards, so everything that should
+   stay unpredictable (bandit shirts, spawn choices, spread) still is.
+   ========================================================================= */
+const MAP_SEED = 20250915;
+
+function makeSeededRandom(seed) {
+    // mulberry32: tiny, fast, and good enough for scattering rocks
+    let a = seed >>> 0;
+    return function () {
+        a = (a + 0x6D2B79F5) >>> 0;
+        let t = a;
+        t = Math.imul(t ^ (t >>> 15), t | 1);
+        t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+}
+
+const _systemRandom = Math.random;
+Math.random = makeSeededRandom(MAP_SEED);
+
+/* =========================================================================
    4. MATERIALS
    ========================================================================= */
 const MAT = {
@@ -2112,6 +2144,24 @@ for (let i = 0; i < 7; i++) {
     scene.add(pts);
     animatedProps.push({ type: 'motes', obj: pts });
 })();
+
+/* The town is built. Give everything downstream real randomness back. */
+Math.random = _systemRandom;
+
+/* A cheap fingerprint of the collision data. Two clients showing the same
+   number are standing in the same world; the server prints its own on boot. */
+function mapFingerprint() {
+    let h = 2166136261;
+    for (let i = 0; i < colliders.length; i++) {
+        const c = colliders[i];
+        const parts = [c.min.x, c.min.y, c.min.z, c.max.x, c.max.y, c.max.z];
+        for (let k = 0; k < parts.length; k++) {
+            const v = Math.round(parts[k] * 100);
+            h ^= v; h = Math.imul(h, 16777619);
+        }
+    }
+    return ((h >>> 0).toString(16) + '-' + colliders.length);
+}
 
 /* ---------- Cave lighting: the shaft genuinely goes dark ---------- */
 const MINE_VOL = { x0: 0.6, x1: 15.4, z0: -86, z1: -52.5 };

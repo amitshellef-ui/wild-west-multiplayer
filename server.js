@@ -3,6 +3,9 @@ const http = require("http");
 const { Server } = require("socket.io");
 const path = require("path");
 
+const mapData = require("./map-data");
+const nav = require("./navigation");
+
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server);
@@ -436,4 +439,6 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, "0.0.0.0", () => {
     console.log("Server running on port " + PORT);
     console.log("Rooms enabled. Lobby:", PUBLIC_ROOM, "| default mode:", MODES[DEFAULT_MODE].label);
+    console.log("Map loaded:", mapData.FINGERPRINT, "|", mapData.COLLIDERS.length, "colliders |",
+        nav.blockedCount(), "blocked navigation cells");
 });

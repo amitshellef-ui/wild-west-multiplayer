@@ -24,6 +24,7 @@ app.get("/", (req, res) => {
      player-joined -> sent to everyone else when someone arrives
      player-left   -> sent to everyone when someone disconnects
      player-moved  -> sent to everyone else when someone moves (step 3+4)
+     player-shot   -> sent to everyone else when someone fires (step 7)
 
    A player record carries its own transform, so welcome and player-joined
    already tell a newcomer where everybody is standing. Without that, remote
@@ -43,6 +44,29 @@ function playerList() {
    Real anti-cheat (speed limits, hit validation) comes with server authority
    in a later step - this is only structural validation. */
 const MOVE_FIELDS = ["x", "y", "z", "yaw", "pitch"];
+
+// A shotgun is the widest weapon in the arsenal at 8 pellets; the cap keeps a
+// malformed or hostile client from asking everyone to draw a thousand tracers.
+const MAX_TRACERS = 12;
+
+function isVec3(v) {
+    return Array.isArray(v) && v.length === 3 &&
+        typeof v[0] === "number" && Number.isFinite(v[0]) &&
+        typeof v[1] === "number" && Number.isFinite(v[1]) &&
+        typeof v[2] === "number" && Number.isFinite(v[2]);
+}
+
+/* Purely cosmetic for now: the shot carries no damage, so nothing here decides
+   anything about the game. It is still validated, because every client will
+   turn this straight into geometry and sound. */
+function readShot(m) {
+    if (!m || typeof m !== "object") return null;
+    if (typeof m.w !== "number" || !Number.isFinite(m.w) || m.w < 0 || m.w > 32) return null;
+    if (!isVec3(m.o)) return null;
+    if (!Array.isArray(m.e) || m.e.length === 0 || m.e.length > MAX_TRACERS) return null;
+    for (let i = 0; i < m.e.length; i++) if (!isVec3(m.e[i])) return null;
+    return { w: m.w | 0, o: m.o, e: m.e };
+}
 
 function readMove(m) {
     if (!m || typeof m !== "object") return null;
@@ -94,6 +118,19 @@ io.on("connection", (socket) => {
             id: socket.id,
             x: move.x, y: move.y, z: move.z,
             yaw: move.yaw, pitch: move.pitch
+        });
+    });
+
+    /* ---- Shot relay (step 7): muzzle flash, tracers and sound only ---- */
+    socket.on("shoot", (m) => {
+        if (!players[socket.id]) return;
+        const shot = readShot(m);
+        if (!shot) return;
+        socket.broadcast.emit("player-shot", {
+            id: socket.id,
+            w: shot.w,
+            o: shot.o,
+            e: shot.e
         });
     });
 

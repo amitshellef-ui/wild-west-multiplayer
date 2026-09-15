@@ -274,7 +274,9 @@ const NET = {
     id: null,
     available: (typeof io === 'function'),
     sent: 0,
-    recv: 0
+    recv: 0,
+    shotsSent: 0,
+    shotsRecv: 0
 };
 
 /* Remote players only - never contains us. The server is the only thing that
@@ -335,6 +337,60 @@ function sendMyState(now) {
     NET.sent++;
 }
 
+/* One packet per trigger pull: where the muzzle was, and where every pellet
+   ended up. Endpoints rather than directions, so the tracer other players see
+   stops exactly where it stopped for the shooter. */
+function sendShot(w) {
+    if (!NET.connected || !NET.socket || netShotEnds.length === 0) return;
+    const muzzle = new THREE.Vector3();
+    muzzleAnchor.getWorldPosition(muzzle);
+
+    const ends = [];
+    for (let i = 0; i < netShotEnds.length; i += 3) {
+        ends.push([
+            +netShotEnds[i].toFixed(2),
+            +netShotEnds[i + 1].toFixed(2),
+            +netShotEnds[i + 2].toFixed(2)
+        ]);
+    }
+    NET.socket.emit('shoot', {
+        w: currentWpn,
+        o: [+muzzle.x.toFixed(2), +muzzle.y.toFixed(2), +muzzle.z.toFixed(2)],
+        e: ends
+    });
+    NET.shotsSent++;
+}
+
+/* Draw somebody else's shot. The tracer starts at their drawn gun rather than
+   at the muzzle position they sent, because their body is rendered slightly in
+   the past - starting from the sent point would make the line float away from
+   the model. The endpoint is theirs, so the shot still goes where it went. */
+const _shotOrigin = new THREE.Vector3();
+const _shotEnd = new THREE.Vector3();
+
+function playRemoteShot(m) {
+    if (!m || !m.id || !m.o || !m.e) return;
+    const body = remoteBodies[m.id];
+
+    _shotOrigin.set(m.o[0], m.o[1], m.o[2]);
+    if (body && body.rig.parts.muzzle) {
+        body.rig.parts.muzzle.getWorldPosition(_shotOrigin);
+        body.recoil = 0.45;                       // kick the gun arm
+    }
+
+    muzzleFlashAt(_shotOrigin, 3.0);
+    for (let i = 0; i < m.e.length; i++) {
+        const e = m.e[i];
+        _shotEnd.set(e[0], e[1], e[2]);
+        spawnTracer(_shotOrigin, _shotEnd, 0xffe8a0, 0.06);
+        if (i === 0) spawnParticles(_shotEnd, 0xb08a52, 4, 2.2);
+    }
+
+    const w = ARSENAL[m.w];
+    if (w && w.sfx) w.sfx(_shotOrigin);           // spatialised at the shooter
+    NET.shotsRecv++;
+}
+
 /* Temporary: shows what the network layer currently believes about everyone.
    This is the only visible proof of steps 3 and 4 - remote bodies arrive in
    step 5, and this panel disappears then. */
@@ -351,7 +407,8 @@ function refreshNetDebug(now) {
     }
     netDebugEl.style.display = 'block';
 
-    let html = '<div class="hdr">NET &middot; sent ' + NET.sent + ' &middot; recv ' + NET.recv + '</div>';
+    let html = '<div class="hdr">NET &middot; move ' + NET.sent + '/' + NET.recv +
+        ' &middot; shots ' + NET.shotsSent + '/' + NET.shotsRecv + '</div>';
     html += '<div class="me">you &nbsp;' +
         camera.position.x.toFixed(1) + ', ' + camera.position.z.toFixed(1) +
         ' &nbsp;yaw ' + yaw.toFixed(2) + '</div>';
@@ -424,6 +481,9 @@ function initNetwork() {
         netFeed('PLAYER JOINED - ' + p.id.slice(0, 6));
         refreshPlayerStatus();
     });
+
+    /* --- Remote gunfire (step 7). Cosmetic: no damage is applied. --- */
+    NET.socket.on('player-shot', function (m) { playRemoteShot(m); });
 
     /* --- Transform updates (steps 3 and 4) --- */
     NET.socket.on('player-moved', function (m) {
@@ -2434,7 +2494,7 @@ function createRemoteBody(id) {
 
     const body = {
         id: id, rig: rig, mesh: rig.mesh, plate: plate, color: color,
-        walkPhase: Math.random() * 6.28, speed: 0,
+        walkPhase: Math.random() * 6.28, speed: 0, recoil: 0,
         prevPos: new THREE.Vector3(), hasPrev: false
     };
     remoteBodies[id] = body;
@@ -2510,6 +2570,7 @@ function sampleAt(buf, t) {
    an AI state, so a remote player's legs match how fast they are actually going. */
 function animateRemoteBody(body, delta) {
     const P = body.rig.parts;
+    if (body.recoil > 0) body.recoil = Math.max(0, body.recoil - delta * 3.2);
     const speed = body.speed;
     const running = speed > 6.2;
     const moving = speed > 0.35;
@@ -2531,7 +2592,7 @@ function animateRemoteBody(body, delta) {
         P.torso.rotation.y = sw * 0.1;
         P.armL.rotation.x = -sw * amp * 0.8;
         P.armL.rotation.z = 0.12;
-        P.armR.rotation.x = sw * amp * 0.45 - 0.2;   // the gun hand swings less
+        P.armR.rotation.x = sw * amp * 0.45 - 0.2 - body.recoil;
         P.armR.rotation.z = -0.14;
     } else {
         body.walkPhase += delta * 1.6;
@@ -2544,7 +2605,7 @@ function animateRemoteBody(body, delta) {
         P.torso.rotation.y *= 0.85;
         P.armL.rotation.x = -0.05 - br * 0.05;
         P.armL.rotation.z = 0.12;
-        P.armR.rotation.x += (-0.2 - P.armR.rotation.x) * 0.15;
+        P.armR.rotation.x += ((-0.2 - body.recoil) - P.armR.rotation.x) * 0.15;
         P.armR.rotation.z = -0.14;
     }
 }
@@ -3821,6 +3882,10 @@ function onBossDefeated() {
 const shootRay = new THREE.Raycaster();
 let camShake = 0;
 
+/* Filled in by fireOneRay and drained by shoot(), so one trigger pull produces
+   exactly one network packet no matter how many pellets it threw. */
+const netShotEnds = [];
+
 function fireOneRay(spread, dmgBody, dmgHead, range) {
     const dir = new THREE.Vector3(0, 0, -1);
     const sx = (Math.random() - 0.5) * spread;
@@ -3862,6 +3927,7 @@ function fireOneRay(spread, dmgBody, dmgHead, range) {
         }
     }
     spawnTracer(muzzleWorld, end, 0xffe8a0, 0.06);
+    netShotEnds.push(end.x, end.y, end.z);
 }
 
 /* Cut a reload short and keep whatever is already in the tube */
@@ -3895,6 +3961,7 @@ function shoot(manual) {
     if (clip <= 0 && reserve > 0) autoReloadAt = now + 220;
 
     const spread = (isAiming ? (w.spreadAds - w.spreadAds * 0.7 * adsTime) : w.spreadHip) + (onGround ? 0 : 0.03);
+    netShotEnds.length = 0;
     for (let p = 0; p < w.pellets; p++) {
         fireOneRay(spread + (w.pellets > 1 ? (Math.random() * 0.02) : 0), w.dmg, w.head, w.range);
     }
@@ -3903,6 +3970,7 @@ function shoot(manual) {
         fireOneRay(spread + 0.05, w.dmg, w.head, w.range);
     }
 
+    sendShot(w);
     w.sfx(null);
     WPN.recoilPos = w.recoil;
     WPN.recoilRot = w.recoil * 1.1;

@@ -272,11 +272,16 @@ const NET = {
     socket: null,
     connected: false,
     id: null,
+    /* Replaced by whatever the server sends in its welcome packet. Co-operative
+       is the safe default: if the mode never arrives we would rather bullets
+       pass through team mates than hurt them. */
+    mode: { id: 'coop', label: 'CO-OP', friendlyFire: false },
     available: (typeof io === 'function'),
     sent: 0,
     recv: 0,
     shotsSent: 0,
-    shotsRecv: 0
+    shotsRecv: 0,
+    hitsSent: 0
 };
 
 /* Remote players only - never contains us. The server is the only thing that
@@ -335,6 +340,58 @@ function sendMyState(now) {
         pitch: +pitch.toFixed(3)
     });
     NET.sent++;
+}
+
+/* =========================================================================
+   PLAYER DAMAGE (multiplayer, step 8+9)
+
+   The client reports only *that* it hit and *where on the body*. How much that
+   costs, whether it kills, and when the victim comes back are all decided by
+   the server. Pellets are gathered per trigger pull so a shotgun is one report
+   instead of eight, which lets the server rate-limit cleanly.
+   ========================================================================= */
+const netHits = {};          // victim id -> { body, head }
+
+function registerPlayerHit(id, headshot) {
+    if (!NET.mode.friendlyFire) return;
+    if (!netHits[id]) netHits[id] = { body: 0, head: 0 };
+    if (headshot) netHits[id].head++; else netHits[id].body++;
+}
+
+function sendHits() {
+    const ids = Object.keys(netHits);
+    if (ids.length === 0) return;
+    if (NET.connected && NET.socket) {
+        NET.socket.emit('hit', {
+            w: currentWpn,
+            targets: ids.map(function (id) {
+                return { id: id, body: netHits[id].body, head: netHits[id].head };
+            })
+        });
+        NET.hitsSent++;
+    }
+    for (let i = 0; i < ids.length; i++) delete netHits[ids[i]];
+}
+
+/* Bandits, the boss and regeneration are still simulated locally, so the change
+   they make to our health has to be told to the server or its copy drifts.
+   Batched to a few times a second rather than sent per frame. */
+let healthDeltaPending = 0;
+let healthDeltaAt = 0;
+
+function reportHealthDelta(d) {
+    if (!NET.connected) return;
+    healthDeltaPending += d;
+}
+
+function flushHealthDelta(now) {
+    if (!NET.connected || !NET.socket) { healthDeltaPending = 0; return; }
+    if (healthDeltaPending === 0) return;
+    if (now - healthDeltaAt < 250) return;
+    healthDeltaAt = now;
+    const d = Math.round(healthDeltaPending * 10) / 10;
+    healthDeltaPending = 0;
+    if (d !== 0) NET.socket.emit('health-delta', { d: d });
 }
 
 /* One packet per trigger pull: where the muzzle was, and where every pellet
@@ -408,14 +465,16 @@ function refreshNetDebug(now) {
     netDebugEl.style.display = 'block';
 
     let html = '<div class="hdr">NET &middot; move ' + NET.sent + '/' + NET.recv +
-        ' &middot; shots ' + NET.shotsSent + '/' + NET.shotsRecv + '</div>';
+        ' &middot; shots ' + NET.shotsSent + '/' + NET.shotsRecv +
+        ' &middot; hits ' + NET.hitsSent + '</div>';
     html += '<div class="me">you &nbsp;' +
         camera.position.x.toFixed(1) + ', ' + camera.position.z.toFixed(1) +
         ' &nbsp;yaw ' + yaw.toFixed(2) + '</div>';
     ids.forEach(function (id) {
         const p = PLAYERS[id];
         const age = p.lastUpdate ? Math.round(now - p.lastUpdate) : -1;
-        html += '<div class="them">' + id.slice(0, 6) + ' &nbsp;' +
+        html += '<div class="them">' + id.slice(0, 6) +
+            (typeof p.health === 'number' ? ' [' + Math.round(p.health) + ']' : '') + ' &nbsp;' +
             (p.x === undefined ? '?' : p.x.toFixed(1)) + ', ' +
             (p.z === undefined ? '?' : p.z.toFixed(1)) +
             ' &nbsp;yaw ' + (p.yaw === undefined ? '?' : p.yaw.toFixed(2)) +
@@ -427,7 +486,8 @@ function refreshNetDebug(now) {
 function refreshPlayerStatus() {
     if (!NET.connected) return;
     const n = playerCount();
-    setNetStatus('ONLINE - ' + n + (n === 1 ? ' PLAYER' : ' PLAYERS'), 'on');
+    setNetStatus('ONLINE - ' + n + (n === 1 ? ' PLAYER' : ' PLAYERS') +
+        ' - ' + NET.mode.label, 'on');
 }
 
 /* Join/leave notices reuse the existing kill feed. Guarded because the feed
@@ -462,6 +522,7 @@ function initNetwork() {
     NET.socket.on('welcome', function (data) {
         if (!data) return;
         NET.id = data.id;
+        if (data.mode) NET.mode = data.mode;
         clearPlayers();
         (data.players || []).forEach(function (p) {
             if (p && p.id !== NET.id) {
@@ -480,6 +541,70 @@ function initNetwork() {
         console.log('[NET] player joined: ' + p.id + ' (total ' + playerCount() + ')');
         netFeed('PLAYER JOINED - ' + p.id.slice(0, 6));
         refreshPlayerStatus();
+    });
+
+    /* --- Health, death and respawn: the server decides all three --- */
+    NET.socket.on('player-health', function (m) {
+        if (!m || !m.id) return;
+        if (m.id === NET.id) {
+            // Snap to the authoritative value; local prediction was only a guess
+            const dropped = m.health < playerHealth;
+            playerHealth = m.health;
+            updateHealthUI();
+            if (dropped && m.by) {
+                lastDamageTime = performance.now();
+                sfxPain();
+                ui.flash.style.opacity = '0.75';
+                setTimeout(function () { ui.flash.style.opacity = '0'; }, 160);
+                camShake = Math.min(0.5, camShake + 0.22);
+            }
+            return;
+        }
+        const p = PLAYERS[m.id];
+        if (p) p.health = m.health;
+        const body = remoteBodies[m.id];
+        if (body) showRemoteHealth(body, m.health);
+    });
+
+    NET.socket.on('player-died', function (m) {
+        if (!m || !m.id) return;
+        const name = m.id.slice(0, 6);
+        const killer = m.by ? m.by.slice(0, 6) : null;
+
+        if (m.id === NET.id) {
+            playerHealth = 0;
+            deaths++;
+            updateHealthUI(); updateBoard();
+            netFeed(killer ? ('KILLED BY ' + killer) : 'ELIMINATED');
+            showRespawnNotice(m.respawnIn || 4000);
+        } else {
+            if (m.by === NET.id) { kills++; updateBoard(); }
+            netFeed(killer ? (killer + ' KILLED ' + name) : (name + ' DIED'));
+            const body = remoteBodies[m.id];
+            if (body) startRemoteDeath(body);
+        }
+    });
+
+    NET.socket.on('player-respawn', function (m) {
+        if (!m || !m.id) return;
+        const p = PLAYERS[m.id];
+        if (p) {
+            p.health = m.health;
+            p.x = m.x; p.y = m.y; p.z = m.z; p.yaw = m.yaw;
+            p.buf = [{ t: performance.now(), x: m.x, y: m.y, z: m.z, yaw: m.yaw, pitch: 0 }];
+        }
+        if (m.id === NET.id) {
+            playerHealth = m.health;
+            camera.position.set(m.x, EYE_HEIGHT, m.z);
+            yaw = m.yaw || 0; pitch = 0;
+            velY = 0;
+            updateHealthUI();
+            hideRespawnNotice();
+            netFeed('RESPAWNED');
+        } else {
+            const body = remoteBodies[m.id];
+            if (body) endRemoteDeath(body, m);
+        }
     });
 
     /* --- Remote gunfire (step 7). Cosmetic: no damage is applied. --- */
@@ -2495,9 +2620,13 @@ function createRemoteBody(id) {
     const body = {
         id: id, rig: rig, mesh: rig.mesh, plate: plate, color: color,
         walkPhase: Math.random() * 6.28, speed: 0, recoil: 0,
+        alive: true, deathT: -1, deathDir: 1,
         prevPos: new THREE.Vector3(), hasPrev: false
     };
     remoteBodies[id] = body;
+    const known = PLAYERS[id];
+    if (known && typeof known.health === 'number') showRemoteHealth(body, known.health);
+    if (known && known.alive === false) startRemoteDeath(body);
     console.log('[NET] body created for ' + id.slice(0, 6));
     return body;
 }
@@ -2611,6 +2740,11 @@ function animateRemoteBody(body, delta) {
 }
 
 function applyRemoteTransform(p, body, delta) {
+    if (body.alive === false) {
+        // A corpse stops tracking packets; it just finishes falling over
+        if (body.deathT >= 0 && body.deathT < 2) updateRemoteDeath(body, delta);
+        return;
+    }
     const shown = sampleAt(p.buf, performance.now() - INTERP_DELAY);
     if (!shown) return;
 
@@ -2632,6 +2766,59 @@ function applyRemoteTransform(p, body, delta) {
     body.speed += (inst - body.speed) * Math.min(1, 12 * delta);
 
     animateRemoteBody(body, delta);
+}
+
+/* The rig already carries the bandit health bar; reuse it rather than build a
+   second one. Hidden at full health so the town is not full of floating bars. */
+function showRemoteHealth(body, health) {
+    const pct = Math.max(0, Math.min(1, health / 100));
+    const P = body.rig.parts;
+    const show = pct < 1 && pct > 0;
+    P.barBg.visible = show;
+    P.barFill.visible = show;
+    P.barFill.scale.x = 0.94 * pct;
+    P.barFillMat.color.setHex(pct > 0.5 ? 0x5ec24a : (pct > 0.25 ? 0xe0a83c : 0xd94a2b));
+}
+
+function startRemoteDeath(body) {
+    body.alive = false;
+    body.deathT = 0;
+    body.deathDir = Math.random() > 0.5 ? 1 : -1;
+    body.rig.parts.barBg.visible = false;
+    body.rig.parts.barFill.visible = false;
+    body.plate.visible = false;
+    sfxBotDeath(body.mesh.position);
+    spawnParticles(body.mesh.position.clone().setY(1.2), 0x8a2a1a, 20, 4);
+}
+
+function endRemoteDeath(body, m) {
+    body.alive = true;
+    body.deathT = -1;
+    body.plate.visible = true;
+    body.mesh.visible = true;
+    const P = body.rig.parts;
+    P.bob.rotation.set(0, 0, 0);
+    P.bob.position.y = 0;
+    P.armL.rotation.set(0, 0, 0.12);
+    P.armR.rotation.set(0, 0, -0.14);
+    P.legL.rotation.x = 0; P.legR.rotation.x = 0;
+    body.hasPrev = false;
+    body.speed = 0;
+    showRemoteHealth(body, m.health);
+}
+
+/* Mirrors the bandit death fall, so a player dropping looks like anyone else
+   dropping. Runs instead of the walk cycle while it lasts. */
+function updateRemoteDeath(body, delta) {
+    body.deathT += delta;
+    const t = Math.min(1, body.deathT / 0.75);
+    const e = 1 - Math.pow(1 - t, 3);
+    const P = body.rig.parts;
+    P.bob.rotation.x = e * Math.PI * 0.46 * body.deathDir;
+    P.bob.rotation.z = e * 0.25 * body.deathDir;
+    P.bob.position.y = -e * 0.55;
+    P.armL.rotation.x = -e * 0.9;
+    P.armR.rotation.x = -e * 1.2;
 }
 
 function updateRemoteBodies(delta) {
@@ -3767,6 +3954,26 @@ function pushFeed(text) {
     setTimeout(function () { if (d.parentNode) d.parentNode.removeChild(d); }, 3600);
     while (ui.feed.children.length > 5) ui.feed.removeChild(ui.feed.firstChild);
 }
+/* Online, dying is a pause rather than a game over: the server brings you back
+   on its own clock. Offline, the original game-over screen still runs. */
+let respawnTimer = null;
+function showRespawnNotice(ms) {
+    hideRespawnNotice();
+    let left = Math.ceil(ms / 1000);
+    ui.cta.innerText = 'נפלת · חוזר בעוד ' + left;
+    ui.menu.style.display = 'flex';
+    document.exitPointerLock();
+    respawnTimer = setInterval(function () {
+        left--;
+        if (left <= 0) { ui.cta.innerText = 'חוזר לקרב...'; return; }
+        ui.cta.innerText = 'נפלת · חוזר בעוד ' + left;
+    }, 1000);
+}
+function hideRespawnNotice() {
+    if (respawnTimer) { clearInterval(respawnTimer); respawnTimer = null; }
+    ui.cta.innerText = 'לחץ כדי לשלוף';
+}
+
 function showHitmarker() {
     ui.hitmark.style.opacity = '1';
     setTimeout(function () { ui.hitmark.style.opacity = '0'; }, 110);
@@ -3776,6 +3983,7 @@ function showHitmarker() {
 function takeDamage(amount) {
     if (playerHealth <= 0) return;
     playerHealth -= amount;
+    reportHealthDelta(-amount);
     lastDamageTime = performance.now();
     updateHealthUI();
     sfxPain();
@@ -3783,12 +3991,13 @@ function takeDamage(amount) {
     setTimeout(function () { ui.flash.style.opacity = '0'; }, 160);
     camShake = Math.min(0.5, camShake + 0.22);
     if (playerHealth <= 0) {
-        playerHealth = 0; deaths++;
-        updateBoard();
-        gameOver();
+        playerHealth = 0;
+        // Online, the server declares the death and schedules the respawn
+        if (!NET.connected) { deaths++; updateBoard(); gameOver(); }
     }
 }
 function onKillReward() {
+    reportHealthDelta(Math.min(4, 100 - playerHealth));
     playerHealth = Math.min(100, playerHealth + 4);
     playerSprint = Math.min(100, playerSprint + 12);
     wpnAmmo[currentWpn].reserve = reserve = reserve + 6;
@@ -3896,6 +4105,16 @@ function fireOneRay(spread, dmgBody, dmgHead, range) {
     shootRay.far = range || 200;
     const targets = [];
     for (let i = 0; i < bots.length; i++) if (bots[i].alive) targets.push(bots[i].mesh);
+    // Other players are only in the line of fire when the mode allows it. With
+    // friendly fire off they are not targets at all, so shots pass straight
+    // through a team mate to the bandit behind them.
+    if (NET.mode.friendlyFire) {
+        const remoteIds = Object.keys(remoteBodies);
+        for (let i = 0; i < remoteIds.length; i++) {
+            const rb = remoteBodies[remoteIds[i]];
+            if (rb.alive !== false) targets.push(rb.mesh);
+        }
+    }
     targets.push(world);
     const hits = shootRay.intersectObjects(targets, true);
 
@@ -3906,6 +4125,19 @@ function fireOneRay(spread, dmgBody, dmgHead, range) {
     if (hits.length) {
         const h = hits[0];
         end = h.point;
+        const remoteId = h.object.userData.remoteId;
+        if (remoteId && PLAYERS[remoteId]) {
+            const head = !!h.object.userData.isHead;
+            showHitmarker();
+            sfxHitMarker();
+            sfxFleshHit(h.point);
+            spawnParticles(h.point, head ? 0xff5050 : 0xc03a2a, head ? 16 : 10, 3.4);
+            registerPlayerHit(remoteId, head);
+            spawnTracer(muzzleWorld, end, 0xffe8a0, 0.06);
+            netShotEnds.push(end.x, end.y, end.z);
+            return;
+        }
+
         const bot = h.object.userData.bot;
         if (bot && bot.alive) {
             const head = !!h.object.userData.isHead;
@@ -3971,6 +4203,7 @@ function shoot(manual) {
     }
 
     sendShot(w);
+    sendHits();
     w.sfx(null);
     WPN.recoilPos = w.recoil;
     WPN.recoilRot = w.recoil * 1.1;
@@ -4323,9 +4556,12 @@ function updatePlayer(delta, now) {
 
     // Slow health regen out of combat
     if (playerHealth > 0 && playerHealth < 100 && now - lastDamageTime > 6500) {
+        const before = playerHealth;
         playerHealth = Math.min(100, playerHealth + 4.5 * delta);
+        reportHealthDelta(playerHealth - before);
         updateHealthUI();
     }
+    flushHealthDelta(now);
 
     // Sights settle: accuracy tightens over the first third of a second of aiming
     if (isAiming) {

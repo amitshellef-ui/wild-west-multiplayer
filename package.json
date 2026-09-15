@@ -1,0 +1,13 @@
+{
+  "name": "wild-west-multiplayer",
+  "version": "1.0.0",
+  "description": "Wild West Multiplayer FPS",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "latest",
+    "socket.io": "latest"
+  }
+}

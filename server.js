@@ -47,7 +47,56 @@ const DEFAULT_MODE = "coop";
 const PUBLIC_ROOM = "PUBLIC";
 const CODE_ALPHABET = "ACDEFGHJKLMNPQRSTUVWXYZ23456789";
 const CODE_LENGTH = 4;
-const ROOM_LIMIT = 8;                  // players per private room
+const ROOM_LIMIT = 8;                  // players per room - lobby included
+const MAX_LOBBIES = 6;                 // 48 people in lobbies, which is already
+                                       // past what the free instance enjoys
+
+/* Eight is not a guess. Every player's position is relayed to every other
+   player twenty times a second, so the traffic inside a room grows with the
+   square of the people in it: eight players is about a thousand messages a
+   second and the server keeps perfect time, sixteen is four thousand and it
+   starts to slip. Measured against the deployed server, not assumed.
+
+   The limit used to be enforced in exactly one of the three doors into a room.
+   The lobby had no limit at all, and a shared link went straight past it. So a
+   popular evening put everybody in one room and the room was the thing that
+   broke. Now all three doors count, and the lobby is many small lobbies rather
+   than one big one.
+
+   The whole server is a separate question from one room. Measured: 24 people
+   across four rooms cost the deployed instance nothing it could not keep up
+   with. Past forty or so, in any arrangement, the simulation loop is what runs
+   out first. MAX_LOBBIES is set below that on purpose. */
+function isLobby(code) {
+    return code === PUBLIC_ROOM || /^PUBLIC([2-9]|1[0-9])$/.test(code);
+}
+
+function roomHasSpace(code) {
+    return roomCount(code) < ROOM_LIMIT;
+}
+
+/* Where a newcomer with no room code lands: the fullest lobby that still has
+   space. Filling one before opening the next is deliberate - people came here
+   to find other people, and spreading them one to a room hides them. */
+function pickLobby() {
+    let best = null, bestCount = -1;
+    for (const code in rooms) {
+        if (!isLobby(code) || !roomHasSpace(code)) continue;
+        const n = roomCount(code);
+        if (n > bestCount) { bestCount = n; best = code; }
+    }
+    if (best) return best;
+
+    for (let i = 2; i <= MAX_LOBBIES; i++) {
+        const code = PUBLIC_ROOM + i;
+        if (!rooms[code]) {
+            createRoom(code, DEFAULT_MODE);
+            console.log("Lobby", code, "opened - the others are full");
+            return code;
+        }
+    }
+    return PUBLIC_ROOM;          // everything is full; crowded beats shut out
+}
 
 const rooms = {};                      // code -> room record
 const players = {};                    // socket.id -> player record
@@ -88,7 +137,9 @@ function roomCount(code) {
     return n;
 }
 
-/* A private room disappears once the last person walks out of it. */
+/* A room disappears once the last person walks out of it. The first lobby
+   stays for ever because it is where the front door leads; the extra ones are
+   opened on demand and closed the same way. */
 function dropRoomIfEmpty(code) {
     if (code === PUBLIC_ROOM) return;
     if (roomCount(code) === 0 && rooms[code]) {
@@ -308,9 +359,21 @@ io.on("connection", (socket) => {
     const me = players[socket.id];
 
     /* A shared link carries its room code in the connection query, so a friend
-       who clicks it lands straight inside instead of in the lobby. */
+       who clicks it lands straight inside instead of in the lobby - unless the
+       room is already full, in which case they are told why and put in a lobby
+       rather than being made the ninth person in an eight person room. */
     const wanted = readCode(socket.handshake.query && socket.handshake.query.room);
-    const startRoom = (wanted && rooms[wanted]) ? wanted : PUBLIC_ROOM;
+    let startRoom;
+    if (wanted && rooms[wanted] && roomHasSpace(wanted)) {
+        startRoom = wanted;
+    } else {
+        startRoom = pickLobby();
+        if (wanted && rooms[wanted]) {
+            socket.emit("room-error", { reason: "ROOM_FULL", code: wanted });
+        } else if (wanted) {
+            socket.emit("room-error", { reason: "NO_SUCH_ROOM", code: wanted });
+        }
+    }
 
     socket.emit("welcome", { id: socket.id });
     placeInRoom(socket, me, startRoom);
@@ -343,7 +406,15 @@ io.on("connection", (socket) => {
         if (!code) { socket.emit("room-error", { reason: "BAD_CODE" }); return; }
         if (!rooms[code]) { socket.emit("room-error", { reason: "NO_SUCH_ROOM", code: code }); return; }
         if (code === p.room) { socket.emit("room-error", { reason: "ALREADY_HERE", code: code }); return; }
-        if (code !== PUBLIC_ROOM && roomCount(code) >= ROOM_LIMIT) {
+
+        /* Asking for a full lobby is asking to play, not asking for that exact
+           room - so it sends you to one with space. Asking for a full private
+           room is asking for those particular people, and gets an answer. */
+        if (!roomHasSpace(code)) {
+            if (isLobby(code)) {
+                placeInRoom(socket, p, pickLobby());
+                return;
+            }
             socket.emit("room-error", { reason: "ROOM_FULL", code: code });
             return;
         }
@@ -352,11 +423,11 @@ io.on("connection", (socket) => {
 
     socket.on("leave-room", () => {
         const p = players[socket.id];
-        if (!p || p.room === PUBLIC_ROOM) return;
+        if (!p || isLobby(p.room)) return;
         const now = Date.now();
         if (now - p.lastRoomAt < 1000) return;
         p.lastRoomAt = now;
-        placeInRoom(socket, p, PUBLIC_ROOM);
+        placeInRoom(socket, p, pickLobby());
     });
 
     /* ---- Position + rotation relay (steps 3 and 4) ---- */
@@ -696,6 +767,8 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, "0.0.0.0", () => {
     console.log("Server running on port " + PORT);
     console.log("Rooms enabled. Lobby:", PUBLIC_ROOM, "| default mode:", MODES[DEFAULT_MODE].label);
+    console.log("Room limit:", ROOM_LIMIT, "players - lobby included, up to",
+        MAX_LOBBIES, "lobbies opened on demand");
     console.log("Map loaded:", mapData.FINGERPRINT, "|", mapData.COLLIDERS.length, "colliders |",
         nav.blockedCount(), "blocked navigation cells");
     console.log("Bandits simulated here:", bandits.BANDIT.startCount, "to start, one more every",

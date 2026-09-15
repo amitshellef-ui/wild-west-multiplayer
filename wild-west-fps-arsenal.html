@@ -132,6 +132,18 @@
     #net-status.net-wait { color: #e0a83c; border-color: #6b451f; }
     #net-status.net-off { color: #b8734e; border-color: #5a3020; }
 
+    /* Temporary network readout - proves position/rotation sync before any
+       remote body exists in the world. Goes away in step 5. */
+    #net-debug {
+        top: 152px; left: 18px; min-width: 210px; display: none;
+        font-family: 'Segoe UI', Tahoma, sans-serif; font-size: 10px;
+        color: #9c8156; line-height: 1.65; padding: 8px 11px;
+    }
+    #net-debug .hdr { color: #c99a4e; letter-spacing: 1px; margin-bottom: 4px; }
+    #net-debug .me { color: #ffd77a; }
+    #net-debug .them { color: #e8a06a; }
+    #net-debug .age { color: #6b5330; }
+
     #feed { top: 165px; right: 18px; width: 210px; background: none; border: none; box-shadow: none; padding: 0; }
     .feed-item {
         background: rgba(30,18,6,0.82); border-right: 3px solid #c47a52;
@@ -231,6 +243,8 @@
 
 <div id="net-status" class="panel net-wait"><span class="dot"></span><span id="net-text">CONNECTING</span></div>
 
+<div id="net-debug" class="panel"></div>
+
 <div id="menu">
     <h1>DUSTY GULCH</h1>
     <h2>ARSENAL &middot; BOSS HUNT</h2>
@@ -258,7 +272,9 @@ const NET = {
     socket: null,
     connected: false,
     id: null,
-    available: (typeof io === 'function')
+    available: (typeof io === 'function'),
+    sent: 0,
+    recv: 0
 };
 
 /* Remote players only - never contains us. The server is the only thing that
@@ -272,12 +288,82 @@ function playerCount() {
     return Object.keys(PLAYERS).length + (NET.connected ? 1 : 0);
 }
 
+/* Outgoing transform updates. 20 per second is plenty: the gap between
+   packets gets smoothed out on the receiving side in step 6. Sending every
+   frame would triple the traffic for no visible gain. */
+const NET_SEND_HZ = 20;
+const NET_SEND_INTERVAL = 1000 / NET_SEND_HZ;
+let netLastSend = 0;
+const netLastSent = { x: 1e9, y: 1e9, z: 1e9, yaw: 1e9, pitch: 1e9 };
+
 const netStatusEl = document.getElementById('net-status');
 const netTextEl = document.getElementById('net-text');
+const netDebugEl = document.getElementById('net-debug');
 
 function setNetStatus(text, state) {
     if (netTextEl) netTextEl.textContent = text;
     if (netStatusEl) netStatusEl.className = 'panel net-' + state;
+}
+
+/* Push our own transform to the server, throttled, and only when it actually
+   changed. Runs from the render loop but is not tied to the frame rate. */
+function sendMyState(now) {
+    if (!NET.connected || !NET.socket) return;
+    if (now - netLastSend < NET_SEND_INTERVAL) return;
+
+    const p = camera.position;
+    const moved =
+        Math.abs(p.x - netLastSent.x) > 0.01 ||
+        Math.abs(p.y - netLastSent.y) > 0.01 ||
+        Math.abs(p.z - netLastSent.z) > 0.01 ||
+        Math.abs(yaw - netLastSent.yaw) > 0.002 ||
+        Math.abs(pitch - netLastSent.pitch) > 0.002;
+    if (!moved) return;
+
+    netLastSend = now;
+    netLastSent.x = p.x; netLastSent.y = p.y; netLastSent.z = p.z;
+    netLastSent.yaw = yaw; netLastSent.pitch = pitch;
+
+    NET.socket.emit('move', {
+        x: +p.x.toFixed(2),
+        y: +p.y.toFixed(2),
+        z: +p.z.toFixed(2),
+        yaw: +yaw.toFixed(3),
+        pitch: +pitch.toFixed(3)
+    });
+    NET.sent++;
+}
+
+/* Temporary: shows what the network layer currently believes about everyone.
+   This is the only visible proof of steps 3 and 4 - remote bodies arrive in
+   step 5, and this panel disappears then. */
+let netDebugTimer = 0;
+function refreshNetDebug(now) {
+    if (!netDebugEl) return;
+    if (now - netDebugTimer < 150) return;
+    netDebugTimer = now;
+
+    const ids = Object.keys(PLAYERS);
+    if (!NET.connected || ids.length === 0) {
+        netDebugEl.style.display = 'none';
+        return;
+    }
+    netDebugEl.style.display = 'block';
+
+    let html = '<div class="hdr">NET &middot; sent ' + NET.sent + ' &middot; recv ' + NET.recv + '</div>';
+    html += '<div class="me">you &nbsp;' +
+        camera.position.x.toFixed(1) + ', ' + camera.position.z.toFixed(1) +
+        ' &nbsp;yaw ' + yaw.toFixed(2) + '</div>';
+    ids.forEach(function (id) {
+        const p = PLAYERS[id];
+        const age = p.lastUpdate ? Math.round(now - p.lastUpdate) : -1;
+        html += '<div class="them">' + id.slice(0, 6) + ' &nbsp;' +
+            (p.x === undefined ? '?' : p.x.toFixed(1)) + ', ' +
+            (p.z === undefined ? '?' : p.z.toFixed(1)) +
+            ' &nbsp;yaw ' + (p.yaw === undefined ? '?' : p.yaw.toFixed(2)) +
+            ' <span class="age">' + (age < 0 ? 'no data' : age + 'ms') + '</span></div>';
+    });
+    netDebugEl.innerHTML = html;
 }
 
 function refreshPlayerStatus() {
@@ -332,6 +418,17 @@ function initNetwork() {
         console.log('[NET] player joined: ' + p.id + ' (total ' + playerCount() + ')');
         netFeed('PLAYER JOINED - ' + p.id.slice(0, 6));
         refreshPlayerStatus();
+    });
+
+    /* --- Transform updates (steps 3 and 4) --- */
+    NET.socket.on('player-moved', function (m) {
+        if (!m || !m.id) return;
+        const p = PLAYERS[m.id];
+        if (!p) return;            // unknown id: the roster event has not arrived yet
+        p.x = m.x; p.y = m.y; p.z = m.z;
+        p.yaw = m.yaw; p.pitch = m.pitch;
+        p.lastUpdate = performance.now();
+        NET.recv++;
     });
 
     NET.socket.on('player-left', function (p) {
@@ -4032,6 +4129,8 @@ function animate() {
     updateVFX(delta);
     updateProps(delta, now);
     updateCaveLighting(delta);
+    sendMyState(now);
+    refreshNetDebug(now);
 
     if (isLocked && playerHealth > 0) {
         updatePlayer(delta, now);

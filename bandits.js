@@ -251,6 +251,19 @@ function nearestPlayer(room, players, fromX, fromZ) {
     return best ? { player: best, dist: bestD } : null;
 }
 
+/* Where it stood over the last third of a second. The browser draws every body
+   110ms in the past, and a hit report takes a round trip on top of that - so
+   by the time the server hears "I hit it", the bandit may have stepped behind
+   a corner the shooter could still see. Asking where it was, not just where it
+   is, is what takes wrongly refused honest hits from about 1% to about 0.1%. */
+const TRAIL_LENGTH = 7;               // 7 ticks x 50ms = 300ms
+
+function recordTrail(e) {
+    if (!e.trail) e.trail = [];
+    e.trail.push(e.x, e.z);
+    if (e.trail.length > TRAIL_LENGTH * 2) e.trail.splice(0, 2);
+}
+
 function stepBandit(room, b, players, now, dt, sink) {
     if (!b.alive) {
         /* Nobody comes back while a boss is on the field - the browser held
@@ -310,8 +323,15 @@ function stepBandit(room, b, players, now, dt, sink) {
             b.path = [{ x: goal.x, z: goal.z }];
             b.pathIndex = 0;
         } else {
-            b.path = nav.findPath(b.x, b.z, goal.x, goal.z);
-            b.pathIndex = 0;
+            const route = nav.findPath(b.x, b.z, goal.x, goal.z);
+            if (route === undefined) {
+                /* this tick's search allowance is spent - keep the route we
+                   have and ask again in a tick or two */
+                b.repathAt = now + 50 + Math.random() * 100;
+            } else {
+                b.path = route;
+                b.pathIndex = 0;
+            }
         }
     }
 
@@ -351,6 +371,7 @@ function stepBandit(room, b, players, now, dt, sink) {
 
     separate(room, b);
     b.moving = moved;
+    recordTrail(b);
 
     /* --- stuck recovery: same idea as the browser had --- */
     if (now >= b.stuckCheckAt) {
@@ -469,5 +490,6 @@ function hurt(room, banditId, amount) {
 }
 
 module.exports = {
-    BANDIT, TICK_MS, initRoom, stepRoom, snapshot, hurt, aliveCount, banditList, fillTo
+    BANDIT, TICK_MS, initRoom, stepRoom, snapshot, hurt, aliveCount, banditList, fillTo,
+    recordTrail, TRAIL_LENGTH
 };

@@ -30,6 +30,7 @@
    the browser used, so it fights the way it always did.
    ========================================================================= */
 const nav = require("./navigation");
+const bandits = require("./bandits");
 
 /* The table is duplicated in the client, which owns the colours and the
    model. Anything here that the client also reads - the name, the ability
@@ -411,8 +412,15 @@ function stepBoss(room, b, players, now, dt, sink) {
             b.path = [{ x: goal.x, z: goal.z }];
             b.pathIndex = 0;
         } else {
-            b.path = nav.findPath(b.x, b.z, goal.x, goal.z);
-            b.pathIndex = 0;
+            const route = nav.findPath(b.x, b.z, goal.x, goal.z);
+            if (route === undefined) {
+                /* this tick's search allowance is spent - keep the route we
+                   have and ask again in a tick or two */
+                b.repathAt = now + 50 + Math.random() * 100;
+            } else {
+                b.path = route;
+                b.pathIndex = 0;
+            }
         }
     }
 
@@ -477,6 +485,8 @@ function stepBoss(room, b, players, now, dt, sink) {
         }
         b.lastX = b.x; b.lastZ = b.z;
     }
+
+    bandits.recordTrail(b);
 
     /* --- shooting --- */
     const range = b.type.id === "snipe" ? BOSS.snipeRange : BOSS.fireRange;

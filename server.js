@@ -194,6 +194,34 @@ function assignSlot(p, code) {
 
 function round2(v) { return Math.round(v * 100) / 100; }
 
+/* =========================================================================
+   THE SCOREBOARD (step 16)
+
+   Once the fight became one shared fight there was finally something worth
+   comparing. The server already counted kills and deaths for its own reasons;
+   now it also counts what each player did to the boss, and tells the room.
+
+   A row is [slot, kills, deaths, bossDamage, bossKills]. The whole table goes
+   out at most once a second, and only when something on it changed - a room
+   where nobody is dying sends nothing at all.
+
+   Scores belong to the room, not to the player: walking into a room starts you
+   at zero, the same way walking in starts you at wave one.
+   ========================================================================= */
+function scoreRows(code) {
+    const rows = [];
+    for (const id in players) {
+        const p = players[id];
+        if (p.room !== code) continue;
+        rows.push([p.slot, p.kills, p.deaths, Math.round(p.bossDamage), p.bossKills]);
+    }
+    return rows;
+}
+
+function scoresChanged(code) {
+    if (rooms[code]) rooms[code].scoresDirty = true;
+}
+
 /* Verified against the map's own collision and navigation data: every one of
    these is clear of geometry, sits on a walkable navigation cell, and has a
    path back to the town centre. */
@@ -235,6 +263,48 @@ function pickSpawn(room) {
     }
     return best || SPAWNS[Math.floor(Math.random() * SPAWNS.length)];
 }
+
+/* =========================================================================
+   LINE OF FIRE (step 15)
+
+   Until now a client could report a hit on anything in range, wall or no
+   wall. The server now asks whether any part of the body - head, chest, either
+   shoulder - could be seen from the shooter's eyes, at the target's position
+   now or anywhere in the last 300ms. The reason for the history is in
+   bandits.js: the browser draws bodies slightly in the past, so the honest
+   answer to "could they see it?" is about where it *was*.
+
+   Measured against the browser's own bullet ray before this was switched on:
+   about one honest hit in seven hundred is refused. The counters below log
+   what it actually does in play, so that number can be checked against real
+   games rather than trusted.
+   ========================================================================= */
+const LINE_OF_FIRE = { checked: 0, refused: 0, since: Date.now() };
+
+function inLineOfFire(shooter, target, scale, headY) {
+    LINE_OF_FIRE.checked++;
+    const ex = shooter.x, ey = shooter.y || 1.72, ez = shooter.z;
+    if (nav.bodyVisible(ex, ey, ez, target.x, target.z, scale, headY)) return true;
+    const t = target.trail;
+    if (t) {
+        for (let i = t.length - 2; i >= 0; i -= 2) {
+            if (nav.bodyVisible(ex, ey, ez, t[i], t[i + 1], scale, headY)) return true;
+        }
+    }
+    LINE_OF_FIRE.refused++;
+    return false;
+}
+
+setInterval(() => {
+    if (LINE_OF_FIRE.checked === 0) return;
+    const pct = (100 * LINE_OF_FIRE.refused / LINE_OF_FIRE.checked).toFixed(2);
+    console.log("Line of fire, last " + Math.round((Date.now() - LINE_OF_FIRE.since) / 60000) +
+        " min: " + LINE_OF_FIRE.checked + " hits checked, " + LINE_OF_FIRE.refused +
+        " refused (" + pct + "%)");
+    LINE_OF_FIRE.checked = 0;
+    LINE_OF_FIRE.refused = 0;
+    LINE_OF_FIRE.since = Date.now();
+}, 5 * 60 * 1000);
 
 function distanceBetween(a, b) {
     const dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
@@ -306,6 +376,7 @@ function kill(victim, attackerId) {
     victim.deaths++;
     const killer = attackerId ? players[attackerId] : null;
     if (killer && killer.id !== victim.id) killer.kills++;
+    scoresChanged(victim.room);
 
     io.to(victim.room).emit("player-died", {
         id: victim.id,
@@ -360,6 +431,9 @@ function placeInRoom(socket, p, code) {
     }
 
     // A fresh start in the new room, so nobody arrives already hurt or dead
+    p.kills = 0; p.deaths = 0; p.bossDamage = 0; p.bossKills = 0;
+    if (previous) scoresChanged(previous);
+    scoresChanged(code);
     const s = pickSpawn(rooms[code]);
     p.x = s[0]; p.y = 1.72; p.z = s[1];
     p.yaw = 0; p.pitch = 0;
@@ -371,7 +445,8 @@ function placeInRoom(socket, p, code) {
         mode: rooms[code].mode,
         players: playersIn(code),
         wave: rooms[code].wave || 1,
-        cap: waves.capFor(rooms[code])
+        cap: waves.capFor(rooms[code]),
+        scores: scoreRows(code)
     });
     socket.to(code).emit("player-joined", p);
 
@@ -394,6 +469,8 @@ io.on("connection", (socket) => {
         alive: true,
         kills: 0,
         deaths: 0,
+        bossDamage: 0,
+        bossKills: 0,
         lastHitAt: 0,
         lastBanditHitAt: 0,
         lastBossHitAt: 0,
@@ -486,6 +563,7 @@ io.on("connection", (socket) => {
         p.yaw = move.yaw; p.pitch = move.pitch;
         p.movedAt = Date.now();
         p.moveDirty = true;
+        bandits.recordTrail(p);
     });
 
     /* ---- Shot relay (step 7): muzzle flash, tracers and sound only ---- */
@@ -510,8 +588,7 @@ io.on("connection", (socket) => {
          - the pellet count fits the weapon
          - the victim is inside the weapon's range
 
-       Line of sight is deliberately not checked: doing it honestly needs the
-       map geometry on the server, which arrives with the shared bots.
+         - there is no wall between them (step 15)
        ===================================================================== */
     socket.on("hit", (m) => {
         const shooter = players[socket.id];
@@ -544,6 +621,8 @@ io.on("connection", (socket) => {
             if (body + head <= 0) continue;
 
             if (distanceBetween(shooter, victim) > w.range * 1.15 + 3) continue;
+            // a player's head is where their eyes are
+            if (!inLineOfFire(shooter, victim, 1, victim.y || 1.72)) continue;
 
             pellets += body + head;
             accepted.push({ victim: victim, body: body, head: head });
@@ -596,6 +675,7 @@ io.on("connection", (socket) => {
 
             const dist = Math.hypot(shooter.x - b.x, shooter.z - b.z);
             if (dist > w.range * 1.15 + 3) continue;
+            if (!inLineOfFire(shooter, b, 1)) continue;
 
             pellets += body + head;
             accepted.push({ b: b, body: body, head: head });
@@ -609,6 +689,7 @@ io.on("connection", (socket) => {
             const res = bandits.hurt(room, a.b.id, damage);
             if (res && res.killed) {
                 shooter.kills++;
+                scoresChanged(room.code);
                 io.to(room.code).emit("bandit-died", {
                     id: a.b.id, by: shooter.id, x: a.b.x, z: a.b.z, headshot: a.head > 0
                 });
@@ -644,12 +725,21 @@ io.on("connection", (socket) => {
 
         const b = room.boss;
         if (Math.hypot(shooter.x - b.x, shooter.z - b.z) > w.range * 1.15 + 3) return;
+        if (!inLineOfFire(shooter, b, 1.75)) return;
 
         shooter.lastBossHitAt = now;
         const typeIndex = b.typeIndex;
+        const healthBefore = b.health;
         const res = boss.hurt(room, body * w.body + head * w.head, now);
+        /* What the shot actually took off, not what it was worth - the last
+           shot on a boss with 20 left counts 20, not 96. */
+        if (res) {
+            shooter.bossDamage += Math.max(0, healthBefore - res.boss.health);
+            scoresChanged(room.code);
+        }
         if (res && res.killed) {
             shooter.kills++;
+            shooter.bossKills++;
             /* Winning is worth a wave. The browser did this too - it is the
                reason the number moves at all when a fight runs long. */
             const up = waves.advance(room, players, now, "boss");
@@ -695,6 +785,7 @@ io.on("connection", (socket) => {
         console.log("Player disconnected:", socket.id);
         delete players[socket.id];
         if (room) {
+            scoresChanged(room);
             io.to(room).emit("player-left", { id: socket.id });
             dropRoomIfEmpty(room);
         }
@@ -717,6 +808,11 @@ setInterval(() => {
     const now = Date.now();
     const dt = Math.min(0.25, (now - lastTick) / 1000);
     lastTick = now;
+
+    /* One route-search allowance shared by every room this tick - see
+       navigation.js. A room that has just filled for a new wave borrows a
+       little time from the next tick instead of stalling everybody's. */
+    nav.beginTick();
 
     for (const code in rooms) {
         const room = rooms[code];
@@ -791,6 +887,11 @@ setInterval(() => {
                 io.to(code).emit("boss", { in: boss.secondsToBoss(room, now) });
             }
 
+            if ((tick % 20) === 0 && room.scoresDirty) {
+                room.scoresDirty = false;
+                io.to(code).emit("scores", { s: scoreRows(code) });
+            }
+
             /* Once a second, so somebody who joined mid-wave is looking at the
                same number as everybody else rather than counting on their own. */
             if ((tick % 20) === 0) {
@@ -842,6 +943,9 @@ setInterval(() => {
 
 const PORT = process.env.PORT || 3000;
 
+// before the port opens, so no player's first seconds pay for cold code
+const warmMs = nav.warmUp();
+
 server.listen(PORT, "0.0.0.0", () => {
     console.log("Server running on port " + PORT);
     console.log("Rooms enabled. Lobby:", PUBLIC_ROOM, "| default mode:", MODES[DEFAULT_MODE].label);
@@ -850,6 +954,10 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log("Positions batched:", MOVE_SEND_HZ, "packets a second per room, by slot");
     console.log("Map loaded:", mapData.FINGERPRINT, "|", mapData.COLLIDERS.length, "colliders |",
         nav.blockedCount(), "blocked navigation cells");
+    const reg = nav.regionReport();
+    console.log("Navigation:", reg.regions, "regions - town", reg.town, "cells, sealed off:",
+        reg.others.join(", "), "| pathfinder warmed in", warmMs + "ms, budget",
+        nav.PATH_BUDGET, "cells a tick");
     console.log("Bandits simulated here:", bandits.BANDIT.startCount, "to start, one more every",
         (bandits.BANDIT.spawnEveryMs / 1000) + "s");
     console.log("Waves:", (waves.WAVE.everyMs / 1000) + "s each,", waves.WAVE.startCap,

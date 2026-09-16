@@ -117,6 +117,17 @@
     #boss-bg { height: 12px; background: #2a1a0c; border: 1px solid #6b451f; }
     #boss-fill { height: 100%; width: 100%; background: linear-gradient(180deg,#ff7b3c,#8d2a06); transition: width 0.15s; }
 
+    /* Scoreboard - hold Tab, and it shows itself for a moment when a boss falls */
+    #scoreboard { top: 50%; left: 50%; transform: translate(-50%, -50%); min-width: 380px; display: none; padding: 12px 16px 10px; z-index: 8; }
+    #scoreboard .sb-title { font-size: 13px; color: #ffd37a; letter-spacing: 3px; text-align: center; margin-bottom: 9px; }
+    #scoreboard table { width: 100%; border-collapse: collapse; font-size: 12px; color: #f0dcb4; }
+    #scoreboard th { font-size: 10px; color: #c49a5a; letter-spacing: 1px; font-weight: normal; padding: 0 7px 5px; text-align: right; }
+    #scoreboard td { padding: 4px 7px; text-align: right; border-top: 1px solid rgba(139,90,43,0.35); font-variant-numeric: tabular-nums; }
+    #scoreboard th:first-child, #scoreboard td:first-child { text-align: left; }
+    #scoreboard tr.me td { color: #fff2c8; }
+    #scoreboard .sw { display: inline-block; width: 9px; height: 9px; margin-right: 7px; border: 1px solid #000; vertical-align: -1px; }
+    #scoreboard .sb-foot { font-size: 10px; color: #a07c4c; text-align: center; margin-top: 8px; letter-spacing: 1px; }
+
     /* Multiplayer connection indicator */
     #net-status {
         bottom: 18px; left: 50%; transform: translateX(-50%);
@@ -263,6 +274,14 @@
 
 <div id="minimap" class="panel"><canvas id="mm-canvas" width="128" height="128"></canvas></div>
 
+<div id="scoreboard" class="panel">
+    <div class="sb-title">&#9733; SCOREBOARD &#9733;</div>
+    <table>
+        <thead><tr><th>GUN</th><th>KILLS</th><th>DEATHS</th><th>BOSS DMG</th><th>BOSSES</th></tr></thead>
+        <tbody id="sb-body"></tbody>
+    </table>
+    <div class="sb-foot" id="sb-foot"></div>
+</div>
 <div id="boss-bar" class="panel">
     <div id="boss-name">&#9760; BLACK-JACK McCREADY &#9760;</div>
     <div id="boss-ability">TRIPLE BURST</div>
@@ -331,6 +350,61 @@ const NET = {
 /* Remote players only - never contains us. The server is the only thing that
    adds to or removes from this; step 3 will start filling in position data. */
 const PLAYERS = {};
+
+/* =========================================================================
+   SCOREBOARD (multiplayer, step 16)
+
+   Online the server keeps score and sends the room's table when it changes -
+   rows of [slot, kills, deaths, bossDamage, bossKills]. Offline there is only
+   one row, ours, counted here. Either way the table is drawn the same.
+   ========================================================================= */
+const SCORES = { rows: [] };
+let localBossDamage = 0, localBossKills = 0;
+let scoreboardHeld = false, scoreboardUntil = 0, scoreboardShown = false;
+
+function renderScoreboard() {
+    const body = document.getElementById('sb-body');
+    const foot = document.getElementById('sb-foot');
+    if (!body) return;
+
+    let rows;
+    if (NET.connected && NET.room) {
+        rows = SCORES.rows.map(function (r) {
+            const id = r[0] === NET.slot ? NET.id : SLOTS[r[0]];
+            return { id: id, me: id === NET.id, kills: r[1], deaths: r[2], dmg: r[3], bosses: r[4] };
+        }).filter(function (r) { return !!r.id; });
+    } else {
+        rows = [{ id: null, me: true, kills: kills, deaths: deaths,
+                  dmg: Math.round(localBossDamage), bosses: localBossKills }];
+    }
+    // most kills first; boss damage breaks a tie, because that is the harder work
+    rows.sort(function (a, b) { return (b.kills - a.kills) || (b.dmg - a.dmg); });
+
+    body.innerHTML = rows.map(function (r) {
+        const name = r.me ? 'YOU' : r.id.slice(0, 6).toUpperCase();
+        const col = r.me ? '#ffe9a8' : ('#' + colorForId(r.id).toString(16).padStart(6, '0'));
+        return '<tr' + (r.me ? ' class="me"' : '') + '>' +
+            '<td><span class="sw" style="background:' + col + '"></span>' + name + '</td>' +
+            '<td>' + r.kills + '</td><td>' + r.deaths + '</td>' +
+            '<td>' + r.dmg + '</td><td>' + r.bosses + '</td></tr>';
+    }).join('');
+    if (foot) foot.textContent = 'WAVE ' + wave + (NET.room ? ' \u00b7 ROOM ' + NET.room : ' \u00b7 SINGLE PLAYER');
+}
+
+function showScoreboardFor(ms) {
+    scoreboardUntil = performance.now() + ms;
+    renderScoreboard();
+}
+
+/* Called every frame: cheap unless the answer changed. */
+function tickScoreboard(now) {
+    const want = scoreboardHeld || now < scoreboardUntil;
+    if (want === scoreboardShown) return;
+    scoreboardShown = want;
+    const el = document.getElementById('scoreboard');
+    if (el) el.style.display = want ? 'block' : 'none';
+    if (want) renderScoreboard();
+}
 
 /* Inside a room every player also has a slot - a small number the server uses
    instead of their socket id, because the position packet says who moved
@@ -717,6 +791,7 @@ function initNetwork() {
         if (!data) return;
         NET.room = data.code;
         if (data.mode) NET.mode = data.mode;
+        SCORES.rows = Array.isArray(data.scores) ? data.scores : [];
         // we are on the room's wave now, not on the one we were counting
         if (typeof data.wave === 'number') {
             wave = data.wave;
@@ -885,6 +960,12 @@ function initNetwork() {
 
     NET.socket.on('boss', function (m) { onBossState(m); });
 
+    NET.socket.on('scores', function (m) {
+        if (!m || !Array.isArray(m.s)) return;
+        SCORES.rows = m.s;
+        if (scoreboardShown) renderScoreboard();
+    });
+
     /* The room's wave. `up` marks the moment it turned over - that one gets the
        feed line and the ammo; the rest are the once-a-second heartbeat that
        keeps a latecomer's number honest. */
@@ -957,6 +1038,7 @@ function initNetwork() {
         pushFeed((m.headshot ? 'HEADSHOT! ' : '') + bt.name + ' IS DOWN');
         if (m.by === NET.id) { kills++; onKillReward(); }
         applyBossReward();
+        showScoreboardFor(5000);
     });
 
     /* --- Remote gunfire (step 7). Cosmetic: no damage is applied. --- */
@@ -3761,6 +3843,8 @@ function clearNetBossState() {
 /* ---------- Bot damage / death ---------- */
 function damageBot(bot, amount, point, headshot) {
     if (!bot.alive) return;
+    // what the hit actually took off, the same rule the server uses
+    if (bot.isBoss) localBossDamage += Math.max(0, Math.min(amount, bot.health));
     bot.health -= amount;
     bot.hitFlash = 0.14;
     bot.state = 'chase';
@@ -5058,7 +5142,9 @@ function onBossDefeated() {
     if (bots.filter(function (b) { return !b.isBoss; }).length < 4) {
         for (let i = 0; i < 2; i++) createBandit(false);
     }
+    localBossKills++;
     applyBossReward();
+    showScoreboardFor(5000);
 }
 
 /* =========================================================================
@@ -5358,6 +5444,7 @@ document.addEventListener('pointerlockchange', function () {
         ui.menu.style.display = 'none';
     } else {
         isLocked = false; isAiming = false;
+        scoreboardHeld = false;        // Escape while holding Tab never sends the keyup
         ui.crosshair.classList.remove('ads');
         ui.adsOverlay.classList.remove('on');
         ui.adsReticle.classList.remove('on');
@@ -5368,6 +5455,9 @@ document.addEventListener('pointerlockchange', function () {
 document.addEventListener('keydown', function (e) {
     keys[e.code] = true;
     if (e.code === 'ArrowUp' || e.code === 'ArrowDown' || e.code === 'ArrowLeft' || e.code === 'ArrowRight') e.preventDefault();
+    /* Tab shows the scoreboard while held - but only in the game. On the menu
+       it still does what Tab does, moving between the room code and buttons. */
+    if (e.code === 'Tab' && isLocked) { e.preventDefault(); scoreboardHeld = true; }
     if (!isLocked) return;
     if (e.code === 'KeyR' || e.code === 'KeyE') startReload();
     if (!e.repeat) {
@@ -5382,7 +5472,10 @@ document.addEventListener('keydown', function (e) {
         velY = 6.1; onGround = false; sfxJump();
     }
 });
-document.addEventListener('keyup', function (e) { keys[e.code] = false; });
+document.addEventListener('keyup', function (e) {
+    keys[e.code] = false;
+    if (e.code === 'Tab') scoreboardHeld = false;
+});
 
 let firing = false;
 document.addEventListener('mousedown', function (e) {
@@ -5760,6 +5853,7 @@ function animate() {
     updateNetHazards(delta);
     updateBanditBullets(delta);
     refreshNetDebug(now);
+    tickScoreboard(now);
 
     if (isLocked && playerHealth > 0) {
         updatePlayer(delta, now);

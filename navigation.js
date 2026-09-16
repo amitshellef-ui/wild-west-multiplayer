@@ -55,6 +55,51 @@ buildNav();
 
 function navIdx(cx, cz) { return cz * NAV.w + cx; }
 
+/* ---- Regions (step 18) -----------------------------------------------------
+   The grid is not one piece. Walls are padded by 1.3 metres a side so a
+   bandit's route never scrapes a corner, and that padding seals off two places
+   a player can still walk into: the fenced corral north of the plaza, and the
+   mine shaft, whose 3.6 metre entrance is left with less than one cell open.
+
+   A* cannot know that. Asked to reach a player standing in the corral, it
+   searches every cell it can reach - nine thousand steps, about 8ms - before
+   giving up, and the bandit asks again 600ms later. Measured at the hardest
+   wave: failed searches were 63% of all searches and 97% of all the time the
+   server spent simulating. So the regions are worked out once, here, and a
+   search between two of them is answered without searching. */
+const region = new Int32Array(NAV.w * NAV.h).fill(-1);
+const regionSize = [];
+
+function buildRegions() {
+    const stack = [];
+    for (let cz = 0; cz < NAV.h; cz++) {
+        for (let cx = 0; cx < NAV.w; cx++) {
+            const start = navIdx(cx, cz);
+            if (blocked[start] || region[start] >= 0) continue;
+            const id = regionSize.length;
+            let size = 0;
+            region[start] = id;
+            stack.push(start);
+            while (stack.length) {
+                const cur = stack.pop();
+                size++;
+                const x = cur % NAV.w, z = (cur / NAV.w) | 0;
+                for (let d = 0; d < 8; d++) {
+                    const nx = x + DIRS_R[d][0], nz = z + DIRS_R[d][1];
+                    if (isBlocked(nx, nz)) continue;
+                    // the same no-corner-cutting rule A* follows, or the regions would lie
+                    if (d > 3 && (isBlocked(x + DIRS_R[d][0], z) || isBlocked(x, z + DIRS_R[d][1]))) continue;
+                    const n = navIdx(nx, nz);
+                    if (region[n] < 0) { region[n] = id; stack.push(n); }
+                }
+            }
+            regionSize.push(size);
+        }
+    }
+}
+const DIRS_R = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+buildRegions();
+
 function isBlocked(cx, cz) {
     if (cx < 0 || cz < 0 || cx >= NAV.w || cz >= NAV.h) return true;
     return blocked[navIdx(cx, cz)] === 1;
@@ -151,10 +196,72 @@ function smoothPath(pts) {
     return out.length ? out : [pts[pts.length - 1]];
 }
 
+/* The closest cell to (gx, gz) that is in region `want`, looking no further
+   than `maxR` cells out. Null if there is none that close. */
+function nearestInRegion(gx, gz, want, maxR) {
+    let best = null, bestD = Infinity;
+    for (let r = 0; r <= maxR; r++) {
+        for (let dx = -r; dx <= r; dx++) {
+            for (let dz = -r; dz <= r; dz++) {
+                if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue;
+                const cx = gx + dx, cz = gz + dz;
+                if (cx < 0 || cz < 0 || cx >= NAV.w || cz >= NAV.h) continue;
+                if (region[navIdx(cx, cz)] !== want) continue;
+                const d = dx * dx + dz * dz;
+                if (d < bestD) { bestD = d; best = [cx, cz]; }
+            }
+        }
+        // a ring further out cannot hold anything closer than what this one found
+        if (best && r * r >= bestD) return best;
+    }
+    return best;
+}
+
+/* ---- The search budget (step 18) ------------------------------------------
+   With the regions sorted out an ordinary search costs about half a
+   millisecond, but they do not arrive evenly. A room that has just filled for a
+   new wave asks for a dozen routes in the same 50ms, and every room on the
+   server shares that 50ms.
+
+   So each tick has an allowance, counted in cells searched rather than in
+   searches - most routes are cheap and a few are not, and counting searches
+   would treat them the same. Once it is spent, findPath answers `undefined`
+   instead of searching: not "there is no route" (that is null) but "not this
+   tick". The bandit keeps walking the route it already has and asks again a
+   tick or two later. Nobody can see a route arriving 100ms late; everybody can
+   see a server that stopped for 300ms. */
+const PATH_BUDGET = 16000;             // cells a tick - about 15ms of searching
+let pathWorkLeft = Infinity;           // unlimited until the server starts counting
+let pathSteps = 0;
+const pathStats = { searches: 0, deferred: 0 };
+
+function beginTick(budget) {
+    pathWorkLeft = budget === undefined ? PATH_BUDGET : budget;
+}
+
 function findPath(sx, sz, gx, gz) {
+    if (pathWorkLeft <= 0) { pathStats.deferred++; return undefined; }
+    pathSteps = 0;
+    const route = searchPath(sx, sz, gx, gz);
+    pathWorkLeft -= Math.max(1, pathSteps);
+    pathStats.searches++;
+    return route;
+}
+
+function searchPath(sx, sz, gx, gz) {
     const s = nearestFree(toCellX(sx), toCellZ(sz), 6);
-    const g = nearestFree(toCellX(gx), toCellZ(gz), 8);
+    let g = nearestFree(toCellX(gx), toCellZ(gz), 8);
     if (!s || !g) return null;
+
+    /* Different regions: the goal cannot be reached, so aim for the nearest
+       place that can. A bandit chasing someone into the corral comes up to the
+       fence and shoots over it, instead of standing still re-searching the
+       whole town. Too far from any such place, and the answer is simply no. */
+    const want = region[navIdx(s[0], s[1])];
+    if (region[navIdx(g[0], g[1])] !== want) {
+        g = nearestInRegion(g[0], g[1], want, 16);
+        if (!g) return null;
+    }
 
     const sIdx = navIdx(s[0], s[1]), gIdx = navIdx(g[0], g[1]);
     if (sIdx === gIdx) return [{ x: cellCenterX(g[0]), z: cellCenterZ(g[1]) }];
@@ -166,6 +273,7 @@ function findPath(sx, sz, gx, gz) {
     let steps = 0;
 
     while (open.nodes.length) {
+        pathSteps = steps + 1;
         if (++steps > 9000) break;
         const cur = open.pop();
         if (cur === gIdx) {
@@ -257,6 +365,111 @@ function freeSpotNear(x, z, minCells, maxCells, radius) {
     return null;
 }
 
+/* ---- Line of fire (step 15) ----------------------------------------------
+   Is there a wall between a gun and a body? A true three-dimensional test of
+   the segment against each box, not a sampled one, so a shot that clears a
+   rooftop by ten centimetres clears it here too.
+
+   Only boxes taller than SHOT_MIN_HEIGHT stop a bullet. That is not laziness,
+   it is the measured answer. Every collision box on this map is stretched to
+   at least 2.2 metres tall so nobody can hop onto a crate, which means a one
+   metre barrel looks like a wall to anything that asks the collision data.
+   Checked against the browser's real bullet ray over thousands of random
+   shots: counting every box threw away 1.2% of honest hits; counting only the
+   tall ones - buildings, walls, the mine - threw away 0.1%.
+
+   What it does not see: the big mesas out at the corners have no collision box
+   at all, so a shot through the corner of one is not caught. Nobody fights out
+   there, and a wrong "yes" costs far less than a wrong "no". */
+const SHOT_MIN_HEIGHT = 2.21;
+const SHOT_SKIN = 0.06;               // a shot that grazes an edge is the shooter's
+const SHOT_BLOCKERS = COLLIDERS.filter((c) => c[4] - c[1] > SHOT_MIN_HEIGHT);
+
+function shotClear(ax, ay, az, bx, by, bz) {
+    const dx = bx - ax, dy = by - ay, dz = bz - az;
+    for (let i = 0; i < SHOT_BLOCKERS.length; i++) {
+        const c = SHOT_BLOCKERS[i];
+        let t0 = 0, t1 = 1;
+
+        // x
+        if (Math.abs(dx) < 1e-9) {
+            if (ax <= c[0] + SHOT_SKIN || ax >= c[3] - SHOT_SKIN) continue;
+        } else {
+            let ta = (c[0] + SHOT_SKIN - ax) / dx, tb = (c[3] - SHOT_SKIN - ax) / dx;
+            if (ta > tb) { const t = ta; ta = tb; tb = t; }
+            if (ta > t0) t0 = ta;
+            if (tb < t1) t1 = tb;
+            if (t0 >= t1) continue;
+        }
+        // y - the floor of a box is the floor, only its top is skinned
+        if (Math.abs(dy) < 1e-9) {
+            if (ay <= c[1] || ay >= c[4] - SHOT_SKIN) continue;
+        } else {
+            let ta = (c[1] - ay) / dy, tb = (c[4] - SHOT_SKIN - ay) / dy;
+            if (ta > tb) { const t = ta; ta = tb; tb = t; }
+            if (ta > t0) t0 = ta;
+            if (tb < t1) t1 = tb;
+            if (t0 >= t1) continue;
+        }
+        // z
+        if (Math.abs(dz) < 1e-9) {
+            if (az <= c[2] + SHOT_SKIN || az >= c[5] - SHOT_SKIN) continue;
+        } else {
+            let ta = (c[2] + SHOT_SKIN - az) / dz, tb = (c[5] - SHOT_SKIN - az) / dz;
+            if (ta > tb) { const t = ta; ta = tb; tb = t; }
+            if (ta > t0) t0 = ta;
+            if (tb < t1) t1 = tb;
+            if (t0 >= t1) continue;
+        }
+        return false;
+    }
+    return true;
+}
+
+/* Can a gun at (ax, ay, az) see any part of a body standing at (tx, tz)?
+   Head, chest and both shoulders across the line of fire, because a player who
+   can see only a shoulder round a corner can still hit that shoulder. `scale`
+   is 1 for a bandit or a player, 1.75 for the boss. */
+function bodyVisible(ax, ay, az, tx, tz, scale, headY) {
+    const s = scale || 1;
+    const head = headY !== undefined ? headY : 1.62 * s;
+    const chest = head - 0.52 * s;
+    if (shotClear(ax, ay, az, tx, head, tz)) return true;
+    if (shotClear(ax, ay, az, tx, chest, tz)) return true;
+    const lx = tx - ax, lz = tz - az, len = Math.hypot(lx, lz) || 1;
+    const px = (-lz / len) * 0.35 * s, pz = (lx / len) * 0.35 * s;
+    if (shotClear(ax, ay, az, tx + px, chest, tz + pz)) return true;
+    if (shotClear(ax, ay, az, tx - px, chest, tz - pz)) return true;
+    return false;
+}
+
+/* V8 compiles a function properly only after it has run a while, and until
+   then A* is several times slower than the budget above was measured on. On a
+   fresh server that meant the first room's opening burst - every bandit asking
+   for a route in the same tick - took 150ms, cold. Running a few hundred
+   searches before anybody can connect costs under half a second at boot, and
+   brought that tick down to 48. Counted work is reset afterwards so the stats
+   describe real play. */
+function warmUp(count) {
+    const n = count || 400;
+    const saved = pathWorkLeft;
+    pathWorkLeft = Infinity;
+    const t = Date.now();
+    for (let i = 0; i < n; i++) {
+        const a = randomNavPoint(), b = randomNavPoint();
+        findPath(a.x, a.z, b.x, b.z);
+    }
+    pathWorkLeft = saved;
+    pathStats.searches = 0;
+    pathStats.deferred = 0;
+    return Date.now() - t;
+}
+
+function regionReport() {
+    const main = regionSize.indexOf(Math.max.apply(null, regionSize));
+    return { regions: regionSize.length, town: regionSize[main], others: regionSize.filter((n, i) => i !== main) };
+}
+
 function blockedCount() {
     let n = 0;
     for (let i = 0; i < blocked.length; i++) n += blocked[i];
@@ -266,5 +479,7 @@ function blockedCount() {
 module.exports = {
     collidesAt, isBlocked, toCellX, toCellZ,
     cellCenterX, cellCenterZ, nearestFree,
-    findPath, lineClear, losClear, randomNavPoint, freeSpotNear, blockedCount, NAV
+    findPath, lineClear, losClear, randomNavPoint, freeSpotNear, blockedCount, NAV,
+    shotClear, bodyVisible, SHOT_MIN_HEIGHT, SHOT_BLOCKERS, regionReport,
+    beginTick, pathStats, PATH_BUDGET, warmUp
 };

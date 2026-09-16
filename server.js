@@ -446,6 +446,7 @@ function placeInRoom(socket, p, code) {
         players: playersIn(code),
         wave: rooms[code].wave || 1,
         cap: waves.capFor(rooms[code]),
+        banditHp: waves.difficultyFor(rooms[code]).health,
         scores: scoreRows(code)
     });
     socket.to(code).emit("player-joined", p);
@@ -743,6 +744,7 @@ io.on("connection", (socket) => {
             /* Winning is worth a wave. The browser did this too - it is the
                reason the number moves at all when a fight runs long. */
             const up = waves.advance(room, players, now, "boss");
+            bandits.applyWave(room);
             bandits.fillTo(room, players, up.cap);
             io.to(room.code).emit("wave", up);
             io.to(room.code).emit("boss-died", {
@@ -828,10 +830,13 @@ setInterval(() => {
         /* The wave turned over: everyone is told once, and the room is brought
            up to the strength its new wave allows. */
         if (sink.wave) {
+            bandits.applyWave(room);
             bandits.fillTo(room, players, sink.wave.cap);
             io.to(code).emit("wave", sink.wave);
+            const d = waves.difficultyFor(room);
             console.log("Room", code, "-> wave", sink.wave.n, "(up to",
-                sink.wave.cap, "bandits)");
+                sink.wave.cap, "bandits,", d.health, "hp, fire every", d.fireDelay + "ms, back in",
+                d.respawnMs + "ms, aim x" + d.spreadScale + ")");
         }
 
         /* A bandit fired: everyone in the room needs to see the muzzle flash
@@ -898,6 +903,7 @@ setInterval(() => {
                 io.to(code).emit("wave", {
                     n: room.wave || 1,
                     cap: waves.capFor(room),
+                    hp: waves.difficultyFor(room).health,
                     in: waves.secondsToWave(room, now)
                 });
             }

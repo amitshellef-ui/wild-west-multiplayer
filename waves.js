@@ -34,6 +34,47 @@ const WAVE = {
     ammoReward: 16         // rounds handed out when a wave turns over
 };
 
+/* ---- How dangerous each bandit is (step 19) --------------------------------
+   The cap decides how many there are. This decides what each of them is worth.
+   Measured before this existed: from wave 2 on the town is already at its cap
+   the whole time, so more reinforcements change nothing - the pressure a wave
+   puts on you is how fast a bandit comes back, how often it shoots, how close
+   its rounds land and how much it takes to put down.
+
+   All four move in a straight line from wave 1, which is exactly the game as
+   it always was, to wave `fullAtWave`, where the cap tops out too, and stay
+   there. Each pair is [wave 1, full strength]. */
+const DIFFICULTY = {
+    fullAtWave: 6,
+    respawnMs: [2600, 1500],       // a dead bandit is back this soon
+    fireDelay: [1750, 1150],       // ms between its shots
+    spreadScale: [1.0, 0.6],       // x the aim error - lower lands closer
+    health: [100, 150]             // what it takes to drop one
+};
+
+function difficulty(wave) {
+    const n = (typeof wave === "number" && wave > 0) ? wave : 1;
+    const t = Math.min(1, (n - 1) / (DIFFICULTY.fullAtWave - 1));
+    const at = (pair) => pair[0] + (pair[1] - pair[0]) * t;
+    return {
+        respawnMs: Math.round(at(DIFFICULTY.respawnMs)),
+        fireDelay: Math.round(at(DIFFICULTY.fireDelay)),
+        spreadScale: Math.round(at(DIFFICULTY.spreadScale) * 1000) / 1000,
+        health: Math.round(at(DIFFICULTY.health))
+    };
+}
+
+/* What the bandit simulation reads. Kept on the room so it is worked out once
+   a wave, not once a bullet. */
+function difficultyFor(room) {
+    if (!room) return difficulty(1);
+    if (!room.difficulty || room.difficultyWave !== room.wave) {
+        room.difficulty = difficulty(room.wave);
+        room.difficultyWave = room.wave;
+    }
+    return room.difficulty;
+}
+
 function banditCap(wave) {
     const n = (typeof wave === "number" && wave > 0) ? wave : 1;
     return Math.min(WAVE.maxCap, WAVE.startCap + (n - 1) * WAVE.perWave);
@@ -62,6 +103,7 @@ function advance(room, players, now, reason) {
     return {
         n: room.wave,
         cap: capFor(room),
+        hp: difficultyFor(room).health,
         in: WAVE.everyMs / 1000,
         up: true,
         why: reason || "clock"
@@ -93,4 +135,7 @@ function stepRoom(room, players, now, sink) {
     return sink;
 }
 
-module.exports = { WAVE, banditCap, capFor, initRoom, stepRoom, advance, secondsToWave };
+module.exports = {
+    WAVE, DIFFICULTY, banditCap, capFor, initRoom, stepRoom, advance, secondsToWave,
+    difficulty, difficultyFor
+};

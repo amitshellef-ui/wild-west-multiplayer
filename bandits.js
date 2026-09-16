@@ -22,6 +22,9 @@
 const nav = require("./navigation");
 const waves = require("./waves");
 
+/* The numbers below are the wave 1 bandit. Health, respawn time, rate of fire
+   and aim all tighten as the room's wave climbs - see DIFFICULTY in waves.js,
+   which is what the code reads; these stay as the reference point. */
 const BANDIT = {
     maxHealth: 100,
     radius: 0.5,
@@ -87,11 +90,13 @@ function pickBanditSpawn(room, players) {
 function spawnBandit(room, players) {
     const p = pickBanditSpawn(room, players || {});
     const id = room.nextBanditId++;
+    const hp = waves.difficultyFor(room).health;
     room.bandits[id] = {
         id: id,
         x: p.x, z: p.z,
         yaw: Math.random() * Math.PI * 2,
-        health: BANDIT.maxHealth,
+        health: hp,
+        maxHealth: hp,
         alive: true,
         state: "patrol",
         path: null,
@@ -127,7 +132,8 @@ function fire(room, b, target, sink) {
     dx /= len; dy /= len; dz /= len;
 
     const dist = Math.hypot(tx - ox, tz - oz);
-    const spread = BANDIT.aimSpread + dist * BANDIT.spreadPerMetre;
+    const spread = (BANDIT.aimSpread + dist * BANDIT.spreadPerMetre) *
+        waves.difficultyFor(room).spreadScale;
     dx += (Math.random() - 0.5) * spread * 2;
     dy += (Math.random() - 0.5) * spread * 1.5;
     dz += (Math.random() - 0.5) * spread * 2;
@@ -272,7 +278,8 @@ function stepBandit(room, b, players, now, dt, sink) {
         if (b.respawnAt && now >= b.respawnAt && !room.bossAlive) {
             const p = pickBanditSpawn(room, players);
             b.x = p.x; b.z = p.z;
-            b.health = BANDIT.maxHealth;
+            b.maxHealth = waves.difficultyFor(room).health;
+            b.health = b.maxHealth;
             b.alive = true;
             b.state = "patrol";
             b.path = null;
@@ -397,7 +404,7 @@ function stepBandit(room, b, players, now, dt, sink) {
 
     /* --- shooting --- */
     if (b.hasLos && near && near.dist < BANDIT.fireRange &&
-        now - b.lastShot > BANDIT.fireDelay) {
+        now - b.lastShot > waves.difficultyFor(room).fireDelay) {
         b.lastShot = now + (Math.random() - 0.5) * 350;
         fire(room, b, near.player, sink);
     }
@@ -473,6 +480,22 @@ function fillTo(room, players, cap, limit) {
     return added;
 }
 
+/* A wave turning over makes the bandits already standing tougher too, by the
+   same amount it adds to a fresh one - so a bandit hurt to half keeps its
+   wound, and nobody is walking round wave 6 with wave 2's health. Every bandit
+   in a room therefore shares one maximum, which is what the clients draw the
+   health bar against. */
+function applyWave(room) {
+    const hp = waves.difficultyFor(room).health;
+    for (const id in room.bandits) {
+        const b = room.bandits[id];
+        const was = b.maxHealth || BANDIT.maxHealth;
+        if (hp <= was) continue;
+        if (b.alive) b.health += hp - was;
+        b.maxHealth = hp;
+    }
+}
+
 function hurt(room, banditId, amount) {
     const b = room.bandits && room.bandits[banditId];
     if (!b || !b.alive) return null;
@@ -480,7 +503,7 @@ function hurt(room, banditId, amount) {
     if (b.health <= 0) {
         b.health = 0;
         b.alive = false;
-        b.respawnAt = Date.now() + BANDIT.respawnMs;
+        b.respawnAt = Date.now() + waves.difficultyFor(room).respawnMs;
         b.path = null;
         return { killed: true, bandit: b };
     }
@@ -491,5 +514,5 @@ function hurt(room, banditId, amount) {
 
 module.exports = {
     BANDIT, TICK_MS, initRoom, stepRoom, snapshot, hurt, aliveCount, banditList, fillTo,
-    recordTrail, TRAIL_LENGTH
+    recordTrail, TRAIL_LENGTH, applyWave
 };

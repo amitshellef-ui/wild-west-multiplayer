@@ -796,6 +796,7 @@ function initNetwork() {
         if (typeof data.wave === 'number') {
             wave = data.wave;
             netWaveCap = data.cap || banditCap(data.wave);
+            netBanditMaxHp = data.banditHp || banditDifficulty(data.wave).health;
             ui.waveLine.innerText = 'WAVE ' + wave;
         }
 
@@ -972,6 +973,7 @@ function initNetwork() {
     NET.socket.on('wave', function (m) {
         if (!m || typeof m.n !== 'number') return;
         netWaveIn = typeof m.in === 'number' ? m.in : -1;
+        if (typeof m.hp === 'number' && m.hp > 0) netBanditMaxHp = m.hp;
         if (m.up) {
             applyWaveReward(m.n, m.cap);
             netFeed('WAVE ' + m.n);
@@ -2947,8 +2949,8 @@ function createBandit(isBoss, bossType) {
 
     const bot = {
         mesh: root, isBoss: isBoss, bossType: bt,
-        maxHealth: isBoss ? bt.hp : 100,
-        health: isBoss ? bt.hp : 100,
+        maxHealth: isBoss ? bt.hp : banditDifficulty(wave).health,
+        health: isBoss ? bt.hp : banditDifficulty(wave).health,
         alive: true, scale: s,
         radius: isBoss ? 0.85 : 0.5,
         eyeHeight: (isBoss ? 1.75 : 1.0) * 1.62,
@@ -2968,7 +2970,7 @@ function createBandit(isBoss, bossType) {
         patrolTarget: null, strafeDir: Math.random() > 0.5 ? 1 : -1,
         strafeTimer: 1 + Math.random(), lastShot: 0,
         stuckTimer: 0, lastPos: new THREE.Vector3(),
-        fireDelay: isBoss ? bt.fireDelay : 1750,
+        fireDelay: isBoss ? bt.fireDelay : banditDifficulty(wave).fireDelay,
         respawnAt: 0, speed: isBoss ? bt.speed : 3.4,
         abilityT: 0, ghostUntil: 0, chargeUntil: 0, slamUntil: 0
     };
@@ -3500,7 +3502,7 @@ function clearBanditBullets() {
 }
 
 function showBanditHealth(body) {
-    const pct = Math.max(0, Math.min(1, body.health / 100));
+    const pct = Math.max(0, Math.min(1, body.health / netBanditMaxHp));
     const P = body.rig.parts;
     const show = body.alive && pct < 1 && pct > 0;
     P.barBg.visible = show;
@@ -3877,7 +3879,7 @@ function killBot(bot, headshot) {
     updateBoard();
 
     if (bot.isBoss) onBossDefeated();
-    else bot.respawnAt = performance.now() + 2600;
+    else bot.respawnAt = performance.now() + banditDifficulty(wave).respawnMs;
 }
 
 /* =========================================================================
@@ -3977,6 +3979,9 @@ function updateBot(bot, delta, now) {
         }
         if (!bot.isBoss && bot.respawnAt && now > bot.respawnAt && !bossActive) {
             bot.respawnAt = 0;
+            const d = banditDifficulty(wave);
+            bot.maxHealth = d.health;
+            bot.fireDelay = d.fireDelay;
             placeBotAtSpawn(bot);
         }
         return;
@@ -4187,6 +4192,7 @@ function botShoot(bot, dist) {
     const shots = ability === 'burst' ? 3 : (ability === 'spray' ? 1 : 1);
     const baseDir = new THREE.Vector3().subVectors(camera.position, muzzlePos).normalize();
     let spread = (bot.isBoss ? 0.022 : 0.035) + dist * 0.0016;
+    if (!bot.isBoss) spread *= banditDifficulty(wave).spreadScale;
     if (ability === 'snipe') spread = 0.006;
     if (ability === 'spray') spread = 0.055 + dist * 0.0012;
     if (ability === 'charge') spread = 0.04;
@@ -4888,6 +4894,48 @@ function banditCap(w) {
     const n = (typeof w === 'number' && w > 0) ? w : 1;
     return Math.min(WAVE_MAX_CAP, WAVE_START_CAP + (n - 1) * WAVE_CAP_STEP);
 }
+
+/* How dangerous each bandit is at a given wave (step 19). Wave 1 is the game
+   exactly as it always was; by wave 6 a bandit is back in 1.5s instead of 2.6,
+   fires every 1.15s instead of 1.75, lands its rounds 40% closer, and takes 150
+   to put down instead of 100. Duplicated in waves.js (DIFFICULTY) - online the
+   server's numbers are the ones that count, this copy drives single player. */
+const BANDIT_DIFFICULTY = {
+    fullAtWave: 6,
+    respawnMs: [2600, 1500],
+    fireDelay: [1750, 1150],
+    spreadScale: [1.0, 0.6],
+    health: [100, 150]
+};
+
+function banditDifficulty(w) {
+    const n = (typeof w === 'number' && w > 0) ? w : 1;
+    const t = Math.min(1, (n - 1) / (BANDIT_DIFFICULTY.fullAtWave - 1));
+    const at = function (pair) { return pair[0] + (pair[1] - pair[0]) * t; };
+    return {
+        respawnMs: Math.round(at(BANDIT_DIFFICULTY.respawnMs)),
+        fireDelay: Math.round(at(BANDIT_DIFFICULTY.fireDelay)),
+        spreadScale: Math.round(at(BANDIT_DIFFICULTY.spreadScale) * 1000) / 1000,
+        health: Math.round(at(BANDIT_DIFFICULTY.health))
+    };
+}
+
+/* A wave turning over toughens the bandits already standing, by the amount it
+   adds to a fresh one - the same rule as the server's applyWave. */
+function toughenLocalBandits() {
+    const d = banditDifficulty(wave);
+    for (let i = 0; i < bots.length; i++) {
+        const b = bots[i];
+        if (b.isBoss) continue;
+        b.fireDelay = d.fireDelay;
+        if (d.health > b.maxHealth) {
+            if (b.alive) b.health += d.health - b.maxHealth;
+            b.maxHealth = d.health;
+        }
+    }
+}
+
+let netBanditMaxHp = 100;              // online: what the room's bandits start at
 
 let nextBanditAt = 0;
 let netWaveCap = WAVE_START_CAP;      // what the server says the room allows
@@ -5826,6 +5874,7 @@ function updateWaves(now) {
         nextWaveAt = now + WAVE_MS;
         wave++;
         applyWaveReward(wave, banditCap(wave));
+        toughenLocalBandits();
         // the new allowance arrives now, not one every fifteen seconds
         let guard = 0;
         while (bots.length < banditCap(wave) && guard++ < 6) createBandit(false);

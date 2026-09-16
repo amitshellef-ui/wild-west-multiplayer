@@ -151,6 +151,49 @@ function dropRoomIfEmpty(code) {
 const MAX_HEALTH = 100;
 const RESPAWN_MS = 4000;
 
+/* =========================================================================
+   SLOTS AND THE POSITION PACKET (step 14)
+
+   Position was the whole bill. Every move a player sent was relayed on its own,
+   to every other player, twenty times a second, and each copy carried a twenty
+   character socket id. Eight people in a room came to about a thousand messages
+   a second and 101 KB/s off the server - which on a plan that includes 5 GB a
+   month is roughly fourteen hours of play before the whole thing is spun down
+   until the first of the next month.
+
+   Two changes, no loss of fidelity:
+
+     a slot   a small number that means "this player" inside this room, handed
+              out on arrival and given back on leaving. Twenty characters
+              become one or two.
+
+     a batch  the room's movement goes out as one packet on its own clock,
+              fifteen times a second, carrying only the players who actually
+              moved since the last one. N x N packets become N.
+
+   Fifteen a second with the client's 110ms interpolation delay still leaves a
+   packet either side of what is being drawn, which is the only thing that
+   delay has to guarantee.
+   ========================================================================= */
+const MOVE_SEND_HZ = 15;
+const MAX_SLOTS = 64;
+
+function assignSlot(p, code) {
+    const taken = {};
+    for (const id in players) {
+        const other = players[id];
+        if (other === p || other.room !== code) continue;
+        if (typeof other.slot === "number") taken[other.slot] = true;
+    }
+    for (let i = 0; i < MAX_SLOTS; i++) {
+        if (!taken[i]) { p.slot = i; return i; }
+    }
+    p.slot = 0;                 // rooms are capped well below this
+    return 0;
+}
+
+function round2(v) { return Math.round(v * 100) / 100; }
+
 /* Verified against the map's own collision and navigation data: every one of
    these is clear of geometry, sits on a walkable navigation cell, and has a
    path back to the town centre. */
@@ -305,6 +348,7 @@ function placeInRoom(socket, p, code) {
 
     p.room = code;
     socket.join(code);
+    assignSlot(p, code);
 
     if (roomWasEmpty && rooms[code]) {
         bandits.initRoom(rooms[code]);
@@ -430,7 +474,9 @@ io.on("connection", (socket) => {
         placeInRoom(socket, p, pickLobby());
     });
 
-    /* ---- Position + rotation relay (steps 3 and 4) ---- */
+    /* ---- Position + rotation (steps 3 and 4, batched in step 14) ----
+       Nothing leaves here any more. The move is recorded and marked, and the
+       room's next position packet carries it along with everybody else's. */
     socket.on("move", (m) => {
         const p = players[socket.id];
         if (!p || !p.room) return;
@@ -439,11 +485,7 @@ io.on("connection", (socket) => {
         p.x = move.x; p.y = move.y; p.z = move.z;
         p.yaw = move.yaw; p.pitch = move.pitch;
         p.movedAt = Date.now();
-        socket.to(p.room).emit("player-moved", {
-            id: socket.id,
-            x: move.x, y: move.y, z: move.z,
-            yaw: move.yaw, pitch: move.pitch
-        });
+        p.moveDirty = true;
     });
 
     /* ---- Shot relay (step 7): muzzle flash, tracers and sound only ---- */
@@ -762,6 +804,42 @@ setInterval(() => {
     }
 }, bandits.TICK_MS);
 
+/* =========================================================================
+   THE POSITION PACKET
+
+   One broadcast per room, and only for the players who moved since the last
+   one - standing still costs nothing at all. Rows are
+   [slot, x, y, z, yaw, pitch], rounded to the centimetre and to about half a
+   degree, which is finer than anything a player can see at the far end of an
+   interpolated body.
+
+   Your own row is in there too. Sending one packet to the room is a single
+   serialisation, where excluding yourself would mean building a different
+   packet for every listener - the row costs less than the packet would.
+
+   Everything is a whole number: positions in centimetres, angles in hundredths
+   of a radian. Not for precision - a centimetre and a third of a degree are
+   both far below anything visible on an interpolated body at ten metres - but
+   because "-1234" is shorter on the wire than "-12.34", and this packet is
+   three quarters of what the game costs to run.
+   ========================================================================= */
+setInterval(() => {
+    for (const code in rooms) {
+        let rows = null;
+        for (const id in players) {
+            const p = players[id];
+            if (p.room !== code || !p.moveDirty) continue;
+            p.moveDirty = false;
+            (rows || (rows = [])).push([
+                p.slot,
+                Math.round(p.x * 100), Math.round(p.y * 100), Math.round(p.z * 100),
+                Math.round(p.yaw * 100), Math.round(p.pitch * 100)
+            ]);
+        }
+        if (rows) io.to(code).emit("players", { m: rows });
+    }
+}, Math.round(1000 / MOVE_SEND_HZ));
+
 const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, "0.0.0.0", () => {
@@ -769,6 +847,7 @@ server.listen(PORT, "0.0.0.0", () => {
     console.log("Rooms enabled. Lobby:", PUBLIC_ROOM, "| default mode:", MODES[DEFAULT_MODE].label);
     console.log("Room limit:", ROOM_LIMIT, "players - lobby included, up to",
         MAX_LOBBIES, "lobbies opened on demand");
+    console.log("Positions batched:", MOVE_SEND_HZ, "packets a second per room, by slot");
     console.log("Map loaded:", mapData.FINGERPRINT, "|", mapData.COLLIDERS.length, "colliders |",
         nav.blockedCount(), "blocked navigation cells");
     console.log("Bandits simulated here:", bandits.BANDIT.startCount, "to start, one more every",

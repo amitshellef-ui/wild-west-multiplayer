@@ -415,16 +415,20 @@ function stepRoom(room, players, now, dt, sink) {
 }
 
 /* What the clients need in order to draw them. Kept short on purpose: this
-   goes out several times a second to everyone in the room. */
+   goes out ten times a second to everyone in the room, and by wave six there
+   are sixteen of them in it - at which point this is about half the traffic.
+
+   Same whole numbers as the player packet: centimetres and hundredths of a
+   radian, written without a decimal point. */
 function snapshot(room) {
     const out = [];
     for (const id in room.bandits) {
         const b = room.bandits[id];
         out.push([
             b.id,
-            Math.round(b.x * 100) / 100,
-            Math.round(b.z * 100) / 100,
-            Math.round(b.yaw * 100) / 100,
+            Math.round(b.x * 100),
+            Math.round(b.z * 100),
+            Math.round(b.yaw * 100),
             Math.round(b.health),
             b.alive ? (b.state === "chase" ? 2 : 1) : 0
         ]);

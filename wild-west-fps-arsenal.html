@@ -332,8 +332,26 @@ const NET = {
    adds to or removes from this; step 3 will start filling in position data. */
 const PLAYERS = {};
 
+/* Inside a room every player also has a slot - a small number the server uses
+   instead of their socket id, because the position packet says who moved
+   fifteen times a second and a twenty character id fifteen times a second for
+   eight people was most of what this game cost to run. The mapping arrives
+   with the roster and with each arrival, and dies with the room. */
+const SLOTS = {};              // slot -> socket id
+
+function indexSlot(p) {
+    if (p && typeof p.slot === 'number' && p.id) SLOTS[p.slot] = p.id;
+}
+function dropSlot(id) {
+    Object.keys(SLOTS).forEach(function (s) { if (SLOTS[s] === id) delete SLOTS[s]; });
+}
+function clearSlots() {
+    Object.keys(SLOTS).forEach(function (s) { delete SLOTS[s]; });
+}
+
 function clearPlayers() {
     Object.keys(PLAYERS).forEach(function (id) { delete PLAYERS[id]; });
+    clearSlots();
     // Bodies are torn down by updateRemoteBodies on the next frame
 }
 function playerCount() {
@@ -708,10 +726,11 @@ function initNetwork() {
 
         clearPlayers();
         (data.players || []).forEach(function (p) {
-            if (p && p.id !== NET.id) {
-                p.buf = [{ t: performance.now(), x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch }];
-                PLAYERS[p.id] = p;
-            }
+            if (!p) return;
+            if (p.id === NET.id) { NET.slot = p.slot; return; }
+            p.buf = [{ t: performance.now(), x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch }];
+            PLAYERS[p.id] = p;
+            indexSlot(p);
         });
         // Our own bandits are not this room's bandits, and neither is our boss
         clearServerBandits();
@@ -741,6 +760,7 @@ function initNetwork() {
         if (!p || !p.id || p.id === NET.id) return;
         p.buf = [{ t: performance.now(), x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch }];
         PLAYERS[p.id] = p;
+        indexSlot(p);
         console.log('[NET] player joined: ' + p.id + ' (total ' + playerCount() + ')');
         netFeed('PLAYER JOINED - ' + p.id.slice(0, 6));
         refreshPlayerStatus();
@@ -942,23 +962,38 @@ function initNetwork() {
     /* --- Remote gunfire (step 7). Cosmetic: no damage is applied. --- */
     NET.socket.on('player-shot', function (m) { playRemoteShot(m); });
 
-    /* --- Transform updates (steps 3 and 4) --- */
-    NET.socket.on('player-moved', function (m) {
-        if (!m || !m.id) return;
-        const p = PLAYERS[m.id];
-        if (!p) return;            // unknown id: the roster event has not arrived yet
-        p.x = m.x; p.y = m.y; p.z = m.z;
-        p.yaw = m.yaw; p.pitch = m.pitch;
-        p.lastUpdate = performance.now();
-        if (!p.buf) p.buf = [];
-        p.buf.push({ t: p.lastUpdate, x: m.x, y: m.y, z: m.z, yaw: m.yaw, pitch: m.pitch });
-        if (p.buf.length > BUFFER_MAX) p.buf.shift();
-        NET.recv++;
+    /* --- Where everybody is (steps 3 and 4, batched in step 14) ---
+       One packet for the whole room, fifteen times a second, carrying only the
+       people who moved. Each row is [slot, x, y, z, yaw, pitch]; our own row is
+       in there and is skipped, because we are the one place that already knows
+       where we are. --- */
+    NET.socket.on('players', function (m) {
+        if (!m || !Array.isArray(m.m)) return;
+        const t = performance.now();
+        for (let i = 0; i < m.m.length; i++) {
+            const r = m.m[i];
+            if (!r || r.length < 6) continue;
+            const id = SLOTS[r[0]];
+            if (!id || id === NET.id) continue;
+            const p = PLAYERS[id];
+            if (!p) continue;      // the roster event has not arrived yet
+            // centimetres and hundredths of a radian on the wire
+            const x = r[1] / 100, y = r[2] / 100, z = r[3] / 100;
+            const yw = r[4] / 100, pt = r[5] / 100;
+            p.x = x; p.y = y; p.z = z;
+            p.yaw = yw; p.pitch = pt;
+            p.lastUpdate = t;
+            if (!p.buf) p.buf = [];
+            p.buf.push({ t: t, x: x, y: y, z: z, yaw: yw, pitch: pt });
+            if (p.buf.length > BUFFER_MAX) p.buf.shift();
+            NET.recv++;
+        }
     });
 
     NET.socket.on('player-left', function (p) {
         if (!p || !p.id || !PLAYERS[p.id]) return;
         delete PLAYERS[p.id];
+        dropSlot(p.id);
         console.log('[NET] player left: ' + p.id + ' (total ' + playerCount() + ')');
         netFeed('PLAYER LEFT - ' + p.id.slice(0, 6));
         refreshPlayerStatus();
@@ -3291,7 +3326,8 @@ function clearServerBandits() {
 }
 
 /* A snapshot row is [id, x, z, yaw, health, state] where state is
-   0 dead, 1 patrolling, 2 chasing. */
+   0 dead, 1 patrolling, 2 chasing - and x, z and yaw arrive as whole numbers,
+   centimetres and hundredths of a radian, to keep the packet short. */
 function onBanditSnapshot(rows) {
     const nowT = performance.now();
     const present = {};
@@ -3310,7 +3346,7 @@ function onBanditSnapshot(rows) {
         if (wasAlive && !body.alive) startBanditDeath(body);
         if (!wasAlive && body.alive) reviveBandit(body);
 
-        body.buf.push({ t: nowT, x: r[1], z: r[2], yaw: r[3] });
+        body.buf.push({ t: nowT, x: r[1] / 100, z: r[2] / 100, yaw: r[3] / 100 });
         if (body.buf.length > 14) body.buf.shift();
         showBanditHealth(body);
     }

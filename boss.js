@@ -623,7 +623,8 @@ function emptySink() {
     return {
         shots: [], hits: [], bossShots: [], hazards: [],
         booms: [], slams: [], blinks: [], roars: [],
-        bossSpawn: null, bossDied: null, bossPhase: null, wave: null
+        bossSpawn: null, bossDied: null, bossPhase: null, wave: null,
+        missionHits: [], missionEnd: null, missionState: null      // step 24, see missions.js
     };
 }
 

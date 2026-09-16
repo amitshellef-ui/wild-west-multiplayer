@@ -9,6 +9,7 @@ const nav = require("./navigation");
 const bandits = require("./bandits");
 const boss = require("./boss");
 const waves = require("./waves");
+const missions = require("./missions");
 
 const app = express();
 const server = http.createServer(app);
@@ -111,6 +112,7 @@ function createRoom(code, modeId) {
     bandits.initRoom(rooms[code]);
     boss.initRoom(rooms[code]);
     waves.initRoom(rooms[code]);
+    missions.initRoom(rooms[code]);
     return rooms[code];
 }
 createRoom(PUBLIC_ROOM, DEFAULT_MODE);
@@ -568,6 +570,36 @@ function stepRevives(room, now) {
     }
 }
 
+/* =========================================================================
+   MISSIONS (step 24)
+
+   Every wave from the second on hands the room a job - defend the bank, escort
+   the wagon, hold a patch of ground - for up to forty seconds. The rules are in
+   missions.js; what lives here is telling the room, and paying out.
+   ========================================================================= */
+function startMission(room, now) {
+    if (room.mission) finishMission(room, missions.cancel(room, "wave"));
+    const pkt = missions.start(room, activePlayers(), now);
+    if (!pkt) return;
+    io.to(room.code).emit("mission", pkt);
+    console.log("Mission in", room.code + ":", pkt.k, "- wave", room.wave);
+}
+
+/* Winning is worth health to everybody on their feet. The rounds are handed out
+   by the page itself when it hears the result, the same way a wave's are. */
+function finishMission(room, res) {
+    if (!res) return;
+    io.to(room.code).emit("mission-end", res);
+    if (res.ok) {
+        for (const id in players) {
+            const p = players[id];
+            if (p.room !== room.code || !p.alive || p.downed || p.away) continue;
+            setHealth(p, p.health + missions.MISSION.healthReward, null, false);
+        }
+    }
+    console.log("Mission in", room.code + ":", res.k, res.ok ? "done" : "failed", "(" + res.why + ")");
+}
+
 /* ---- Moving between rooms ---- */
 function placeInRoom(socket, p, code) {
     const previous = p.room;
@@ -592,6 +624,7 @@ function placeInRoom(socket, p, code) {
         bandits.initRoom(rooms[code]);
         boss.initRoom(rooms[code]);
         waves.initRoom(rooms[code]);
+        missions.initRoom(rooms[code]);
         console.log("Room", code, "was empty - back to wave 1:", bandits.BANDIT.startCount,
             "bandits, up to", waves.capFor(rooms[code]),
             "| boss in", (boss.BOSS.firstBossMs / 1000) + "s");
@@ -616,7 +649,8 @@ function placeInRoom(socket, p, code) {
         wave: rooms[code].wave || 1,
         cap: waves.capFor(rooms[code]),
         banditHp: waves.difficultyFor(rooms[code]).health,
-        scores: scoreRows(code)
+        scores: scoreRows(code),
+        mission: missions.publicState(rooms[code], Date.now())
     });
     socket.to(code).emit("player-joined", publicPlayer(p));
 
@@ -649,6 +683,7 @@ io.on("connection", (socket) => {
             cap: waves.capFor(room),
             banditHp: waves.difficultyFor(room).health,
             scores: scoreRows(back.room),
+            mission: missions.publicState(room, Date.now()),
             resumed: true
         });
         socket.to(back.room).emit("player-back", publicPlayer(back));
@@ -959,6 +994,7 @@ function registerHandlers(socket) {
             bandits.applyWave(room);
             bandits.fillTo(room, activePlayers(), up.cap);
             io.to(room.code).emit("wave", up);
+            startMission(room, now);
             io.to(room.code).emit("boss-died", {
                 by: shooter.id, t: typeIndex,
                 x: Math.round(res.boss.x * 100) / 100,
@@ -1098,6 +1134,15 @@ setInterval(() => {
 
         /* The boss arriving is an event in itself - the clients build the
            model, name the bar and play the roar off this one. */
+        /* The mission's own step: what the bullets did to it, the wagon's
+           wheels, the ground being held, and the clock. A boss riding in calls
+           it off - one fight at a time - and a new wave brings the next one. */
+        missions.stepRoom(room, active, now, dt, sink);
+        if (sink.missionEnd) finishMission(room, sink.missionEnd);
+        if (sink.bossSpawn && room.mission) finishMission(room, missions.cancel(room, "boss"));
+        if (sink.wave) startMission(room, now);
+        if (sink.missionState && room.mission) io.to(code).emit("mission-state", sink.missionState);
+
         if (sink.bossSpawn) {
             io.to(code).emit("boss-spawn", sink.bossSpawn);
             console.log("Boss in", code + ":", boss.BOSS_TYPES[sink.bossSpawn.t].name);

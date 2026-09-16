@@ -21,6 +21,7 @@
    ========================================================================= */
 const nav = require("./navigation");
 const waves = require("./waves");
+const missions = require("./missions");
 
 /* The numbers below are the wave 1 bandit. Health, respawn time, rate of fire
    and aim all tighten as the room's wave climbs - see DIFFICULTY in waves.js,
@@ -125,7 +126,11 @@ function spawnBandit(room, players, at) {
    sideways beats it, which is the point. */
 function fire(room, b, target, sink) {
     const ox = b.x, oy = BANDIT.eyeHeight, oz = b.z;
-    const tx = target.x, ty = target.y || 1.72, tz = target.z;
+    /* A mission objective says where to put the round, which is not always
+       where the bandit walks to: the bank is walked to at its door and shot at
+       in the middle, so a round from any side lands in a wall. */
+    const at = target.aim || target;
+    const tx = at.x, ty = at.y || 1.72, tz = at.z;
 
     let dx = tx - ox, dy = ty - oy, dz = tz - oz;
     const len = Math.hypot(dx, dy, dz) || 1;
@@ -173,13 +178,24 @@ function segmentDistance(px, py, pz, ax, ay, az, bx, by, bz) {
 /* Same reasoning for the town: sample along the sweep so a fast bullet cannot
    step straight through a wall. */
 function pathBlocked(ax, az, bx, bz) {
+    return blockedAt(ax, az, bx, bz) >= 0;
+}
+
+/* The same sweep, answering how far along it the wall was: -1 for clear. */
+function blockedAt(ax, az, bx, bz) {
     const dist = Math.hypot(bx - ax, bz - az);
     const steps = Math.max(1, Math.ceil(dist / 0.5));
     for (let i = 1; i <= steps; i++) {
         const t = i / steps;
-        if (nav.collidesAt(ax + (bx - ax) * t, az + (bz - az) * t, 0.08)) return true;
+        if (nav.collidesAt(ax + (bx - ax) * t, az + (bz - az) * t, 0.08)) return t;
     }
-    return false;
+    return -1;
+}
+
+/* Step 24: did a round that just hit a wall hit the bank's wall? */
+function inBank(box, x, y, z) {
+    const pad = 0.15;
+    return y <= box[4] && x >= box[0] - pad && x <= box[2] + pad && z >= box[1] - pad && z <= box[3] + pad;
 }
 
 function round2(v) { return Math.round(v * 100) / 100; }
@@ -200,7 +216,16 @@ function stepBullets(room, players, dt, sink) {
         const nz = bl.z + bl.dz * travel;
 
         if (ny <= 0.03) { room.bullets.splice(i, 1); continue; }
-        if (pathBlocked(bl.x, bl.z, nx, nz)) { room.bullets.splice(i, 1); continue; }
+        const m = room.mission;
+        const wallAt = blockedAt(bl.x, bl.z, nx, nz);
+        if (wallAt >= 0) {
+            if (m && m.box && sink.missionHits) {
+                const hx = bl.x + (nx - bl.x) * wallAt, hy = bl.y + (ny - bl.y) * wallAt, hz = bl.z + (nz - bl.z) * wallAt;
+                if (inBank(m.box, hx, hy, hz)) sink.missionHits.push(bl.dmg || BANDIT.bulletDamage);
+            }
+            room.bullets.splice(i, 1);
+            continue;
+        }
 
         let struck = false;
         for (const id in players) {
@@ -215,6 +240,15 @@ function stepBullets(room, players, dt, sink) {
                 });
                 struck = true;
                 break;
+            }
+        }
+        /* The wagon is in the way of whatever passes close enough to it - a
+           round meant for the player walking beside it included. */
+        if (!struck && m && m.k === "wagon" && sink.missionHits) {
+            const w = missions.MISSION.wagon;
+            if (segmentDistance(m.x, w.hitY, m.z, bl.x, bl.y, bl.z, nx, ny, nz) < w.hitRadius) {
+                sink.missionHits.push(bl.dmg || BANDIT.bulletDamage);
+                struck = true;
             }
         }
         bl.x = nx; bl.y = ny; bl.z = nz;
@@ -293,17 +327,38 @@ function stepBandit(room, b, players, now, dt, sink) {
         return;
     }
 
-    const near = nearestPlayer(room, players, b.x, b.z);
+    let near = nearestPlayer(room, players, b.x, b.z);
+
+    /* --- a mission objective (step 24) ---
+       Half the town goes for it rather than for the nearest player, unless a
+       player is right on top of them. It stands in for the player completely:
+       everything below - sight, routing, range, shooting, facing - runs
+       against it unchanged. It knows where the bank is, so it does not have to
+       stumble on it first. */
+    const objective = missions.targetFor(room, b, near ? near.dist : Infinity);
+    if (objective) {
+        near = { player: objective, dist: Math.hypot(objective.x - b.x, objective.z - b.z) };
+        if (b.targetId !== objective.id) { b.losAt = 0; b.path = null; b.repathAt = 0; }
+        b.state = "chase";
+        b.targetId = objective.id;
+    } else if (b.targetId === "#mission") {
+        b.targetId = null;
+        b.losAt = 0;
+        b.path = null;
+    }
+    const keep = objective && objective.keep !== undefined ? objective.keep : BANDIT.keepDistance;
 
     /* --- can it see anyone? checked a few times a second, not every tick --- */
     if (now >= b.losAt) {
         b.losAt = now + 180 + Math.random() * 100;
-        if (near && near.dist < BANDIT.sightRange) {
+        if (near && (objective || near.dist < BANDIT.sightRange)) {
             b.hasLos = nav.losClear(b.x, b.z, near.player.x, near.player.z);
         } else {
             b.hasLos = false;
         }
-        if (b.hasLos && near && near.dist < BANDIT.engageRange) {
+        if (objective) {
+            // already chasing it, see above
+        } else if (b.hasLos && near && near.dist < BANDIT.engageRange) {
             b.state = "chase";
             b.targetId = near.player.id;
         } else if (b.state === "chase" && (!near || near.dist > 60)) {
@@ -316,7 +371,10 @@ function stepBandit(room, b, players, now, dt, sink) {
     let goal = null, wantsMove = true;
     if (b.state === "chase" && near) {
         goal = { x: near.player.x, z: near.player.z };
-        if (b.hasLos && near.dist < BANDIT.keepDistance + 4 && near.dist > BANDIT.keepDistance - 4) {
+        if (objective) {
+            // close enough to the objective and able to see it: stop walking
+            if (b.hasLos && near.dist < keep) wantsMove = false;
+        } else if (b.hasLos && near.dist < keep + 4 && near.dist > keep - 4) {
             wantsMove = false;
         }
     } else {
@@ -364,7 +422,7 @@ function stepBandit(room, b, players, now, dt, sink) {
     /* Holding position does not mean standing still. A bandit that has closed
        to its preferred range sidesteps instead, the way it always did in the
        browser - otherwise it freezes into a target dummy. */
-    if (!moved && b.state === "chase" && near && b.hasLos) {
+    if (!moved && b.state === "chase" && near && b.hasLos && !(objective && objective.noFire)) {
         if (now >= b.strafeAt) {
             b.strafeAt = now + 1100 + Math.random() * 1800;
             b.strafeDir *= -1;
@@ -372,7 +430,7 @@ function stepBandit(room, b, players, now, dt, sink) {
         const tx = near.player.x - b.x, tz = near.player.z - b.z;
         const len = Math.hypot(tx, tz) || 1;
         const px = -tz / len, pz = tx / len;
-        const back = near.dist < BANDIT.keepDistance - 3 ? -1 : 0;
+        const back = near.dist < keep - 3 ? -1 : 0;
         const step = speed * 0.65 * dt;
         moveAxis(b,
             px * step * b.strafeDir + (tx / len) * step * back,
@@ -407,7 +465,7 @@ function stepBandit(room, b, players, now, dt, sink) {
     }
 
     /* --- shooting --- */
-    if (b.hasLos && near && near.dist < BANDIT.fireRange &&
+    if (b.hasLos && near && near.dist < BANDIT.fireRange && !(objective && objective.noFire) &&
         now - b.lastShot > waves.difficultyFor(room).fireDelay) {
         b.lastShot = now + (Math.random() - 0.5) * 350;
         fire(room, b, near.player, sink);

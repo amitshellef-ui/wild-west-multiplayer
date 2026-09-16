@@ -133,6 +133,21 @@
     #revive-prompt { left: 50%; top: 62%; transform: translateX(-50%); display: none; text-align: center; padding: 8px 14px; direction: rtl; }
     #rv-text { font-size: 14px; color: #ffe9a8; }
 
+    /* Missions (step 24) - top centre, where the boss bar lives; a boss calls a mission off */
+    #mission-panel { top: 18px; left: 50%; transform: translateX(-50%); width: 380px; display: none; text-align: center; padding: 8px 12px; }
+    #ms-head { display: flex; justify-content: space-between; align-items: baseline; }
+    #ms-name { font-size: 13px; color: #ffd37a; letter-spacing: 2px; }
+    #ms-clock { font-size: 13px; color: #f3d9c0; font-variant-numeric: tabular-nums; }
+    #ms-status { font-size: 11px; color: #c9a36a; margin: 3px 0 5px; direction: rtl; min-height: 14px; }
+    #ms-bg { height: 10px; background: #2a1a0c; border: 1px solid #6b451f; }
+    #ms-fill { height: 100%; width: 100%; background: linear-gradient(180deg,#ffd77a,#a8741e); transition: width 0.2s; }
+    #mission-panel.hold #ms-fill { background: linear-gradient(180deg,#8ee06a,#2f7a16); }
+    #mission-panel.alert #ms-status { color: #ff7a5a; }
+    #mission-panel.ok { border-color: #4f8a3a; }
+    #mission-panel.ok #ms-name { color: #9df07a; }
+    #mission-panel.fail { border-color: #7a2a1a; }
+    #mission-panel.fail #ms-name { color: #ff6a4a; }
+
     /* Scoreboard - hold Tab, and it shows itself for a moment when a boss falls */
     #scoreboard { top: 50%; left: 50%; transform: translate(-50%, -50%); min-width: 380px; display: none; padding: 12px 16px 10px; z-index: 8; }
     #scoreboard .sb-title { font-size: 13px; color: #ffd37a; letter-spacing: 3px; text-align: center; margin-bottom: 9px; }
@@ -300,6 +315,11 @@
 <div id="revive-prompt" class="panel">
     <div id="rv-text">החזק E כדי להחיות</div>
     <div class="rv-bar"><div id="rv-fill"></div></div>
+</div>
+<div id="mission-panel" class="panel">
+    <div id="ms-head"><span id="ms-name">MISSION</span><span id="ms-clock">40</span></div>
+    <div id="ms-status"></div>
+    <div id="ms-bg"><div id="ms-fill"></div></div>
 </div>
 <div id="scoreboard" class="panel">
     <div class="sb-title">&#9733; SCOREBOARD &#9733;</div>
@@ -563,6 +583,281 @@ function tickRevive(now) {
         NET.socket.emit('revive-stop', { id: REVIVE.sentFor });
         REVIVE.sentFor = null;
     }
+}
+
+/* =========================================================================
+   MISSIONS (multiplayer, step 24)
+
+   From wave 2 on the server hands the room a job each time the wave turns
+   over: defend the bank, escort the wagon, hold the ground. The server runs all
+   of it - the bank's walls, the wagon's wheels, the clock. This page draws it:
+   the panel at the top, a column of light at the bank door, the wagon itself,
+   a ring on the ground, and a marker that shows through walls and sits on the
+   minimap's rim when the objective is far away.
+
+   Online only. Single player has no missions.
+   ========================================================================= */
+const MISSION_INFO = {
+    bank:  { name: 'DEFEND THE BANK',  hint: 'בנדיטים יורים על קירות הבנק' },
+    wagon: { name: 'ESCORT THE WAGON', hint: 'לכו ליד העגלה כדי שתיסע' },
+    hold:  { name: 'HOLD THE GROUND',  hint: 'עמדו בתוך הטבעת' }
+};
+const MS = {
+    m: null,                 // the mission being drawn, or null
+    endAt: 0,                // when the result panel goes away
+    objs: [],                // scene objects to take down afterwards
+    wagon: null, ring: null, ringFill: null, pillar: null, marker: null
+};
+
+function clearMissionVisuals() {
+    MS.objs.forEach(function (o) {
+        scene.remove(o);
+        o.traverse(function (c) {
+            if (c.geometry) c.geometry.dispose();
+            if (c.material) { if (c.material.map) c.material.map.dispose(); c.material.dispose(); }
+        });
+    });
+    MS.objs.length = 0;
+    MS.wagon = MS.ring = MS.ringFill = MS.pillar = MS.marker = null;
+}
+
+function msAdd(o) { scene.add(o); MS.objs.push(o); return o; }
+
+function makeMissionMarker() {
+    const c = document.createElement('canvas');
+    c.width = c.height = 64;
+    const x = c.getContext('2d');
+    x.fillStyle = 'rgba(0,0,0,0.5)'; x.beginPath(); x.arc(32, 32, 30, 0, 7); x.fill();
+    x.fillStyle = '#ffd77a';
+    x.beginPath();
+    for (let i = 0; i < 10; i++) {
+        const r = i % 2 ? 9 : 22, a = -Math.PI / 2 + i * Math.PI / 5;
+        x.lineTo(32 + Math.cos(a) * r, 32 + Math.sin(a) * r);
+    }
+    x.closePath(); x.fill();
+    const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false, transparent: true }));
+    spr.scale.set(1.1, 1.1, 1);
+    spr.renderOrder = 998;
+    return msAdd(spr);
+}
+
+/* Long side along x, which is the way both routes run. */
+function makeWagon() {
+    const g = new THREE.Group();
+    const wood = new THREE.MeshStandardMaterial({ color: 0x6e4724, roughness: 0.9 });
+    const dark = new THREE.MeshStandardMaterial({ color: 0x3a2412, roughness: 0.9 });
+    const canvasMat = new THREE.MeshStandardMaterial({ color: 0xe8dcc0, roughness: 1, side: THREE.DoubleSide });
+    const bed = new THREE.Mesh(new THREE.BoxGeometry(3.2, 0.22, 1.5), wood);
+    bed.position.y = 0.9; g.add(bed);
+    [[0, 1.12, 0.72, 3.2, 0.45, 0.08], [0, 1.12, -0.72, 3.2, 0.45, 0.08], [1.56, 1.12, 0, 0.08, 0.45, 1.5], [-1.56, 1.12, 0, 0.08, 0.45, 1.5]]
+        .forEach(function (b) { const m = new THREE.Mesh(new THREE.BoxGeometry(b[3], b[4], b[5]), wood); m.position.set(b[0], b[1], b[2]); g.add(m); });
+    // the canvas cover: half a tube lying along x, open side down
+    const top = new THREE.Mesh(new THREE.CylinderGeometry(0.76, 0.76, 2.7, 16, 1, true, 0, Math.PI), canvasMat);
+    top.rotation.z = Math.PI / 2;
+    top.position.y = 1.3;
+    g.add(top);
+    g.userData.wheels = [];
+    [[1.05, 0.82], [1.05, -0.82], [-1.05, 0.82], [-1.05, -0.82]].forEach(function (w) {
+        const wh = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.55, 0.1, 14), dark);
+        wh.rotation.x = Math.PI / 2;
+        wh.position.set(w[0], 0.55, w[1]);
+        g.add(wh); g.userData.wheels.push(wh);
+    });
+    g.traverse(function (c) { if (c.isMesh) c.castShadow = true; });
+    return msAdd(g);
+}
+
+function makeRing(r) {
+    const ring = new THREE.Mesh(new THREE.RingGeometry(r - 0.28, r, 56),
+        new THREE.MeshBasicMaterial({ color: 0xffd77a, transparent: true, opacity: 0.85, side: THREE.DoubleSide, depthWrite: false }));
+    ring.rotation.x = -Math.PI / 2;
+    return msAdd(ring);
+}
+
+/* The start packet, or the state a latecomer walks in on. */
+function onMissionStart(m) {
+    if (!m || !MISSION_INFO[m.k]) return;
+    clearMissionVisuals();
+    const now = performance.now();
+    MS.m = {
+        k: m.k, x: m.x, z: m.z, hp: m.hp || 0, h: m.h !== undefined ? m.h : (m.hp || 0),
+        r: m.r || 6, need: m.need || 22000, p: m.p || 0,
+        e: m.e || null, clockAt: now, left: m.ms || 40000,
+        c: 0, g: 0, drawX: m.x, drawZ: m.z, stateAt: now, pAt: now
+    };
+    MS.endAt = 0;
+    const panel = document.getElementById('mission-panel');
+    panel.className = 'panel' + (m.k === 'hold' ? ' hold' : '');
+    panel.style.display = 'block';
+    document.getElementById('ms-name').textContent = '\u2605 ' + MISSION_INFO[m.k].name + ' \u2605';
+
+    if (m.k === 'bank') {
+        MS.pillar = msAdd(new THREE.Mesh(new THREE.CylinderGeometry(0.9, 0.9, 16, 20, 1, true),
+            new THREE.MeshBasicMaterial({ color: 0xffc84a, transparent: true, opacity: 0.22, depthWrite: false,
+                blending: THREE.AdditiveBlending, side: THREE.DoubleSide })));
+        MS.pillar.position.set(m.x, 8, m.z);
+        MS.ring = makeRing(2.2);
+        MS.ring.position.set(m.x, 0.06, m.z);
+    } else if (m.k === 'wagon') {
+        MS.wagon = makeWagon();
+        MS.wagon.position.set(m.x, 0, m.z);
+        MS.ring = makeRing(8);                           // how close you must walk
+        MS.ring.material.opacity = 0.35;
+        MS.ring.position.set(m.x, 0.06, m.z);
+    } else {
+        MS.ring = makeRing(MS.m.r);
+        MS.ring.position.set(m.x, 0.06, m.z);
+        MS.ringFill = msAdd(new THREE.Mesh(new THREE.CircleGeometry(MS.m.r - 0.28, 48),
+            new THREE.MeshBasicMaterial({ color: 0xffd77a, transparent: true, opacity: 0.1, depthWrite: false })));
+        MS.ringFill.rotation.x = -Math.PI / 2;
+        MS.ringFill.position.set(m.x, 0.05, m.z);
+    }
+    MS.marker = makeMissionMarker();
+    if (!m.late) {
+        pushFeed('MISSION: ' + MISSION_INFO[m.k].name);
+        sfxPickup();
+    }
+}
+
+function onMissionState(st) {
+    const m = MS.m;
+    if (!m || !st) return;
+    const now = performance.now();
+    if (typeof st.l === 'number') { m.left = st.l * 100; m.clockAt = now; }
+    if (typeof st.h === 'number') {
+        // the building takes a hit: a puff of splinters off its front
+        if (m.k === 'bank' && st.h < m.h) {
+            spawnParticles(new THREE.Vector3(-11 + (Math.random() - 0.5) * 8, 0.8 + Math.random() * 2.6, -8.4), 0x9c8156, 6, 2.2);
+        }
+        m.h = st.h;
+    }
+    if (typeof st.p === 'number') { m.p = st.p * 100; m.pAt = now; }
+    if (typeof st.x === 'number') { m.x = st.x / 100; m.z = st.z / 100; m.stateAt = now; }
+    m.c = st.c || 0;
+    m.g = st.g || 0;
+}
+
+function onMissionEnd(res) {
+    if (!res || !MS.m) return;
+    const panel = document.getElementById('mission-panel');
+    const name = MISSION_INFO[res.k] ? MISSION_INFO[res.k].name : 'MISSION';
+    clearMissionVisuals();
+    MS.m = null;
+    if (res.why === 'wave') { panel.style.display = 'none'; return; }
+
+    let line;
+    if (res.ok) {
+        // the health comes from the server; the rounds are ours to hand out, like a wave's
+        wpnAmmo[currentWpn].reserve = reserve = reserve + 30;
+        updateAmmoUI();
+        sfxPickup();
+        line = 'MISSION COMPLETE \u2014 +25 health, +30 ammo';
+        document.getElementById('ms-status').textContent = 'הצלחה! +25 חיים, +30 תחמושת';
+    } else {
+        line = {
+            destroyed: res.k === 'bank' ? 'THE BANK FELL' : 'THE WAGON WAS DESTROYED',
+            time: 'MISSION FAILED \u2014 OUT OF TIME',
+            boss: 'MISSION CALLED OFF \u2014 BOSS INCOMING'
+        }[res.why] || 'MISSION FAILED';
+        document.getElementById('ms-status').textContent = res.why === 'boss' ? 'בוטל · בוס בדרך' : 'נכשל · בלי פרס';
+    }
+    pushFeed(line);
+    document.getElementById('ms-name').textContent = res.ok ? '\u2605 ' + name + ' \u2014 DONE \u2605'
+        : name + ' \u2014 ' + (res.why === 'boss' ? 'CALLED OFF' : 'FAILED');
+    document.getElementById('ms-clock').textContent = '';
+    panel.className = 'panel ' + (res.ok ? 'ok' : 'fail');
+    // a boss is arriving: its bar needs the space now, not in three seconds
+    MS.endAt = performance.now() + (res.why === 'boss' ? 1 : 3000);
+}
+
+function resetMission() {
+    clearMissionVisuals();
+    MS.m = null;
+    MS.endAt = 0;
+    const panel = document.getElementById('mission-panel');
+    if (panel) panel.style.display = 'none';
+}
+
+/* Every frame: the clock, the bar, the wagon rolling, the ring's colour. */
+function tickMission(now, delta) {
+    const panel = document.getElementById('mission-panel');
+    const m = MS.m;
+    if (!m) {
+        if (MS.endAt && now > MS.endAt) { MS.endAt = 0; if (panel) panel.style.display = 'none'; }
+        return;
+    }
+
+    const left = Math.max(0, m.left - (now - m.clockAt));
+    document.getElementById('ms-clock').textContent = Math.ceil(left / 1000) + 's';
+
+    let frac, status, alert = false;
+    if (m.k === 'bank') {
+        frac = m.h / m.hp;
+        status = MISSION_INFO.bank.hint + ' · ' + Math.round(m.h) + '/' + m.hp;
+        alert = frac < 0.35;
+    } else if (m.k === 'wagon') {
+        frac = m.h / m.hp;
+        if (m.c) { status = 'בנדיט חוסם את העגלה!'; alert = true; }
+        else if (m.g) status = 'העגלה בדרך · ' + Math.round(m.h) + '/' + m.hp;
+        else status = MISSION_INFO.wagon.hint + ' · ' + Math.round(m.h) + '/' + m.hp;
+    } else {
+        // held ground counts at one speed, so between packets we count it ourselves
+        const held = Math.min(m.need, m.p + (m.g ? now - m.pAt : 0));
+        frac = held / m.need;
+        if (m.c) { status = 'בנדיט בתוך הטבעת!'; alert = true; }
+        else if (m.g) status = 'מחזיקים · עוד ' + Math.max(1, Math.ceil((m.need - held) / 1000)) + ' שניות';
+        else status = MISSION_INFO.hold.hint;
+    }
+    document.getElementById('ms-fill').style.width = Math.max(0, Math.min(100, frac * 100)) + '%';
+    document.getElementById('ms-status').textContent = status;
+    panel.className = 'panel' + (m.k === 'hold' ? ' hold' : '') + (alert ? ' alert' : '');
+
+    let mx = m.x, mz = m.z;
+    if (m.k === 'wagon' && MS.wagon) {
+        /* between packets (2.5 a second), keep rolling the way it was going -
+           but never further than one packet's worth past what the server said */
+        let tx = m.x, tz = m.z;
+        if (m.g && m.e) {
+            const ahead = Math.min(0.45, (now - m.stateAt) / 1000) * 2;
+            const ex = m.e[2] - m.e[0], ez = m.e[3] - m.e[1], el = Math.hypot(ex, ez) || 1;
+            tx += ex / el * ahead; tz += ez / el * ahead;
+        }
+        const k = Math.min(1, 8 * delta);
+        const px = m.drawX, pz = m.drawZ;
+        m.drawX += (tx - m.drawX) * k;
+        m.drawZ += (tz - m.drawZ) * k;
+        const moved = Math.hypot(m.drawX - px, m.drawZ - pz);
+        MS.wagon.position.set(m.drawX, 0, m.drawZ);
+        MS.wagon.userData.wheels.forEach(function (w) { w.rotation.y += moved / 0.55; });
+        MS.ring.position.set(m.drawX, 0.06, m.drawZ);
+        MS.ring.material.color.setHex(m.c ? 0xff3b2b : (m.g ? 0x7dff6a : 0xffd77a));
+        mx = m.drawX; mz = m.drawZ;
+    } else if (m.k === 'hold') {
+        const col = m.c ? 0xff3b2b : (m.g ? 0x7dff6a : 0xffd77a);
+        MS.ring.material.color.setHex(col);
+        MS.ringFill.material.color.setHex(col);
+        MS.ringFill.material.opacity = 0.08 + 0.05 * Math.sin(now * 0.006) + (m.g ? 0.06 : 0);
+    } else if (m.k === 'bank' && MS.pillar) {
+        const col = m.h / m.hp < 0.35 ? 0xff4a2a : 0xffc84a;
+        MS.pillar.material.color.setHex(col);
+        MS.ring.material.color.setHex(col);
+        MS.pillar.material.opacity = 0.18 + 0.06 * Math.sin(now * 0.004);
+    }
+    if (MS.marker) {
+        MS.marker.position.set(mx, (m.k === 'bank' ? 6 : 3.2) + Math.sin(now * 0.004) * 0.12, mz);
+        const d = Math.hypot(mx - camera.position.x, mz - camera.position.z);
+        MS.marker.visible = d > 7;
+        const sc = Math.min(2.6, 0.9 + d * 0.03);
+        MS.marker.scale.set(sc, sc, 1);
+    }
+}
+
+/* Where to draw it on the minimap, or null. */
+function missionMapPoint() {
+    const m = MS.m;
+    if (!m) return null;
+    if (m.k === 'wagon') return { x: m.drawX, z: m.drawZ, r: 0 };
+    return { x: m.x, z: m.z, r: m.k === 'hold' ? m.r : 0 };
 }
 
 /* Inside a room every player also has a slot - a small number the server uses
@@ -992,6 +1287,8 @@ function initNetwork() {
         clearServerBandits();
         clearBanditBullets();
         clearNetBossState();
+        resetMission();
+        if (data.mission) { data.mission.late = true; onMissionStart(data.mission); }
         bots.forEach(function (b) { botGroup.remove(b.mesh); });
         bots.length = 0;
         console.log('[NET] room ' + data.code + ' (' + NET.mode.label + ') others=' + Object.keys(PLAYERS).length);
@@ -1164,6 +1461,11 @@ function initNetwork() {
         REVIVE.me.wipeAt = performance.now() + ((m && m.in) || 3000);
         pushFeed('Nobody left standing \u2014 everybody up in ' + Math.round(((m && m.in) || 3000) / 1000));
     });
+
+    /* --- Missions (step 24) --- */
+    NET.socket.on('mission', function (m) { onMissionStart(m); });
+    NET.socket.on('mission-state', function (m) { onMissionState(m); });
+    NET.socket.on('mission-end', function (m) { onMissionEnd(m); });
 
     /* --- The room's bandits (step 11b) --- */
     NET.socket.on('bandits', function (m) {
@@ -1377,6 +1679,7 @@ function initNetwork() {
         clearServerBandits();
         clearBanditBullets();
         clearNetBossState();
+        resetMission();
         clearPlayers();
         console.warn('[NET] disconnected: ' + reason);
 
@@ -6190,6 +6493,26 @@ function drawMinimap() {
         }
     }
 
+    // the mission's objective: a gold star, pinned to the rim when it is far off
+    const mp = missionMapPoint();
+    if (mp) {
+        const ox = (mp.x - camera.position.x) * scale, oz = (mp.z - camera.position.z) * scale;
+        if (mp.r) {
+            mm.strokeStyle = 'rgba(255,215,122,0.8)';
+            mm.lineWidth = 1.5;
+            mm.beginPath(); mm.arc(ox, oz, mp.r * scale, 0, 7); mm.stroke();
+        }
+        const rr = Math.min(R - 7, Math.hypot(ox, oz)), ang = Math.atan2(oz, ox);
+        const sx = Math.cos(ang) * rr, sz = Math.sin(ang) * rr;
+        mm.fillStyle = '#ffd77a';
+        mm.beginPath();
+        for (let i = 0; i < 10; i++) {
+            const r = i % 2 ? 2.4 : 5.5, a = -Math.PI / 2 - yaw + i * Math.PI / 5;
+            mm.lineTo(sx + Math.cos(a) * r, sz + Math.sin(a) * r);
+        }
+        mm.closePath(); mm.fill();
+    }
+
     // other players - a fallen team mate is a red cross
     const pIds = Object.keys(remoteBodies);
     for (let i = 0; i < pIds.length; i++) {
@@ -6493,6 +6816,7 @@ function animate() {
     refreshNetDebug(now);
     tickScoreboard(now);
     if (NET.socket) tickRevive(now);
+    tickMission(now, delta);
 
     if (isLocked && playerHealth > 0) {
         updatePlayer(delta, now);

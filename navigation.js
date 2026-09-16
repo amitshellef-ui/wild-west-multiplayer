@@ -11,21 +11,58 @@
    ========================================================================= */
 const { COLLIDERS, NAV } = require("./map-data");
 
+/* ---- The collider grid (step 20) -------------------------------------------
+   The border rocks took the map from 134 boxes to 909, and every collision
+   question used to ask all of them. The map is cut into 8 metre cells and each
+   box is filed under every cell it overlaps, so a question only asks the boxes
+   near it. Identical to CGRID in the client, and identical answers to the old
+   loop - a box that could overlap is never skipped, and the overlap test itself
+   is unchanged. Checked against the full scan on 60,000 random questions. */
+const CG = { minX: -80, minZ: -95, cell: 8, w: 20, h: 22 };
+function cgX(x) { return Math.max(0, Math.min(CG.w - 1, Math.floor((x - CG.minX) / CG.cell))); }
+function cgZ(z) { return Math.max(0, Math.min(CG.h - 1, Math.floor((z - CG.minZ) / CG.cell))); }
+
+function buildGrid(list) {
+    const cells = new Array(CG.w * CG.h);
+    for (let i = 0; i < cells.length; i++) cells[i] = [];
+    for (let i = 0; i < list.length; i++) {
+        const c = list[i];
+        for (let gz = cgZ(c[2]); gz <= cgZ(c[5]); gz++) {
+            for (let gx = cgX(c[0]); gx <= cgX(c[3]); gx++) cells[gz * CG.w + gx].push(i);
+        }
+    }
+    return { cells: cells, stamp: new Uint32Array(list.length), tick: 0 };
+}
+const COLLIDER_GRID = buildGrid(COLLIDERS);
+
 /* ---- Collision ----------------------------------------------------------
    The client tests a box from y 0.3 to 1.8 so that a beam overhead does not
    block the floor beneath it. Same here. */
-function collidesAt(x, z, radius) {
-    const r = radius === undefined ? 0.55 : radius;
-    const minX = x - r, maxX = x + r;
-    const minZ = z - r, maxZ = z + r;
-    for (let i = 0; i < COLLIDERS.length; i++) {
-        const c = COLLIDERS[i];
-        if (maxX < c[0] || minX > c[3]) continue;
-        if (maxZ < c[2] || minZ > c[5]) continue;
-        if (1.8 < c[1] || 0.3 > c[4]) continue;
-        return true;
+function areaBlocked(minX, minZ, maxX, maxZ) {
+    const g = COLLIDER_GRID;
+    const t = ++g.tick;
+    const x0 = cgX(minX), x1 = cgX(maxX), z0 = cgZ(minZ), z1 = cgZ(maxZ);
+    for (let gz = z0; gz <= z1; gz++) {
+        for (let gx = x0; gx <= x1; gx++) {
+            const list = g.cells[gz * CG.w + gx];
+            for (let k = 0; k < list.length; k++) {
+                const i = list[k];
+                if (g.stamp[i] === t) continue;
+                g.stamp[i] = t;
+                const c = COLLIDERS[i];
+                if (maxX < c[0] || minX > c[3]) continue;
+                if (maxZ < c[2] || minZ > c[5]) continue;
+                if (1.8 < c[1] || 0.3 > c[4]) continue;
+                return true;
+            }
+        }
     }
     return false;
+}
+
+function collidesAt(x, z, radius) {
+    const r = radius === undefined ? 0.55 : radius;
+    return areaBlocked(x - r, z - r, x + r, z + r);
 }
 
 /* ---- The walkable grid -------------------------------------------------- */
@@ -37,17 +74,7 @@ function buildNav() {
         for (let cx = 0; cx < NAV.w; cx++) {
             const wx = NAV.minX + (cx + 0.5) * NAV.cell;
             const wz = NAV.minZ + (cz + 0.5) * NAV.cell;
-            const minX = wx - half, maxX = wx + half;
-            const minZ = wz - half, maxZ = wz + half;
-            let hit = 0;
-            for (let i = 0; i < COLLIDERS.length; i++) {
-                const c = COLLIDERS[i];
-                if (maxX < c[0] || minX > c[3]) continue;
-                if (maxZ < c[2] || minZ > c[5]) continue;
-                if (1.8 < c[1] || 0.3 > c[4]) continue;
-                hit = 1; break;
-            }
-            blocked[cz * NAV.w + cx] = hit;
+            blocked[cz * NAV.w + cx] = areaBlocked(wx - half, wz - half, wx + half, wz + half) ? 1 : 0;
         }
     }
 }
@@ -323,6 +350,17 @@ function losClear(ax, az, bx, bz) {
    - exactly as the client does it. */
 const MINE = { x0: 0.6, x1: 15.4 };
 
+/* Only somewhere a bandit can actually get out of (step 20). Collision for the
+   border rocks sealed off a few small pockets between the rocks and the
+   boundary wall - about 230 cells - and a bandit placed in one stays there for
+   good, holding one of the wave's slots while it does. So points are drawn from
+   the town's own region. The mine shaft is still allowed on purpose, as before. */
+let TOWN_REGION = -1;
+function townRegion() {
+    if (TOWN_REGION < 0) TOWN_REGION = regionSize.indexOf(Math.max.apply(null, regionSize));
+    return TOWN_REGION;
+}
+
 function randomNavPoint() {
     for (let k = 0; k < 40; k++) {
         const cx = Math.floor(Math.random() * NAV.w);
@@ -331,6 +369,7 @@ function randomNavPoint() {
         const x = cellCenterX(cx), z = cellCenterZ(cz);
         const inShaft = x > MINE.x0 && x < MINE.x1 && z < -52;
         if (!inShaft && (Math.abs(x) > 66 || Math.abs(z) > 66)) continue;
+        if (!inShaft && region[navIdx(cx, cz)] !== townRegion()) continue;
         return { x: x, z: z };
     }
     return { x: 0, z: 0 };
@@ -385,43 +424,62 @@ const SHOT_MIN_HEIGHT = 2.21;
 const SHOT_SKIN = 0.06;               // a shot that grazes an edge is the shooter's
 const SHOT_BLOCKERS = COLLIDERS.filter((c) => c[4] - c[1] > SHOT_MIN_HEIGHT);
 
+/* True if the segment passes through tall box c. The slab test from before,
+   lifted out so it can be asked of only the boxes near the shot. */
+function segmentHitsBox(c, ax, ay, az, dx, dy, dz) {
+    let t0 = 0, t1 = 1;
+
+    // x
+    if (Math.abs(dx) < 1e-9) {
+        if (ax <= c[0] + SHOT_SKIN || ax >= c[3] - SHOT_SKIN) return false;
+    } else {
+        let ta = (c[0] + SHOT_SKIN - ax) / dx, tb = (c[3] - SHOT_SKIN - ax) / dx;
+        if (ta > tb) { const t = ta; ta = tb; tb = t; }
+        if (ta > t0) t0 = ta;
+        if (tb < t1) t1 = tb;
+        if (t0 >= t1) return false;
+    }
+    // y - the floor of a box is the floor, only its top is skinned
+    if (Math.abs(dy) < 1e-9) {
+        if (ay <= c[1] || ay >= c[4] - SHOT_SKIN) return false;
+    } else {
+        let ta = (c[1] - ay) / dy, tb = (c[4] - SHOT_SKIN - ay) / dy;
+        if (ta > tb) { const t = ta; ta = tb; tb = t; }
+        if (ta > t0) t0 = ta;
+        if (tb < t1) t1 = tb;
+        if (t0 >= t1) return false;
+    }
+    // z
+    if (Math.abs(dz) < 1e-9) {
+        if (az <= c[2] + SHOT_SKIN || az >= c[5] - SHOT_SKIN) return false;
+    } else {
+        let ta = (c[2] + SHOT_SKIN - az) / dz, tb = (c[5] - SHOT_SKIN - az) / dz;
+        if (ta > tb) { const t = ta; ta = tb; tb = t; }
+        if (ta > t0) t0 = ta;
+        if (tb < t1) t1 = tb;
+        if (t0 >= t1) return false;
+    }
+    return true;
+}
+
+const SHOT_GRID = buildGrid(SHOT_BLOCKERS);
+
 function shotClear(ax, ay, az, bx, by, bz) {
     const dx = bx - ax, dy = by - ay, dz = bz - az;
-    for (let i = 0; i < SHOT_BLOCKERS.length; i++) {
-        const c = SHOT_BLOCKERS[i];
-        let t0 = 0, t1 = 1;
-
-        // x
-        if (Math.abs(dx) < 1e-9) {
-            if (ax <= c[0] + SHOT_SKIN || ax >= c[3] - SHOT_SKIN) continue;
-        } else {
-            let ta = (c[0] + SHOT_SKIN - ax) / dx, tb = (c[3] - SHOT_SKIN - ax) / dx;
-            if (ta > tb) { const t = ta; ta = tb; tb = t; }
-            if (ta > t0) t0 = ta;
-            if (tb < t1) t1 = tb;
-            if (t0 >= t1) continue;
+    const g = SHOT_GRID;
+    const t = ++g.tick;
+    const x0 = cgX(Math.min(ax, bx)), x1 = cgX(Math.max(ax, bx));
+    const z0 = cgZ(Math.min(az, bz)), z1 = cgZ(Math.max(az, bz));
+    for (let gz = z0; gz <= z1; gz++) {
+        for (let gx = x0; gx <= x1; gx++) {
+            const list = g.cells[gz * CG.w + gx];
+            for (let k = 0; k < list.length; k++) {
+                const i = list[k];
+                if (g.stamp[i] === t) continue;
+                g.stamp[i] = t;
+                if (segmentHitsBox(SHOT_BLOCKERS[i], ax, ay, az, dx, dy, dz)) return false;
+            }
         }
-        // y - the floor of a box is the floor, only its top is skinned
-        if (Math.abs(dy) < 1e-9) {
-            if (ay <= c[1] || ay >= c[4] - SHOT_SKIN) continue;
-        } else {
-            let ta = (c[1] - ay) / dy, tb = (c[4] - SHOT_SKIN - ay) / dy;
-            if (ta > tb) { const t = ta; ta = tb; tb = t; }
-            if (ta > t0) t0 = ta;
-            if (tb < t1) t1 = tb;
-            if (t0 >= t1) continue;
-        }
-        // z
-        if (Math.abs(dz) < 1e-9) {
-            if (az <= c[2] + SHOT_SKIN || az >= c[5] - SHOT_SKIN) continue;
-        } else {
-            let ta = (c[2] + SHOT_SKIN - az) / dz, tb = (c[5] - SHOT_SKIN - az) / dz;
-            if (ta > tb) { const t = ta; ta = tb; tb = t; }
-            if (ta > t0) t0 = ta;
-            if (tb < t1) t1 = tb;
-            if (t0 >= t1) continue;
-        }
-        return false;
     }
     return true;
 }

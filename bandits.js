@@ -87,8 +87,8 @@ function pickBanditSpawn(room, players) {
     return nav.randomNavPoint();
 }
 
-function spawnBandit(room, players) {
-    const p = pickBanditSpawn(room, players || {});
+function spawnBandit(room, players, at) {
+    const p = at || pickBanditSpawn(room, players || {});
     const id = room.nextBanditId++;
     const hp = waves.difficultyFor(room).health;
     room.bandits[id] = {
@@ -275,6 +275,10 @@ function stepBandit(room, b, players, now, dt, sink) {
         /* Nobody comes back while a boss is on the field - the browser held
            them back the same way, so a boss fight is a boss fight and not a
            boss fight plus a fresh dozen. */
+        if (b.summoned) {
+            if (b.removeAt && now >= b.removeAt) delete room.bandits[b.id];
+            return;
+        }
         if (b.respawnAt && now >= b.respawnAt && !room.bossAlive) {
             const p = pickBanditSpawn(room, players);
             b.x = p.x; b.z = p.z;
@@ -434,7 +438,7 @@ function stepRoom(room, players, now, dt, sink) {
 
     if (now >= room.nextSpawnAt) {
         room.nextSpawnAt = now + BANDIT.spawnEveryMs;
-        if (Object.keys(room.bandits).length < waves.capFor(room)) spawnBandit(room, players);
+        if (regularCount(room) < waves.capFor(room)) spawnBandit(room, players);
     }
 
     for (const id in room.bandits) stepBandit(room, room.bandits[id], players, now, dt, sink);
@@ -473,11 +477,40 @@ function fillTo(room, players, cap, limit) {
        when the first wave turns over and asks for eight. */
     const most = limit || 6;
     let added = 0;
-    while (Object.keys(room.bandits).length < room_cap && added < most) {
+    while (regularCount(room) < room_cap && added < most) {
         spawnBandit(room, players);
         added++;
     }
     return added;
+}
+
+/* How many of the room's bandits are the town's own - the ones the wave
+   allowance is about. A boss's summoned help is on top of that, not instead. */
+function regularCount(room) {
+    let n = 0;
+    for (const id in room.bandits) if (!room.bandits[id].summoned) n++;
+    return n;
+}
+
+/* Help, arriving (step 21). Placed in a loose ring around (x, z) on ground a
+   bandit can stand on and walk away from; they are ordinary bandits in every
+   way except that none of them comes back after dying. Returns how many came. */
+function summon(room, players, x, z, count) {
+    let came = 0;
+    for (let i = 0; i < count; i++) {
+        for (let k = 0; k < 24; k++) {
+            const a = Math.random() * Math.PI * 2, r = 5 + Math.random() * 6;
+            const px = x + Math.cos(a) * r, pz = z + Math.sin(a) * r;
+            if (nav.collidesAt(px, pz, BANDIT.radius + 0.2)) continue;
+            if (!nav.lineClear(x, z, px, pz)) continue;
+            const b = spawnBandit(room, players, { x: px, z: pz });
+            b.summoned = true;
+            b.state = "chase";
+            came++;
+            break;
+        }
+    }
+    return came;
 }
 
 /* A wave turning over makes the bandits already standing tougher too, by the
@@ -503,7 +536,8 @@ function hurt(room, banditId, amount) {
     if (b.health <= 0) {
         b.health = 0;
         b.alive = false;
-        b.respawnAt = Date.now() + waves.difficultyFor(room).respawnMs;
+        if (b.summoned) b.removeAt = Date.now() + 2500;     // long enough to be seen falling
+        else b.respawnAt = Date.now() + waves.difficultyFor(room).respawnMs;
         b.path = null;
         return { killed: true, bandit: b };
     }
@@ -514,5 +548,5 @@ function hurt(room, banditId, amount) {
 
 module.exports = {
     BANDIT, TICK_MS, initRoom, stepRoom, snapshot, hurt, aliveCount, banditList, fillTo,
-    recordTrail, TRAIL_LENGTH, applyWave
+    recordTrail, TRAIL_LENGTH, applyWave, summon, regularCount
 };

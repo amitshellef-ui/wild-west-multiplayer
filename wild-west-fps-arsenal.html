@@ -116,6 +116,22 @@
     #boss-ability { font-size: 10px; color: #c47a52; margin-bottom: 5px; letter-spacing: 1px; }
     #boss-bg { height: 12px; background: #2a1a0c; border: 1px solid #6b451f; }
     #boss-fill { height: 100%; width: 100%; background: linear-gradient(180deg,#ff7b3c,#8d2a06); transition: width 0.15s; }
+    /* phase two: the bar goes red and will not sit still */
+    #boss-bar.enraged #boss-name { color: #ff5a3c; }
+    #boss-bar.enraged #boss-ability { color: #ff8a6a; }
+    #boss-bar.enraged #boss-fill { background: linear-gradient(180deg,#ff3b2b,#6a0000); animation: bossPulse 0.8s ease-in-out infinite; }
+    @keyframes bossPulse { 0%, 100% { filter: brightness(1); } 50% { filter: brightness(1.7); } }
+
+    /* Downed and reviving (step 23) */
+    #downed-overlay { position: absolute; inset: 0; display: none; pointer-events: none; z-index: 7;
+        background: radial-gradient(ellipse at center, rgba(90,0,0,0) 35%, rgba(90,0,0,0.75) 100%); }
+    #downed-overlay .dn-box { position: absolute; left: 50%; top: 58%; transform: translate(-50%, -50%); text-align: center; direction: rtl; }
+    #downed-overlay .dn-title { font-size: 34px; color: #ff6a4a; letter-spacing: 2px; text-shadow: 2px 2px 4px #000; }
+    #downed-overlay .dn-sub { font-size: 15px; color: #f3d9c0; margin-top: 6px; text-shadow: 1px 1px 3px #000; }
+    .rv-bar { width: 240px; height: 10px; margin: 10px auto 0; background: rgba(20,10,4,0.8); border: 1px solid #8b5a2b; }
+    .rv-bar > div { height: 100%; width: 0%; background: linear-gradient(180deg,#8ee06a,#2f7a16); }
+    #revive-prompt { left: 50%; top: 62%; transform: translateX(-50%); display: none; text-align: center; padding: 8px 14px; direction: rtl; }
+    #rv-text { font-size: 14px; color: #ffe9a8; }
 
     /* Scoreboard - hold Tab, and it shows itself for a moment when a boss falls */
     #scoreboard { top: 50%; left: 50%; transform: translate(-50%, -50%); min-width: 380px; display: none; padding: 12px 16px 10px; z-index: 8; }
@@ -274,6 +290,17 @@
 
 <div id="minimap" class="panel"><canvas id="mm-canvas" width="128" height="128"></canvas></div>
 
+<div id="downed-overlay">
+    <div class="dn-box">
+        <div class="dn-title">נפלת</div>
+        <div class="dn-sub" id="dn-sub">חבר צריך לעמוד לידך ולהחזיק E חמש שניות</div>
+        <div class="rv-bar" id="dn-bar"><div id="dn-fill"></div></div>
+    </div>
+</div>
+<div id="revive-prompt" class="panel">
+    <div id="rv-text">החזק E כדי להחיות</div>
+    <div class="rv-bar"><div id="rv-fill"></div></div>
+</div>
 <div id="scoreboard" class="panel">
     <div class="sb-title">&#9733; SCOREBOARD &#9733;</div>
     <table>
@@ -404,6 +431,138 @@ function tickScoreboard(now) {
     const el = document.getElementById('scoreboard');
     if (el) el.style.display = want ? 'block' : 'none';
     if (want) renderScoreboard();
+}
+
+/* =========================================================================
+   DOWNED AND REVIVED (multiplayer, step 23)
+
+   In co-op a player whose health runs out goes down and stays down until a
+   team mate holds E on them for five seconds. The server keeps the clock; this
+   page says when E goes down and comes up, and draws everything: the red of
+   being down, the cross over a fallen team mate that shows through walls, the
+   prompt when you are close enough, and the bar that fills while it happens.
+   ========================================================================= */
+const REVIVE = {
+    range: 2.5,                         // start inside this - the server allows 3
+    me: { downed: false, by: null, startedAt: 0, ms: 5000, wipeAt: 0 },
+    target: null,                       // the body E would revive right now
+    sentFor: null, sentAt: 0,           // what we told the server we are reviving
+    progress: {}                        // downed id -> { by, startedAt, ms }
+};
+const reviveMarkers = {};
+
+function makeReviveMarker() {
+    const c = document.createElement('canvas');
+    c.width = c.height = 64;
+    const x = c.getContext('2d');
+    x.fillStyle = 'rgba(0,0,0,0.55)'; x.beginPath(); x.arc(32, 32, 30, 0, 7); x.fill();
+    x.fillStyle = '#ff3b2b'; x.fillRect(26, 12, 12, 40); x.fillRect(12, 26, 40, 12);
+    const tex = new THREE.CanvasTexture(c);
+    const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true }));
+    spr.scale.set(0.9, 0.9, 1);
+    spr.renderOrder = 999;
+    scene.add(spr);
+    return spr;
+}
+
+function setDownedMarker(id, on) {
+    if (on && !reviveMarkers[id]) reviveMarkers[id] = makeReviveMarker();
+    if (!on && reviveMarkers[id]) {
+        scene.remove(reviveMarkers[id]);
+        reviveMarkers[id].material.map.dispose();
+        reviveMarkers[id].material.dispose();
+        delete reviveMarkers[id];
+        delete REVIVE.progress[id];
+    }
+}
+
+function setMeDowned(on) {
+    REVIVE.me.downed = on;
+    REVIVE.me.by = null;
+    REVIVE.me.wipeAt = 0;
+    const o = document.getElementById('downed-overlay');
+    if (o) o.style.display = on ? 'block' : 'none';
+    const sub = document.getElementById('dn-sub');
+    if (sub) sub.textContent = 'חבר צריך לעמוד לידך ולהחזיק E חמש שניות';
+    const fill = document.getElementById('dn-fill');
+    if (fill) fill.style.width = '0%';
+    if (on) camera.position.y = 0.45;                        // lying on the ground
+    else camera.position.y = EYE_HEIGHT;
+}
+
+function nearestDownedMate() {
+    if (!onlineBandits() || NET.mode.friendlyFire || playerHealth <= 0 || REVIVE.me.downed) return null;
+    let best = null, bestD = REVIVE.range;
+    const ids = Object.keys(PLAYERS);
+    for (let i = 0; i < ids.length; i++) {
+        const q = PLAYERS[ids[i]];
+        if (!q.downed || q.away) continue;
+        const d = Math.hypot(q.x - camera.position.x, q.z - camera.position.z);
+        if (d < bestD) { bestD = d; best = ids[i]; }
+    }
+    return best;
+}
+
+/* Every frame: markers follow their bodies, the prompt and the bars are kept
+   true, and E held on a body is turned into start / stop messages. */
+function tickRevive(now) {
+    // markers over fallen team mates, pulsing
+    Object.keys(reviveMarkers).forEach(function (id) {
+        const body = remoteBodies[id], q = PLAYERS[id];
+        const m = reviveMarkers[id];
+        if (!body || !q || !q.downed) { setDownedMarker(id, false); return; }
+        m.visible = !q.away;
+        m.position.set(body.mesh.position.x, 1.4 + Math.sin(now * 0.005) * 0.08, body.mesh.position.z);
+        const pr = REVIVE.progress[id];
+        m.material.color.setHex(pr ? 0x7dff6a : 0xffffff);
+        const pulse = 0.9 + Math.sin(now * 0.008) * 0.12;
+        m.scale.set(pulse, pulse, 1);
+    });
+
+    // my own bar while somebody picks me up
+    if (REVIVE.me.downed) {
+        const fill = document.getElementById('dn-fill');
+        const sub = document.getElementById('dn-sub');
+        if (REVIVE.me.by) {
+            // somebody's hands on you beats any countdown
+            if (sub) sub.textContent = REVIVE.me.by.slice(0, 6).toUpperCase() + ' מחייה אותך';
+            if (fill) fill.style.width = Math.min(100, 100 * (now - REVIVE.me.startedAt) / REVIVE.me.ms) + '%';
+        } else if (REVIVE.me.wipeAt && now < REVIVE.me.wipeAt + 2000) {
+            const left = Math.max(0, Math.ceil((REVIVE.me.wipeAt - now) / 1000));
+            if (sub) sub.textContent = 'כל הקבוצה נפלה · קמים בעוד ' + left;
+            if (fill) fill.style.width = Math.min(100, 100 * (1 - (REVIVE.me.wipeAt - now) / 3000)) + '%';
+        } else {
+            if (sub) sub.textContent = 'חבר צריך לעמוד לידך ולהחזיק E חמש שניות';
+            if (fill) fill.style.width = '0%';
+        }
+        camera.position.y = 0.45;
+    }
+
+    // am I next to somebody who needs picking up?
+    const target = nearestDownedMate();
+    REVIVE.target = target;
+    const prompt = document.getElementById('revive-prompt');
+    const holding = !!keys['KeyE'] && isLocked;
+    if (prompt) prompt.style.display = target ? 'block' : 'none';
+    if (target) {
+        const pr = REVIVE.progress[target];
+        const mine = pr && pr.by === NET.id;
+        document.getElementById('rv-text').textContent = mine ? 'מחייה... אל תזוז' : 'החזק E כדי להחיות';
+        document.getElementById('rv-fill').style.width = mine ? Math.min(100, 100 * (now - pr.startedAt) / pr.ms) + '%' : '0%';
+    }
+
+    if (holding && target) {
+        const pr = REVIVE.progress[target];
+        const mine = pr && pr.by === NET.id;
+        // ask to start - again if the server let go (latency), but not every frame
+        if (!mine && (REVIVE.sentFor !== target || now - REVIVE.sentAt > 600)) {
+            NET.socket.emit('revive-start', { id: target });
+            REVIVE.sentFor = target; REVIVE.sentAt = now;
+        }
+    } else if (REVIVE.sentFor) {
+        NET.socket.emit('revive-stop', { id: REVIVE.sentFor });
+        REVIVE.sentFor = null;
+    }
 }
 
 /* Inside a room every player also has a slot - a small number the server uses
@@ -763,7 +922,15 @@ function initNetwork() {
     // A shared link looks like  ...arsenal.html#K7QM  - hand the code to the
     // server during the handshake so the friend lands straight in the room.
     const linkCode = (location.hash || '').replace('#', '').trim().toUpperCase();
-    NET.socket = linkCode ? io({ query: { room: linkCode } }) : io();
+
+    /* The seat-holding token (step 22). The server hands one out on the first
+       connection; it is sent back on every reconnect so a dropped connection
+       returns to the same seat, slot and score within 20 seconds. Kept per tab
+       and across a reload of that tab, never shared with other players. */
+    try { NET.token = sessionStorage.getItem('wildwest-token') || null; } catch (e) { NET.token = null; }
+    const ioOptions = { auth: function (cb) { cb({ token: NET.token || '' }); } };
+    if (linkCode) ioOptions.query = { room: linkCode };
+    NET.socket = io(ioOptions);
 
     NET.socket.on('connect', function () {
         NET.connected = true;
@@ -781,6 +948,12 @@ function initNetwork() {
     NET.socket.on('welcome', function (data) {
         if (!data) return;
         NET.id = data.id;
+        NET.resumed = !!data.resumed;
+        if (data.token) {
+            NET.token = data.token;
+            try { sessionStorage.setItem('wildwest-token', data.token); } catch (e) { }
+        }
+        if (NET.lostTimer) { clearTimeout(NET.lostTimer); NET.lostTimer = null; }
         console.log('[NET] welcome. you=' + NET.id);
         refreshPlayerStatus();
     });
@@ -792,6 +965,12 @@ function initNetwork() {
         NET.room = data.code;
         if (data.mode) NET.mode = data.mode;
         SCORES.rows = Array.isArray(data.scores) ? data.scores : [];
+        Object.keys(reviveMarkers).forEach(function (id) { setDownedMarker(id, false); });
+        REVIVE.progress = {};
+        REVIVE.sentFor = null;
+        const meInRoom = (data.players || []).filter(function (q) { return q && q.id === NET.id; })[0];
+        setMeDowned(!!(meInRoom && meInRoom.downed));
+        if (meInRoom && meInRoom.downed) playerHealth = 0;
         // we are on the room's wave now, not on the one we were counting
         if (typeof data.wave === 'number') {
             wave = data.wave;
@@ -807,6 +986,7 @@ function initNetwork() {
             p.buf = [{ t: performance.now(), x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch }];
             PLAYERS[p.id] = p;
             indexSlot(p);
+            if (p.downed) setDownedMarker(p.id, true);
         });
         // Our own bandits are not this room's bandits, and neither is our boss
         clearServerBandits();
@@ -817,7 +997,24 @@ function initNetwork() {
         console.log('[NET] room ' + data.code + ' (' + NET.mode.label + ') others=' + Object.keys(PLAYERS).length);
         refreshRoomUI();
         refreshPlayerStatus();
-        netFeed('ROOM ' + data.code);
+        if (data.resumed) {
+            /* Back in the same seat. The room's state has just been replaced
+               wholesale, which is right; what is ours to reconcile is health, and
+               whether the server brought us back to life while we were gone. */
+            const me = (data.players || []).filter(function (q) { return q && q.id === NET.id; })[0];
+            if (me) {
+                if (playerHealth <= 0 && me.alive) {
+                    camera.position.set(me.x, EYE_HEIGHT, me.z);
+                    hideRespawnNotice();
+                }
+                playerHealth = me.health;
+                updateHealthUI();
+            }
+            netFeed('RECONNECTED');
+            pushFeed('Reconnected \u2014 same seat, same score');
+        } else {
+            netFeed('ROOM ' + data.code);
+        }
     });
 
     NET.socket.on('room-error', function (e) {
@@ -875,13 +1072,27 @@ function initNetwork() {
             playerHealth = 0;
             deaths++;
             updateHealthUI(); updateBoard();
-            netFeed(killer ? ('KILLED BY ' + killer) : 'ELIMINATED');
-            showRespawnNotice(m.respawnIn || 4000);
+            if (m.downed) {
+                // co-op: nobody gets up alone - wait for a team mate
+                setMeDowned(true);
+                netFeed('DOWN');
+                pushFeed('You are down \u2014 a team mate can pick you up');
+            } else {
+                netFeed(killer ? ('KILLED BY ' + killer) : 'ELIMINATED');
+                showRespawnNotice(m.respawnIn || 4000);
+            }
         } else {
             if (m.by === NET.id) { kills++; updateBoard(); }
-            netFeed(killer ? (killer + ' KILLED ' + name) : (name + ' DIED'));
             const body = remoteBodies[m.id];
             if (body) startRemoteDeath(body);
+            if (m.downed) {
+                if (PLAYERS[m.id]) { PLAYERS[m.id].downed = true; if (m.x !== undefined) { PLAYERS[m.id].x = m.x; PLAYERS[m.id].z = m.z; } }
+                setDownedMarker(m.id, true);
+                netFeed(name + ' IS DOWN');
+                pushFeed(name.toUpperCase() + ' is down \u2014 hold E on them');
+            } else {
+                netFeed(killer ? (killer + ' KILLED ' + name) : (name + ' DIED'));
+            }
         }
     });
 
@@ -894,6 +1105,7 @@ function initNetwork() {
             p.buf = [{ t: performance.now(), x: m.x, y: m.y, z: m.z, yaw: m.yaw, pitch: 0 }];
         }
         if (m.id === NET.id) {
+            if (REVIVE.me.downed) setMeDowned(false);
             playerHealth = m.health;
             camera.position.set(m.x, EYE_HEIGHT, m.z);
             yaw = m.yaw || 0; pitch = 0;
@@ -902,9 +1114,55 @@ function initNetwork() {
             hideRespawnNotice();
             netFeed('RESPAWNED');
         } else {
+            if (p) p.downed = false;
+            setDownedMarker(m.id, false);
             const body = remoteBodies[m.id];
             if (body) endRemoteDeath(body, m);
         }
+    });
+
+    /* --- Reviving (step 23) --- */
+    NET.socket.on('revive-progress', function (m) {
+        if (!m || !m.id) return;
+        if (m.by) REVIVE.progress[m.id] = { by: m.by, startedAt: performance.now(), ms: m.ms || 5000 };
+        else delete REVIVE.progress[m.id];
+        if (m.id === NET.id) {
+            REVIVE.me.by = m.by || null;
+            REVIVE.me.startedAt = performance.now();
+            REVIVE.me.ms = m.ms || 5000;
+        }
+        if (!m.by && REVIVE.sentFor === m.id) REVIVE.sentFor = null;
+    });
+
+    NET.socket.on('player-revived', function (m) {
+        if (!m || !m.id) return;
+        delete REVIVE.progress[m.id];
+        const who = m.id === NET.id ? 'YOU' : m.id.slice(0, 6).toUpperCase();
+        const by = m.by === NET.id ? 'YOU' : (m.by || '').slice(0, 6).toUpperCase();
+        if (m.id === NET.id) {
+            setMeDowned(false);
+            playerHealth = m.health;
+            updateHealthUI();
+            sfxPickup();
+        } else {
+            const p = PLAYERS[m.id];
+            if (p) { p.downed = false; p.health = m.health; p.buf = [{ t: performance.now(), x: m.x, y: 1.72, z: m.z, yaw: p.yaw || 0, pitch: 0 }]; }
+            setDownedMarker(m.id, false);
+            const body = remoteBodies[m.id];
+            if (body) endRemoteDeath(body, { health: m.health });
+            if (REVIVE.sentFor === m.id) REVIVE.sentFor = null;
+        }
+        pushFeed(by + ' revived ' + who);
+    });
+
+    NET.socket.on('team-wiped', function (m) {
+        if (m && m.cancelled) {
+            REVIVE.me.wipeAt = 0;
+            pushFeed('A team mate is on their feet \u2014 hold on');
+            return;
+        }
+        REVIVE.me.wipeAt = performance.now() + ((m && m.in) || 3000);
+        pushFeed('Nobody left standing \u2014 everybody up in ' + Math.round(((m && m.in) || 3000) / 1000));
     });
 
     /* --- The room's bandits (step 11b) --- */
@@ -992,11 +1250,22 @@ function initNetwork() {
             netBoss.recoil = 0.5;
         }
         muzzleFlashAt(flashAt, 3.2);
-        if (m.k === 'snipe') sfxSniper(flashAt);
-        else if (m.k === 'spray') sfxSmg(flashAt);
-        else sfxRifleShot(flashAt);
+        const tNow = performance.now();
+        if (tNow - (netBoss.lastShotSfx || 0) > 60) {
+            netBoss.lastShotSfx = tNow;
+            if (m.k === 'snipe') sfxSniper(flashAt);
+            else if (m.k === 'spray') sfxSmg(flashAt);
+            else sfxRifleShot(flashAt);
+        }
         spawnBanditBullet([flashAt.x, flashAt.y, flashAt.z], m.d,
             m.k === 'snipe' ? 72 : (m.k === 'spray' ? 48 : 42));
+    });
+
+    NET.socket.on('boss-phase', function (m) {
+        if (!m || typeof m.t !== 'number') return;
+        const bt = BOSS_TYPES[m.t % BOSS_TYPES.length];
+        enterNetBossPhase2(true);
+        pushFeed(bt.name + ' IS ENRAGED' + (m.s ? ' \u2014 ' + m.s + ' GUNS CALLED IN' : ''));
     });
 
     NET.socket.on('boss-hazard', function (m) { spawnNetHazard(m); });
@@ -1005,7 +1274,7 @@ function initNetwork() {
     NET.socket.on('boss-slam', function (m) {
         if (!m || !m.p) return;
         const p = new THREE.Vector3(m.p[0], 0.15, m.p[1]);
-        spawnParticles(p.clone().setY(0.25), m.k === 'charge' ? 0xffd08a : 0xffaa33, 24, 5);
+        spawnParticles(p.clone().setY(0.25), m.k === 'charge' ? 0xffd08a : 0xffaa33, m.r > 7 ? 44 : 24, m.r > 7 ? 7 : 5);
         spawnDust(p.clone().setY(0.08), 20);
         sfxExplosion(p);
         const d = camera.position.distanceTo(p);
@@ -1074,7 +1343,27 @@ function initNetwork() {
         }
     });
 
+    NET.socket.on('player-away', function (m) {
+        if (!m || !PLAYERS[m.id]) return;
+        PLAYERS[m.id].away = true;
+        netFeed(m.id.slice(0, 6) + ' CONNECTION LOST');
+    });
+
+    NET.socket.on('player-back', function (m) {
+        if (!m || !m.id || m.id === NET.id) return;
+        let p = PLAYERS[m.id];
+        if (!p) { p = PLAYERS[m.id] = { id: m.id }; }
+        p.away = false;
+        p.health = m.health; p.alive = m.alive; p.slot = m.slot;
+        p.x = m.x; p.y = m.y; p.z = m.z; p.yaw = m.yaw; p.pitch = m.pitch;
+        // they did not walk here from where we last drew them - do not slide them
+        p.buf = [{ t: performance.now(), x: m.x, y: m.y, z: m.z, yaw: m.yaw, pitch: m.pitch }];
+        indexSlot(p);
+        netFeed(m.id.slice(0, 6) + ' RECONNECTED');
+    });
+
     NET.socket.on('player-left', function (p) {
+        if (p && p.id) setDownedMarker(p.id, false);
         if (!p || !p.id || !PLAYERS[p.id]) return;
         delete PLAYERS[p.id];
         dropSlot(p.id);
@@ -1085,14 +1374,33 @@ function initNetwork() {
 
     NET.socket.on('disconnect', function (reason) {
         NET.connected = false;
-        NET.room = null;
         clearServerBandits();
         clearBanditBullets();
         clearNetBossState();
-        refreshRoomUI();
         clearPlayers();
-        setNetStatus('DISCONNECTED', 'off');
         console.warn('[NET] disconnected: ' + reason);
+
+        /* The server is holding our seat for 20 seconds, and the socket is
+           already trying to get back. Until that window is over this is a blip,
+           not a switch to single player: the room stays ours, and the local
+           bandits stay asleep so they do not wake up for a few seconds and then
+           get swept away when the room comes back. */
+        if (NET.room) {
+            NET.reconnectingUntil = performance.now() + 22000;
+            setNetStatus('RECONNECTING\u2026', 'wait');
+            if (NET.lostTimer) clearTimeout(NET.lostTimer);
+            NET.lostTimer = setTimeout(function () {
+                NET.lostTimer = null;
+                if (NET.connected) return;
+                NET.room = null;
+                NET.reconnectingUntil = 0;
+                refreshRoomUI();
+                setNetStatus('DISCONNECTED', 'off');
+            }, 22000);
+        } else {
+            refreshRoomUI();
+            setNetStatus('DISCONNECTED', 'off');
+        }
     });
 
     NET.socket.on('connect_error', function (err) {
@@ -2386,6 +2694,54 @@ fenceRun(12, 20, 12, 30, 5);
 fenceRun(-2, 20, -2, 30, 5);
 fenceRun(-2, 30, 12, 30, 7);
 
+/* ---------- Collision for the border rocks (step 20) ----------
+   The ring of rocks sits at radius 72-76 and the invisible boundary is a square
+   at 68, so along the four diagonals the rocks stand inside the playable area -
+   and for a long time they had no collision at all. You could walk into them,
+   bandits routed through them, and the server let bullets through them.
+
+   A rock is a rotated box and the collision system only knows boxes that line
+   up with the axes. One box around a rotated rock blocks a lot of open ground
+   beside it, so each rock is cut into 1.25 metre strips along z and every strip
+   gets the box that fits its own slice - on a slanted face that is off by at
+   most a strip. Only the part inside the boundary gets boxes; everything past
+   66.5 is already behind the invisible wall. Slivers under 0.25 m are dropped. */
+const MESA_LIMIT = 66.5, MESA_STRIP = 1.25;
+
+function mesaColliders(cx, cz, w, d, ry, top) {
+    const ux = Math.cos(ry), uz = -Math.sin(ry), vx = Math.sin(ry), vz = Math.cos(ry);
+    const pts = [[-1, -1], [1, -1], [1, 1], [-1, 1]].map(function (c) {
+        return [cx + ux * c[0] * w / 2 + vx * c[1] * d / 2, cz + uz * c[0] * w / 2 + vz * c[1] * d / 2];
+    });
+    function clip(poly, keep, cut) {
+        const out = [];
+        for (let i = 0; i < poly.length; i++) {
+            const a = poly[i], b = poly[(i + 1) % poly.length];
+            const ka = keep(a), kb = keep(b);
+            if (ka) out.push(a);
+            if (ka !== kb) out.push(cut(a, b));
+        }
+        return out;
+    }
+    function atZ(a, b, z) { const t = (z - a[1]) / (b[1] - a[1]); return [a[0] + (b[0] - a[0]) * t, z]; }
+    let zmin = Infinity, zmax = -Infinity;
+    for (let i = 0; i < 4; i++) { zmin = Math.min(zmin, pts[i][1]); zmax = Math.max(zmax, pts[i][1]); }
+    for (let z0 = zmin; z0 < zmax; z0 += MESA_STRIP) {
+        const z1 = Math.min(zmax, z0 + MESA_STRIP);
+        let slab = clip(pts, function (q) { return q[1] >= z0; }, function (a, b) { return atZ(a, b, z0); });
+        slab = clip(slab, function (q) { return q[1] <= z1; }, function (a, b) { return atZ(a, b, z1); });
+        if (slab.length < 3) continue;
+        let x0 = Infinity, x1 = -Infinity;
+        for (let i = 0; i < slab.length; i++) { x0 = Math.min(x0, slab[i][0]); x1 = Math.max(x1, slab[i][0]); }
+        x0 = Math.max(-MESA_LIMIT, x0); x1 = Math.min(MESA_LIMIT, x1);
+        const zz0 = Math.max(-MESA_LIMIT, z0), zz1 = Math.min(MESA_LIMIT, z1);
+        if (x1 - x0 < 0.25 || zz1 - zz0 < 0.25) continue;
+        const b = new THREE.Box3(new THREE.Vector3(x0, 0, zz0), new THREE.Vector3(x1, top, zz1));
+        b.mesa = true;
+        colliders.push(b);
+    }
+}
+
 /* ---------- Mesa walls at the map border ---------- */
 (function borderMesas() {
     // Expanded frontier: roughly 50% more room to explore.
@@ -2408,6 +2764,7 @@ fenceRun(-2, 30, 12, 30, 7);
         const m = box(w, h, d, MAT.rock, x, h / 2 - 1, z);
         m.rotation.y = ry;
         world.add(m);
+        mesaColliders(x, z, w, d, ry, h - 1);
     }
     // Hard invisible boundary so nobody walks into the mesa gaps
     const B = 68;
@@ -2496,15 +2853,56 @@ function updateCaveLighting(delta) {
 /* =========================================================================
    6. COLLISION + NAVIGATION MESH (grid A*) - bots never get stuck
    ========================================================================= */
-function collidesAt(x, z, radius) {
-    const r = radius === undefined ? 0.55 : radius;
-    const b = new THREE.Box3(
-        new THREE.Vector3(x - r, 0.3, z - r),
-        new THREE.Vector3(x + r, 1.8, z + r));
+/* ---------- The collider grid (step 20) ----------
+   The border rocks took the box count from 134 to about 950, and every
+   collision question used to ask all of them. The map is cut into 8 metre
+   cells and each box is filed under every cell it overlaps, so a question only
+   asks the handful of boxes near it. The answers are exactly the same - a box
+   that could overlap is never skipped, the overlap test itself is unchanged.
+   navigation.js on the server keeps the identical grid. */
+const CGRID = { minX: -80, minZ: -95, cell: 8, w: 20, h: 22, cells: null, stamp: null, tick: 0, built: -1 };
+
+function buildColliderGrid() {
+    CGRID.cells = new Array(CGRID.w * CGRID.h);
+    for (let i = 0; i < CGRID.cells.length; i++) CGRID.cells[i] = [];
+    CGRID.stamp = new Uint32Array(colliders.length);
     for (let i = 0; i < colliders.length; i++) {
-        if (b.intersectsBox(colliders[i])) return true;
+        const c = colliders[i];
+        const x0 = cgX(c.min.x), x1 = cgX(c.max.x), z0 = cgZ(c.min.z), z1 = cgZ(c.max.z);
+        for (let gz = z0; gz <= z1; gz++) for (let gx = x0; gx <= x1; gx++) CGRID.cells[gz * CGRID.w + gx].push(i);
+    }
+    CGRID.built = colliders.length;
+}
+function cgX(x) { return Math.max(0, Math.min(CGRID.w - 1, Math.floor((x - CGRID.minX) / CGRID.cell))); }
+function cgZ(z) { return Math.max(0, Math.min(CGRID.h - 1, Math.floor((z - CGRID.minZ) / CGRID.cell))); }
+
+/* Calls fn(index) once for every collider that could touch the given area. */
+function forCollidersNear(minX, minZ, maxX, maxZ, fn) {
+    if (CGRID.built !== colliders.length) buildColliderGrid();
+    const t = ++CGRID.tick;
+    const x0 = cgX(minX), x1 = cgX(maxX), z0 = cgZ(minZ), z1 = cgZ(maxZ);
+    for (let gz = z0; gz <= z1; gz++) {
+        for (let gx = x0; gx <= x1; gx++) {
+            const list = CGRID.cells[gz * CGRID.w + gx];
+            for (let k = 0; k < list.length; k++) {
+                const i = list[k];
+                if (CGRID.stamp[i] === t) continue;
+                CGRID.stamp[i] = t;
+                if (fn(i)) return true;
+            }
+        }
     }
     return false;
+}
+
+const _cBox = new THREE.Box3();
+function collidesAt(x, z, radius) {
+    const r = radius === undefined ? 0.55 : radius;
+    _cBox.min.set(x - r, 0.3, z - r);
+    _cBox.max.set(x + r, 1.8, z + r);
+    return forCollidersNear(x - r, z - r, x + r, z + r, function (i) {
+        return _cBox.intersectsBox(colliders[i]);
+    });
 }
 
 const NAV = {
@@ -2528,10 +2926,9 @@ function buildNav() {
             const half = NAV.cell / 2 + pad;
             tmp.min.set(wx - half, 0.3, wz - half);
             tmp.max.set(wx + half, 1.8, wz + half);
-            let hit = 0;
-            for (let i = 0; i < colliders.length; i++) {
-                if (tmp.intersectsBox(colliders[i])) { hit = 1; break; }
-            }
+            const hit = forCollidersNear(wx - half, wz - half, wx + half, wz + half, function (i) {
+                return tmp.intersectsBox(colliders[i]);
+            }) ? 1 : 0;
             NAV.blocked[cz * NAV.w + cx] = hit;
         }
     }
@@ -2684,6 +3081,42 @@ function smoothPath(pts) {
     return out.length ? out : [pts[pts.length - 1]];
 }
 
+/* The town's region of the grid (step 20) - the same flood fill the server
+   does in navigation.js. Collision for the border rocks sealed a few small
+   pockets off from the town, and a bandit spawned in one would never get out. */
+let NAV_TOWN = null;
+function navTownMask() {
+    if (NAV_TOWN) return NAV_TOWN;
+    const region = new Int32Array(NAV.w * NAV.h).fill(-1);
+    const sizes = [];
+    const D = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+    for (let cz = 0; cz < NAV.h; cz++) {
+        for (let cx = 0; cx < NAV.w; cx++) {
+            const start = cz * NAV.w + cx;
+            if (isBlocked(cx, cz) || region[start] >= 0) continue;
+            const id = sizes.length, stack = [start];
+            let size = 0;
+            region[start] = id;
+            while (stack.length) {
+                const cur = stack.pop(); size++;
+                const x = cur % NAV.w, z = (cur / NAV.w) | 0;
+                for (let d = 0; d < 8; d++) {
+                    const nx = x + D[d][0], nz = z + D[d][1];
+                    if (isBlocked(nx, nz)) continue;
+                    if (d > 3 && (isBlocked(x + D[d][0], z) || isBlocked(x, z + D[d][1]))) continue;
+                    const n = nz * NAV.w + nx;
+                    if (region[n] < 0) { region[n] = id; stack.push(n); }
+                }
+            }
+            sizes.push(size);
+        }
+    }
+    const town = sizes.indexOf(Math.max.apply(null, sizes));
+    NAV_TOWN = new Uint8Array(NAV.w * NAV.h);
+    for (let i = 0; i < region.length; i++) NAV_TOWN[i] = region[i] === town ? 1 : 0;
+    return NAV_TOWN;
+}
+
 function randomNavPoint() {
     for (let k = 0; k < 40; k++) {
         const cx = Math.floor(Math.random() * NAV.w);
@@ -2693,6 +3126,7 @@ function randomNavPoint() {
         // The mine shaft reaches past the normal boundary, so allow it explicitly.
         const inShaft = p.x > MINE_VOL.x0 && p.x < MINE_VOL.x1 && p.z < -52;
         if (!inShaft && (Math.abs(p.x) > 66 || Math.abs(p.z) > 66)) continue;
+        if (!inShaft && !navTownMask()[cz * NAV.w + cx]) continue;
         return p;
     }
     return new THREE.Vector3(0, 0, 0);
@@ -2751,6 +3185,45 @@ const BOSS_TYPES = [
     { id: 'poison', name: 'POISON-DOC REED', ability: 'TOXIC CLOUD', hp: 880, fireDelay: 1300, speed: 3.0, shirt: 0x184a28, pants: 0x102818, hat: 0x0c2010, coat: 0x205830, eye: 0x44ff66 }
 ];
 const bossHazards = [];
+
+/* Phase two (step 21). Below 30% health every boss fires a third faster, moves a
+   little quicker, glows red - and gets one thing of its own. The numbers are
+   PHASE2 in boss.js; online those are the ones that count, this copy drives
+   single player. */
+const BOSS_PHASE2 = {
+    at: 0.3, fireScale: 0.75, speedScale: 1.15,
+    burstShots: 5, chargeEvery: 2.8, summonCount: 3, snipeKeep: 18,
+    ringEvery: 3, ringRounds: 12, fanSticks: 3, fanSpread: 0.35,
+    ghostEvery: 2.2, slamRadius: 9, slamTrigger: 11, slamEvery: 3.2,
+    poisonBottles: 2, poisonSpread: 0.22, cloudLife: 8
+};
+const BOSS_PHASE2_TEXT = {
+    burst: 'ENRAGED \u00b7 FIVE-ROUND BURSTS',
+    charge: 'ENRAGED \u00b7 NON-STOP CHARGES',
+    snipe: 'ENRAGED \u00b7 CALLED FOR BACKUP',
+    spray: 'ENRAGED \u00b7 RING OF LEAD',
+    dynamite: 'ENRAGED \u00b7 TRIPLE TNT',
+    ghost: 'ENRAGED \u00b7 RESTLESS SPIRIT',
+    slam: 'ENRAGED \u00b7 AFTERSHOCKS',
+    poison: 'ENRAGED \u00b7 DOUBLE DOSE'
+};
+
+function enrageRig(parts) {
+    parts.materials.forEach(function (m) {
+        if (!m.emissive) return;
+        m.emissive.setHex(0x7a0f00);
+        m.emissiveIntensity = 0.55;
+    });
+}
+
+function showBossEnraged(bt, where, loud) {
+    ui.bossBar.classList.add('enraged');
+    ui.bossAbility.innerText = BOSS_PHASE2_TEXT[bt.id] || 'ENRAGED';
+    if (!loud) return;
+    sfxBossRoar(where);
+    spawnParticles(where.clone().setY(2.2), 0xff3322, 34, 6);
+    camShake = Math.min(0.7, camShake + 0.35);
+}
 
 function createBandit(isBoss, bossType) {
     const s = isBoss ? 1.75 : 1.0;
@@ -3334,8 +3807,17 @@ function updateRemoteBodies(delta) {
     for (let i = 0; i < ids.length; i++) {
         const id = ids[i];
         let body = remoteBodies[id];
-        if (!body) body = createRemoteBody(id);
+        if (!body) {
+            body = createRemoteBody(id);
+            if (PLAYERS[id].downed || PLAYERS[id].alive === false) {
+                body.mesh.position.set(PLAYERS[id].x, 0, PLAYERS[id].z);
+                startRemoteDeath(body);
+            }
+        }
         applyRemoteTransform(PLAYERS[id], body, d);
+        // connection lost: gone from sight until they come back
+        if (PLAYERS[id].away) { body.mesh.visible = false; body.awayHidden = true; }
+        else if (body.awayHidden) { body.mesh.visible = true; body.awayHidden = false; }
     }
     // Anything with a body but no roster entry has left
     const live = Object.keys(remoteBodies);
@@ -3360,7 +3842,8 @@ const banditGroup = new THREE.Group();
 scene.add(banditGroup);
 
 function onlineBandits() {
-    return NET.connected && !!NET.room;
+    // a reconnect in progress still counts as online - see the disconnect handler
+    return (NET.connected || performance.now() < (NET.reconnectingUntil || 0)) && !!NET.room;
 }
 
 function createServerBandit(id) {
@@ -3623,6 +4106,8 @@ function createNetBoss(typeIndex, hp, x, z) {
     netBoss.maxHealth = hp || bt.hp;
     netBoss.ghost = false; netBoss.ghostShown = false; netBoss.charging = false;
     netBoss.deathT = -1; netBoss.hasPrev = false; netBoss.speed = 0;
+    netBoss.phase2 = false;
+    ui.bossBar.classList.remove('enraged');
     if (x !== undefined) rig.mesh.position.set(x, 0, z);
     rig.parts.barBg.visible = false;
     rig.parts.barFill.visible = false;
@@ -3657,6 +4142,13 @@ function destroyNetBoss() {
 
 /* Either the fight or the clock. `b` is a live boss row, `in` is how many
    seconds until the next one - the same countdown for everybody in the room. */
+function enterNetBossPhase2(loud) {
+    if (!netBoss.active || !netBoss.rig || netBoss.phase2) return;
+    netBoss.phase2 = true;
+    enrageRig(netBoss.rig.parts);
+    showBossEnraged(netBoss.type, netBoss.mesh.position, loud);
+}
+
 function onBossState(m) {
     if (!m) return;
     if (m.b) {
@@ -3667,6 +4159,8 @@ function onBossState(m) {
         netBoss.health = r[3];
         netBoss.ghost = r[4] === 1;
         netBoss.charging = r[5] === 1;
+        // somebody who walked in mid-rage never saw the moment it happened
+        if (r[6] === 1 && !netBoss.phase2) enterNetBossPhase2(false);
         netBoss.buf.push({ t: performance.now(), x: r[0], z: r[1], yaw: r[2] });
         if (netBoss.buf.length > 14) netBoss.buf.shift();
         netBoss.countdown = -1;
@@ -3831,7 +4325,7 @@ function onBossBoom(m) {
     } else {
         spawnParticles(p.clone(), 0x44ff66, 20, 3);
         sfxRevolver(p);
-        netClouds.push({ pos: p.clone(), life: 5.2, puff: 0 });
+        netClouds.push({ pos: p.clone(), life: m.l || 5.2, puff: 0 });
     }
 }
 
@@ -3848,6 +4342,9 @@ function damageBot(bot, amount, point, headshot) {
     // what the hit actually took off, the same rule the server uses
     if (bot.isBoss) localBossDamage += Math.max(0, Math.min(amount, bot.health));
     bot.health -= amount;
+    if (bot.isBoss && !bot.phase2 && bot.health > 0 && bot.health <= bot.maxHealth * BOSS_PHASE2.at) {
+        enterLocalBossPhase2(bot);
+    }
     bot.hitFlash = 0.14;
     bot.state = 'chase';
     bot.parts.barBg.visible = true;
@@ -3879,6 +4376,7 @@ function killBot(bot, headshot) {
     updateBoard();
 
     if (bot.isBoss) onBossDefeated();
+    else if (bot.summoned) bot.removeAt = performance.now() + 2500;   // called-in help does not come back
     else bot.respawnAt = performance.now() + banditDifficulty(wave).respawnMs;
 }
 
@@ -3992,8 +4490,8 @@ function updateBot(bot, delta, now) {
         bot.hitFlash -= delta;
         const on = bot.hitFlash > 0;
         bot.parts.materials.forEach(function (m) {
-            m.emissive.setHex(on ? 0x772211 : 0x000000);
-            m.emissiveIntensity = on ? 1.0 : 0;
+            m.emissive.setHex(on ? 0x772211 : (bot.phase2 ? 0x7a0f00 : 0x000000));
+            m.emissiveIntensity = on ? 1.0 : (bot.phase2 ? 0.55 : 0);
         });
     }
 
@@ -4012,7 +4510,8 @@ function updateBot(bot, delta, now) {
     }
 
     /* ---------- decide the destination ---------- */
-    let goal = null, wantsMove = true, desired = bot.isBoss ? 9 : 11;
+    let goal = null, wantsMove = true,
+        desired = bot.isBoss ? ((bot.phase2 && bot.bossType.id === 'snipe') ? BOSS_PHASE2.snipeKeep : 9) : 11;
 
     if (bot.state === 'chase') {
         goal = camera.position;
@@ -4169,27 +4668,86 @@ function updateBot(bot, delta, now) {
 const botBulletGeo = new THREE.SphereGeometry(0.075, 6, 5);
 const botBulletMat = new THREE.MeshBasicMaterial({ color: 0xffd070 });
 
+function enterLocalBossPhase2(bot) {
+    bot.phase2 = true;
+    bot.fireDelay *= BOSS_PHASE2.fireScale;
+    bot.speed *= BOSS_PHASE2.speedScale;
+    bot.ringT = 1.2;
+    enrageRig(bot.parts);
+    showBossEnraged(bot.bossType, bot.mesh.position, true);
+    let called = 0;
+    if (bot.bossType.id === 'snipe') called = summonLocalBandits(bot, BOSS_PHASE2.summonCount);
+    pushFeed(bot.bossType.name + ' IS ENRAGED' + (called ? ' \u2014 ' + called + ' GUNS CALLED IN' : ''));
+}
+
+/* Help for a boss that called for it: ordinary bandits in a ring around it,
+   except that none of them comes back after dying. */
+function summonLocalBandits(boss, count) {
+    let came = 0;
+    for (let i = 0; i < count; i++) {
+        for (let k = 0; k < 24; k++) {
+            const a = Math.random() * Math.PI * 2, r = 5 + Math.random() * 6;
+            const px = boss.mesh.position.x + Math.cos(a) * r, pz = boss.mesh.position.z + Math.sin(a) * r;
+            if (collidesAt(px, pz, 0.7)) continue;
+            const b = createBandit(false);
+            b.mesh.position.set(px, 0, pz);
+            b.lastPos.copy(b.mesh.position);
+            b.summoned = true;
+            b.state = 'chase';
+            spawnDust(b.mesh.position.clone().setY(0.1), 10);
+            came++;
+            break;
+        }
+    }
+    return came;
+}
+
+function localRegularCount() {
+    let n = 0;
+    for (let i = 0; i < bots.length; i++) if (!bots[i].summoned) n++;
+    return n;
+}
+
+/* Twelve rounds leaving in every direction at once. */
+function localRingVolley(bot) {
+    const from = new THREE.Vector3();
+    bot.parts.muzzle.getWorldPosition(from);
+    for (let i = 0; i < BOSS_PHASE2.ringRounds; i++) {
+        const a = (i / BOSS_PHASE2.ringRounds) * Math.PI * 2 + Math.random() * 0.1;
+        const dir = new THREE.Vector3(Math.cos(a), (1.72 - from.y) / 12, Math.sin(a)).normalize();
+        const b = new THREE.Mesh(botBulletGeo, botBulletMat);
+        b.position.copy(from);
+        b.userData = { dir: dir, life: 0, damage: 8, speed: 48 };
+        scene.add(b);
+        botBullets.push(b);
+    }
+    muzzleFlashAt(from, 4);
+    sfxSmg(bot.mesh.position);
+}
+
 function botShoot(bot, dist) {
     const muzzlePos = new THREE.Vector3();
     bot.parts.muzzle.getWorldPosition(muzzlePos);
     const ability = bot.isBoss && bot.bossType ? bot.bossType.id : 'normal';
 
     if (ability === 'dynamite') {
-        throwHazard(bot, muzzlePos, 'tnt');
+        const sticks = bot.phase2 ? BOSS_PHASE2.fanSticks : 1;
+        for (let i = 0; i < sticks; i++) throwHazard(bot, muzzlePos, 'tnt', (i - (sticks - 1) / 2) * BOSS_PHASE2.fanSpread);
         bot.recoil = 0.45;
         muzzleFlashAt(muzzlePos, 3.5);
         sfxRifleShot(bot.mesh.position);
         return;
     }
     if (ability === 'poison') {
-        throwHazard(bot, muzzlePos, 'poison');
+        const bottles = bot.phase2 ? BOSS_PHASE2.poisonBottles : 1;
+        for (let i = 0; i < bottles; i++) throwHazard(bot, muzzlePos, 'poison', (i - (bottles - 1) / 2) * BOSS_PHASE2.poisonSpread * 2);
         bot.recoil = 0.3;
         muzzleFlashAt(muzzlePos, 2.2);
         sfxRevolver(bot.mesh.position);
         return;
     }
 
-    const shots = ability === 'burst' ? 3 : (ability === 'spray' ? 1 : 1);
+    const shots = ability === 'burst' ? (bot.phase2 ? BOSS_PHASE2.burstShots : 3) : 1;
     const baseDir = new THREE.Vector3().subVectors(camera.position, muzzlePos).normalize();
     let spread = (bot.isBoss ? 0.022 : 0.035) + dist * 0.0016;
     if (!bot.isBoss) spread *= banditDifficulty(wave).spreadScale;
@@ -4204,7 +4762,7 @@ function botShoot(bot, dist) {
 
     for (let i = 0; i < shots; i++) {
         const dir = baseDir.clone();
-        const off = ability === 'burst' ? (i - 1) * 0.055 : 0;
+        const off = ability === 'burst' ? (i - (shots - 1) / 2) * 0.055 : 0;
         dir.x += (Math.random() - 0.5) * spread * 2 + off;
         dir.y += (Math.random() - 0.5) * spread * 1.5;
         dir.z += (Math.random() - 0.5) * spread * 2;
@@ -4230,7 +4788,7 @@ function botShoot(bot, dist) {
     else sfxRevolver(bot.mesh.position);
 }
 
-function throwHazard(bot, from, kind) {
+function throwHazard(bot, from, kind, turn) {
     const geo = kind === 'tnt'
         ? new THREE.CylinderGeometry(0.12, 0.12, 0.32, 8)
         : new THREE.SphereGeometry(0.22, 8, 6);
@@ -4243,11 +4801,13 @@ function throwHazard(bot, from, kind) {
     m.position.copy(from);
     const dir = new THREE.Vector3().subVectors(camera.position, from);
     dir.y += 4;
+    if (turn) dir.applyAxisAngle(new THREE.Vector3(0, 1, 0), turn);   // fanned out in phase two
     dir.normalize();
     scene.add(m);
     bossHazards.push({
         mesh: m, kind: kind, vel: dir.multiplyScalar(kind === 'tnt' ? 16 : 10),
-        life: kind === 'tnt' ? 1.15 : 0.85, fuse: kind === 'tnt' ? 1.15 : 0.7, exploded: false
+        life: kind === 'tnt' ? 1.15 : 0.85, fuse: kind === 'tnt' ? 1.15 : 0.7, exploded: false,
+        cloudLife: (kind === 'poison' && bot.phase2) ? BOSS_PHASE2.cloudLife : 5.2
     });
 }
 
@@ -4266,7 +4826,7 @@ function explodeHazard(h) {
         spawnParticles(p.clone(), 0x44ff66, 20, 3);
         sfxRevolver(p);
         bossHazards.push({
-            mesh: null, kind: 'cloud', pos: p.clone(), radius: 4.2, life: 5.2, tick: 0
+            mesh: null, kind: 'cloud', pos: p.clone(), radius: 4.2, life: h.cloudLife || 5.2, tick: 0
         });
     }
     if (h.mesh) { scene.remove(h.mesh); h.mesh.geometry.dispose(); }
@@ -4298,7 +4858,7 @@ function tickBossAbility(bot, delta, now, dist, toPlayer) {
 
     if (id === 'ghost') {
         if (bot.abilityT <= 0) {
-            bot.abilityT = 4.5;
+            bot.abilityT = bot.phase2 ? BOSS_PHASE2.ghostEvery : 4.5;
             bot.ghostUntil = now + 1800;
             const dest = randomNavPoint();
             if (dest.distanceTo(camera.position) > 8) bot.mesh.position.set(dest.x, 0, dest.z);
@@ -4313,7 +4873,7 @@ function tickBossAbility(bot, delta, now, dist, toPlayer) {
     }
 
     if (id === 'charge' && bot.hasLOS && dist < 22 && bot.abilityT <= 0) {
-        bot.abilityT = 5.5;
+        bot.abilityT = bot.phase2 ? BOSS_PHASE2.chargeEvery : 5.5;
         bot.chargeUntil = now + 900;
         spawnDust(bot.mesh.position.clone().setY(0.1), 12);
         sfxBossRoar(bot.mesh.position);
@@ -4329,13 +4889,21 @@ function tickBossAbility(bot, delta, now, dist, toPlayer) {
         }
     }
 
-    if (id === 'slam' && dist < 8 && bot.abilityT <= 0) {
-        bot.abilityT = 4.8;
+    if (id === 'slam' && dist < (bot.phase2 ? BOSS_PHASE2.slamTrigger : 8) && bot.abilityT <= 0) {
+        bot.abilityT = bot.phase2 ? BOSS_PHASE2.slamEvery : 4.8;
         spawnParticles(bot.mesh.position.clone().setY(0.2), 0xffaa33, 24, 5);
         spawnDust(bot.mesh.position.clone().setY(0.08), 20);
         sfxExplosion(bot.mesh.position);
-        if (dist < 6.5) takeDamage(24);
+        if (dist < (bot.phase2 ? BOSS_PHASE2.slamRadius : 6.5)) takeDamage(24);
         camShake = Math.min(0.7, camShake + 0.4);
+    }
+
+    if (id === 'spray' && bot.phase2) {
+        bot.ringT -= delta;
+        if (bot.ringT <= 0 && dist < 30) {
+            bot.ringT = BOSS_PHASE2.ringEvery;
+            localRingVolley(bot);
+        }
     }
 }
 
@@ -5145,6 +5713,7 @@ function spawnBoss() {
     bossDefeated = false;
     bossObj = createBandit(true, bt);
     ui.bossBar.style.display = 'block';
+    ui.bossBar.classList.remove('enraged');
     ui.bossName.innerText = '\u2620 ' + bt.name + ' \u2620';
     ui.bossAbility.innerText = bt.ability;
     updateBossBar();
@@ -5183,6 +5752,7 @@ function applyBossReward() {
 function onBossDefeated() {
     bossActive = false; bossDefeated = true;
     ui.bossBar.style.display = 'none';
+    ui.bossBar.classList.remove('enraged');
     const fallen = bossObj;
     const idx = bots.indexOf(bossObj);
     if (idx > -1) bots.splice(idx, 1);
@@ -5232,7 +5802,8 @@ function fireOneRay(spread, dmgBody, dmgHead, range) {
         const remoteIds = Object.keys(remoteBodies);
         for (let i = 0; i < remoteIds.length; i++) {
             const rb = remoteBodies[remoteIds[i]];
-            if (rb.alive !== false) targets.push(rb.mesh);
+            const who = PLAYERS[remoteIds[i]];
+            if (rb.alive !== false && !(who && who.away)) targets.push(rb.mesh);
         }
     }
     targets.push(world);
@@ -5507,7 +6078,8 @@ document.addEventListener('keydown', function (e) {
        it still does what Tab does, moving between the room code and buttons. */
     if (e.code === 'Tab' && isLocked) { e.preventDefault(); scoreboardHeld = true; }
     if (!isLocked) return;
-    if (e.code === 'KeyR' || e.code === 'KeyE') startReload();
+    // E picks up a fallen team mate when one is close enough; otherwise it reloads
+    if (e.code === 'KeyR' || (e.code === 'KeyE' && !REVIVE.target)) startReload();
     if (!e.repeat) {
         if (e.code === 'Digit1') switchWeapon(0);
         if (e.code === 'Digit2') switchWeapon(1);
@@ -5618,10 +6190,21 @@ function drawMinimap() {
         }
     }
 
-    // other players
+    // other players - a fallen team mate is a red cross
     const pIds = Object.keys(remoteBodies);
     for (let i = 0; i < pIds.length; i++) {
         const rb = remoteBodies[pIds[i]];
+        const who = PLAYERS[pIds[i]];
+        if (who && who.downed && !who.away) {
+            const cx = (rb.mesh.position.x - camera.position.x) * scale;
+            const cz = (rb.mesh.position.z - camera.position.z) * scale;
+            const rr = Math.min(R - 6, Math.hypot(cx, cz)), ang = Math.atan2(cz, cx);
+            const px = Math.cos(ang) * rr, pz = Math.sin(ang) * rr;       // pinned to the rim if far
+            mm.fillStyle = '#ff3b2b';
+            mm.fillRect(px - 1.5, pz - 5, 3, 10);
+            mm.fillRect(px - 5, pz - 1.5, 10, 3);
+            continue;
+        }
         if (rb.alive === false) continue;
         const dx = (rb.mesh.position.x - camera.position.x) * scale;
         const dz = (rb.mesh.position.z - camera.position.z) * scale;
@@ -5860,10 +6443,16 @@ function updateWaves(now) {
         return;
     }
 
+    // a boss's called-in help leaves once its fall has been seen
+    for (let i = bots.length - 1; i >= 0; i--) {
+        const b = bots[i];
+        if (b.summoned && b.removeAt && now > b.removeAt) { botGroup.remove(b.mesh); bots.splice(i, 1); }
+    }
+
     // Reinforcements arrive on their own clock, independent of the boss
     if (now > nextBanditAt) {
         nextBanditAt = now + BANDIT_SPAWN_MS;
-        if (bots.length < banditCap(wave)) createBandit(false);
+        if (localRegularCount() < banditCap(wave)) createBandit(false);
     }
 
     if (!bossActive && now >= nextBossAt) {
@@ -5877,7 +6466,7 @@ function updateWaves(now) {
         toughenLocalBandits();
         // the new allowance arrives now, not one every fifteen seconds
         let guard = 0;
-        while (bots.length < banditCap(wave) && guard++ < 6) createBandit(false);
+        while (localRegularCount() < banditCap(wave) && guard++ < 6) createBandit(false);
     }
     if (!bossActive) {
         const left = Math.max(0, Math.ceil((nextBossAt - now) / 1000));
@@ -5903,6 +6492,7 @@ function animate() {
     updateBanditBullets(delta);
     refreshNetDebug(now);
     tickScoreboard(now);
+    if (NET.socket) tickRevive(now);
 
     if (isLocked && playerHealth > 0) {
         updatePlayer(delta, now);

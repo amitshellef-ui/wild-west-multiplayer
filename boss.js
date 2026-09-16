@@ -81,6 +81,40 @@ const BOSS = {
     gravity: 18
 };
 
+/* ---- Phase two (step 21) ---------------------------------------------------
+   Below 30% health every boss changes. All of them fire a third faster, move a
+   little quicker and are drawn enraged; each also gets one thing of its own, so
+   the end of a fight is not just the start of it with less health left.
+
+     burst     five rounds a pull instead of three
+     charge    charges back to back
+     snipe     calls three bandits to her and backs off to 18 metres
+     spray     every 3 seconds, a ring of 12 rounds in every direction
+     dynamite  three sticks in a fan
+     ghost     vanishes twice as often
+     slam      a wider, more frequent quake
+     poison    two bottles a throw, and the cloud lingers for 8 seconds */
+const PHASE2 = {
+    at: 0.3,
+    fireScale: 0.75,           // x the time between shots
+    speedScale: 1.15,
+    burstShots: 5,
+    chargeEveryMs: 2800,
+    summonCount: 3,
+    snipeKeepDistance: 18,
+    ringEveryMs: 3000,
+    ringRounds: 12,
+    fanSticks: 3,
+    fanSpread: 0.35,           // radians between sticks
+    ghostEveryMs: 2200,
+    slamRadius: 9,
+    slamTrigger: 11,
+    slamEveryMs: 3200,
+    poisonBottles: 2,
+    poisonSpread: 0.22,
+    cloudLife: 8
+};
+
 /* Per-ability gunplay. Anything missing falls back to the first row. */
 const GUN = {
     burst: { shots: 3, spread: 0.022, perMetre: 0.0016, damage: 15, speed: 42, spacing: 0.055 },
@@ -209,9 +243,10 @@ function fire(room, b, target, dist, sink) {
     bx /= len; by /= len; bz /= len;
 
     const spread = g.spread + dist * (g.perMetre || 0);
+    const shots = (b.phase === 2 && b.type.id === "burst") ? PHASE2.burstShots : g.shots;
 
-    for (let i = 0; i < g.shots; i++) {
-        const off = g.spacing ? (i - (g.shots - 1) / 2) * g.spacing : 0;
+    for (let i = 0; i < shots; i++) {
+        const off = g.spacing ? (i - (shots - 1) / 2) * g.spacing : 0;
         let dx = bx + (Math.random() - 0.5) * spread * 2 + off;
         let dy = by + (Math.random() - 0.5) * spread * 1.5;
         let dz = bz + (Math.random() - 0.5) * spread * 2;
@@ -238,11 +273,16 @@ function fire(room, b, target, dist, sink) {
 /* A stick of dynamite or a bottle of something worse. It is thrown at where
    the player is standing, arcs, bounces, and goes off on its fuse - so running
    away from where it lands works, and standing still does not. */
-function throwHazard(room, b, target, kind, sink) {
+function throwHazard(room, b, target, kind, sink, turn) {
     const from = { x: b.x, y: BOSS.eyeHeight, z: b.z };
     let dx = target.x - from.x;
     let dy = (target.y || 1.72) - from.y + 4;
     let dz = target.z - from.z;
+    if (turn) {                                  // swing it sideways for a fan
+        const c = Math.cos(turn), sn = Math.sin(turn);
+        const rx = dx * c - dz * sn, rz = dx * sn + dz * c;
+        dx = rx; dz = rz;
+    }
     const n = Math.hypot(dx, dy, dz) || 1;
     dx /= n; dy /= n; dz /= n;
 
@@ -254,7 +294,8 @@ function throwHazard(room, b, target, kind, sink) {
         id: id, kind: kind,
         x: from.x, y: from.y, z: from.z,
         vx: dx * speed, vy: dy * speed, vz: dz * speed,
-        life: fuse
+        life: fuse,
+        cloudLife: (kind === "poison" && b.phase === 2) ? PHASE2.cloudLife : BOSS.cloudLife
     });
 
     sink.hazards.push({
@@ -282,14 +323,14 @@ function stepHazards(room, players, dt, sink) {
         if (h.life > 0) continue;
 
         room.hazards.splice(i, 1);
-        sink.booms.push({ i: h.id, k: h.kind, p: [round2(h.x), round2(h.y), round2(h.z)] });
+        sink.booms.push({ i: h.id, k: h.kind, p: [round2(h.x), round2(h.y), round2(h.z)], l: h.cloudLife });
 
         if (h.kind === "tnt") {
             splash(room, players, h.x, h.z, BOSS.tntRadius, BOSS.tntDamage, true, sink, h.y);
         } else {
             room.clouds.push({
                 x: h.x, z: h.z,
-                life: BOSS.cloudLife,
+                life: h.cloudLife || BOSS.cloudLife,
                 tick: 0
             });
         }
@@ -313,7 +354,7 @@ function tickAbility(room, b, players, near, now, dt, sink) {
 
     if (id === "ghost") {
         if (now >= b.abilityAt) {
-            b.abilityAt = now + BOSS.ghostEveryMs;
+            b.abilityAt = now + (b.phase === 2 ? PHASE2.ghostEveryMs : BOSS.ghostEveryMs);
             b.ghostUntil = now + BOSS.ghostForMs;
 
             /* Vanishing means reappearing somewhere you were not looking - not
@@ -344,7 +385,7 @@ function tickAbility(room, b, players, near, now, dt, sink) {
 
     if (id === "charge") {
         if (b.hasLos && near && near.dist < BOSS.chargeTrigger && now >= b.abilityAt) {
-            b.abilityAt = now + BOSS.chargeEveryMs;
+            b.abilityAt = now + (b.phase === 2 ? PHASE2.chargeEveryMs : BOSS.chargeEveryMs);
             b.chargeUntil = now + BOSS.chargeForMs;
             sink.roars.push({ p: [round2(b.x), round2(b.z)] });
         }
@@ -362,17 +403,46 @@ function tickAbility(room, b, players, near, now, dt, sink) {
     }
 
     if (id === "slam") {
-        if (near && near.dist < BOSS.slamTrigger && now >= b.abilityAt) {
-            b.abilityAt = now + BOSS.slamEveryMs;
-            splash(room, players, b.x, b.z, BOSS.slamRadius, BOSS.slamDamage, false, sink);
-            sink.slams.push({ p: [round2(b.x), round2(b.z)], k: "slam" });
+        const p2 = b.phase === 2;
+        if (near && near.dist < (p2 ? PHASE2.slamTrigger : BOSS.slamTrigger) && now >= b.abilityAt) {
+            b.abilityAt = now + (p2 ? PHASE2.slamEveryMs : BOSS.slamEveryMs);
+            const radius = p2 ? PHASE2.slamRadius : BOSS.slamRadius;
+            splash(room, players, b.x, b.z, radius, BOSS.slamDamage, false, sink);
+            sink.slams.push({ p: [round2(b.x), round2(b.z)], k: "slam", r: radius });
         }
     }
 }
 
 /* ---- The boss itself ---------------------------------------------------- */
+/* The moment it turns. Once only - health does not go back up. */
+function enterPhase2(room, b, players, now, sink) {
+    b.phase = 2;
+    b.ringAt = now + 1200;
+    let summoned = 0;
+    if (b.type.id === "snipe") summoned = bandits.summon(room, players, b.x, b.z, PHASE2.summonCount);
+    sink.bossPhase = { t: b.typeIndex, s: summoned };
+    sink.roars.push({ p: [round2(b.x), round2(b.z)] });
+}
+
+/* A ring of rounds in every direction, at chest height further out. */
+function ringVolley(room, b, sink) {
+    const g = GUN.spray;
+    const oy = BOSS.eyeHeight;
+    const drop = (1.72 - oy) / 12;               // level off to a standing player about 12 m away
+    for (let i = 0; i < PHASE2.ringRounds; i++) {
+        const a = (i / PHASE2.ringRounds) * Math.PI * 2 + Math.random() * 0.1;
+        let dx = Math.cos(a), dy = drop, dz = Math.sin(a);
+        const n = Math.hypot(dx, dy, dz);
+        dx /= n; dy /= n; dz /= n;
+        room.bullets.push({ x: b.x, y: oy, z: b.z, dx: dx, dy: dy, dz: dz, life: 0, from: -1, dmg: g.damage, spd: g.speed });
+        sink.bossShots.push({ k: "spray", o: [round2(b.x), round2(oy), round2(b.z)], d: [round3(dx), round3(dy), round3(dz)] });
+    }
+}
+
 function stepBoss(room, b, players, now, dt, sink) {
     const near = nearestPlayer(room, players, b.x, b.z);
+    if (b.phase !== 2 && b.health <= b.maxHealth * PHASE2.at) enterPhase2(room, b, players, now, sink);
+    const keepDistance = (b.phase === 2 && b.type.id === "snipe") ? PHASE2.snipeKeepDistance : BOSS.keepDistance;
 
     if (now >= b.losAt) {
         b.losAt = now + 180 + Math.random() * 100;
@@ -394,7 +464,7 @@ function stepBoss(room, b, players, now, dt, sink) {
     let goal = null, wantsMove = true;
     if (b.state === "chase" && near) {
         goal = { x: near.player.x, z: near.player.z };
-        if (b.hasLos && near.dist < BOSS.keepDistance + 4 && near.dist > BOSS.keepDistance - 4) {
+        if (b.hasLos && near.dist < keepDistance + 4 && near.dist > keepDistance - 4) {
             wantsMove = false;
         }
     } else {
@@ -426,7 +496,8 @@ function stepBoss(room, b, players, now, dt, sink) {
 
     /* --- walking --- */
     const charging = b.chargeUntil && now < b.chargeUntil;
-    const speed = b.state === "chase" ? b.type.speed : b.type.speed * 0.55;
+    const baseSpeed = b.type.speed * (b.phase === 2 ? PHASE2.speedScale : 1);
+    const speed = b.state === "chase" ? baseSpeed : baseSpeed * 0.55;
     let moved = false;
     if (!charging && wantsMove && b.path && b.pathIndex < b.path.length) {
         const wp = b.path[b.pathIndex];
@@ -448,7 +519,7 @@ function stepBoss(room, b, players, now, dt, sink) {
         const tx = near.player.x - b.x, tz = near.player.z - b.z;
         const len = Math.hypot(tx, tz) || 1;
         const px = -tz / len, pz = tx / len;
-        const back = near.dist < BOSS.keepDistance - 3 ? -1 : 0;
+        const back = near.dist < keepDistance - 3 ? -1 : 0;
         const step = speed * 0.65 * dt;
         moveAxis(b,
             px * step * b.strafeDir + (tx / len) * step * back,
@@ -490,11 +561,23 @@ function stepBoss(room, b, players, now, dt, sink) {
 
     /* --- shooting --- */
     const range = b.type.id === "snipe" ? BOSS.snipeRange : BOSS.fireRange;
-    if (b.hasLos && near && near.dist < range && now - b.lastShot > b.type.fireDelay) {
+    const fireDelay = b.type.fireDelay * (b.phase === 2 ? PHASE2.fireScale : 1);
+    if (b.hasLos && near && near.dist < range && now - b.lastShot > fireDelay) {
         b.lastShot = now + (Math.random() - 0.5) * 350;
-        if (b.type.id === "dynamite") throwHazard(room, b, near.player, "tnt", sink);
-        else if (b.type.id === "poison") throwHazard(room, b, near.player, "poison", sink);
-        else fire(room, b, near.player, near.dist, sink);
+        const p2 = b.phase === 2;
+        if (b.type.id === "dynamite") {
+            const n = p2 ? PHASE2.fanSticks : 1;
+            for (let i = 0; i < n; i++) throwHazard(room, b, near.player, "tnt", sink, (i - (n - 1) / 2) * PHASE2.fanSpread);
+        } else if (b.type.id === "poison") {
+            const n = p2 ? PHASE2.poisonBottles : 1;
+            for (let i = 0; i < n; i++) throwHazard(room, b, near.player, "poison", sink, (i - (n - 1) / 2) * PHASE2.poisonSpread * 2);
+        } else {
+            fire(room, b, near.player, near.dist, sink);
+        }
+    }
+    if (b.phase === 2 && b.type.id === "spray" && near && near.dist < 30 && now >= b.ringAt) {
+        b.ringAt = now + PHASE2.ringEveryMs;
+        ringVolley(room, b, sink);
     }
 
     /* --- facing --- */
@@ -540,7 +623,7 @@ function emptySink() {
     return {
         shots: [], hits: [], bossShots: [], hazards: [],
         booms: [], slams: [], blinks: [], roars: [],
-        bossSpawn: null, bossDied: null, wave: null
+        bossSpawn: null, bossDied: null, bossPhase: null, wave: null
     };
 }
 
@@ -556,7 +639,8 @@ function snapshot(room, now) {
         Math.round(b.yaw * 100) / 100,
         Math.round(b.health),
         b.ghostUntil > t ? 1 : 0,
-        (b.chargeUntil && b.chargeUntil > t) ? 1 : 0
+        (b.chargeUntil && b.chargeUntil > t) ? 1 : 0,
+        b.phase === 2 ? 1 : 0
     ];
 }
 
@@ -589,6 +673,6 @@ function clearBoss(room) {
 }
 
 module.exports = {
-    BOSS, BOSS_TYPES, initRoom, stepRoom, snapshot, hurt,
+    BOSS, BOSS_TYPES, PHASE2, initRoom, stepRoom, snapshot, hurt,
     secondsToBoss, clearBoss, emptySink
 };

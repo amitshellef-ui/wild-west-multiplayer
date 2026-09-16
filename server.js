@@ -1,4 +1,5 @@
 const express = require("express");
+const crypto = require("crypto");
 const http = require("http");
 const { Server } = require("socket.io");
 const path = require("path");
@@ -99,7 +100,7 @@ function pickLobby() {
 }
 
 const rooms = {};                      // code -> room record
-const players = {};                    // socket.id -> player record
+const players = {};                    // player id -> player record (see RECONNECTING)
 
 function createRoom(code, modeId) {
     rooms[code] = {
@@ -128,7 +129,7 @@ function makeRoomCode() {
 function playersIn(code) {
     return Object.keys(players)
         .filter((id) => players[id].room === code)
-        .map((id) => players[id]);
+        .map((id) => publicPlayer(players[id]));
 }
 
 function roomCount(code) {
@@ -150,6 +151,65 @@ function dropRoomIfEmpty(code) {
 
 const MAX_HEALTH = 100;
 const RESPAWN_MS = 4000;
+
+/* =========================================================================
+   RECONNECTING (step 22)
+
+   A wifi blip used to be the end of you: the socket dropped, the player was
+   deleted, and whatever came back a second later was a stranger at wave 1 with
+   no score. Now a dropped player is only *away* for RECONNECT_MS. They keep
+   their seat in the room, their slot, their score, their health and where they
+   were standing; the simulation stops seeing them, the other players stop
+   drawing them, and if they come back in time it is as though nothing happened.
+
+   How they prove who they are: the first connection is handed a random token,
+   which the page keeps and sends again when it reconnects. The token never goes
+   to anybody else - which is why nothing sends raw player records any more, see
+   publicPlayer() - because anyone holding it could take an away player's seat.
+
+   A player's id is the id of the socket they first arrived on, and it stays
+   theirs across reconnects; `socket.data.pid` is how a handler finds them.
+   ========================================================================= */
+const RECONNECT_MS = 20000;
+const tokens = {};                     // token -> player id
+
+function newToken() {
+    return crypto.randomBytes(16).toString("hex");
+}
+
+/* What other players may know about a player. Deliberately short: no token,
+   no timers, no rate-limit bookkeeping. */
+function publicPlayer(p) {
+    return {
+        id: p.id, slot: p.slot,
+        x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
+        health: p.health, alive: p.alive, away: !!p.away, downed: !!p.downed,
+        kills: p.kills, deaths: p.deaths
+    };
+}
+
+/* The simulation's view of the world: everybody who is actually connected. An
+   away player is not a target, does not keep a room busy, and is not shot. */
+function activePlayers() {
+    const out = {};
+    for (const id in players) if (!players[id].away) out[id] = players[id];
+    return out;
+}
+
+const awayTimers = {};                 // player id -> removal timer
+
+function removePlayer(p) {
+    const room = p.room;
+    delete players[p.id];
+    if (p.token) delete tokens[p.token];
+    clearTimeout(awayTimers[p.id]);
+    delete awayTimers[p.id];
+    if (room) {
+        scoresChanged(room);
+        io.to(room).emit("player-left", { id: p.id });
+        dropRoomIfEmpty(room);
+    }
+}
 
 /* =========================================================================
    SLOTS AND THE POSITION PACKET (step 14)
@@ -371,12 +431,68 @@ function setHealth(p, value, attackerId, headshot) {
     if (p.health <= 0 && p.alive) kill(p, attackerId);
 }
 
+/* =========================================================================
+   DOWNED AND REVIVED (step 23)
+
+   In co-op nobody gets up on their own any more. A player whose health runs
+   out goes down where they stand, and stays down until a team mate stands
+   within reach and holds E on them for REVIVE_MS - then they are back on their
+   feet with REVIVE_HEALTH. Bandits and the boss ignore a downed player.
+
+   The one exception is a room with nobody left standing. A rule that only a
+   team mate can revive you has no answer when there are no team mates on their
+   feet - one player alone, or a squad that all went down together - and that
+   room would sit there for ever. So when every connected player in a room is
+   down, they all get up together after WIPE_MS. While even one is standing,
+   nobody comes back alone.
+
+   Free-for-all has no team mates, so it keeps the old respawn timer.
+
+   The server keeps the clock on a revive; the page only says when E is pressed
+   and released. Moving out of reach, dying, or dropping the connection
+   cancels it.
+   ========================================================================= */
+const REVIVE_MS = 5000;
+const REVIVE_HEALTH = 50;
+const REVIVE_START_RANGE = 3.0;        // metres between reviver and body to begin
+const REVIVE_HOLD_RANGE = 3.5;         // a little slack to keep going, for latency
+const WIPE_MS = 3000;
+
+function respawnPlayer(p) {
+    const s = pickSpawn(rooms[p.room]);
+    p.x = s[0]; p.y = 1.72; p.z = s[1];
+    p.yaw = Math.random() * Math.PI * 2;
+    p.pitch = 0;
+    p.health = MAX_HEALTH;
+    p.alive = true;
+    p.downed = false;
+    p.revive = null;
+    io.to(p.room).emit("player-respawn", {
+        id: p.id, x: p.x, y: p.y, z: p.z, yaw: p.yaw, health: p.health
+    });
+}
+
 function kill(victim, attackerId) {
     victim.alive = false;
     victim.deaths++;
     const killer = attackerId ? players[attackerId] : null;
     if (killer && killer.id !== victim.id) killer.kills++;
     scoresChanged(victim.room);
+
+    const room = rooms[victim.room];
+    const coop = room && !room.mode.friendlyFire;
+
+    if (coop) {
+        victim.downed = true;
+        victim.downedAt = Date.now();
+        victim.revive = null;
+        io.to(victim.room).emit("player-died", {
+            id: victim.id, by: killer ? killer.id : null, respawnIn: 0, downed: true,
+            x: Math.round(victim.x * 100) / 100, z: Math.round(victim.z * 100) / 100
+        });
+        console.log("Down:", victim.id.slice(0, 6), "in", victim.room);
+        return;
+    }
 
     io.to(victim.room).emit("player-died", {
         id: victim.id,
@@ -389,16 +505,67 @@ function kill(victim, attackerId) {
     setTimeout(() => {
         const p = players[victim.id];
         if (!p || p.alive) return;           // left, or already brought back
-        const s = pickSpawn(rooms[p.room]);
-        p.x = s[0]; p.y = 1.72; p.z = s[1];
-        p.yaw = Math.random() * Math.PI * 2;
-        p.pitch = 0;
-        p.health = MAX_HEALTH;
-        p.alive = true;
-        io.to(p.room).emit("player-respawn", {
-            id: p.id, x: p.x, y: p.y, z: p.z, yaw: p.yaw, health: p.health
-        });
+        respawnPlayer(p);
     }, RESPAWN_MS);
+}
+
+function cancelRevive(target, why) {
+    if (!target.revive) return;
+    target.revive = null;
+    io.to(target.room).emit("revive-progress", { id: target.id, by: null, why: why || "stopped" });
+}
+
+/* Once a tick per room: revives in progress, and the room nobody is standing in. */
+function stepRevives(room, now) {
+    const code = room.code;
+    let downed = 0, standing = 0;
+    for (const id in players) {
+        const p = players[id];
+        if (p.room !== code) continue;
+        if (p.downed) downed++;
+        else if (p.alive && !p.away) standing++;
+
+        if (!p.downed || !p.revive) continue;
+        const r = players[p.revive.by];
+        if (!r || r.room !== code || !r.alive || r.away || p.away) { cancelRevive(p, "interrupted"); continue; }
+        if (Math.hypot(r.x - p.x, r.z - p.z) > REVIVE_HOLD_RANGE) { cancelRevive(p, "too far"); continue; }
+        if (now - p.revive.startedAt < REVIVE_MS) continue;
+
+        // up again
+        const by = p.revive.by;
+        p.revive = null;
+        p.downed = false;
+        p.alive = true;
+        p.health = REVIVE_HEALTH;
+        io.to(code).emit("player-revived", {
+            id: p.id, by: by, health: p.health,
+            x: Math.round(p.x * 100) / 100, z: Math.round(p.z * 100) / 100
+        });
+        io.to(code).emit("player-health", { id: p.id, health: p.health, by: null, headshot: false });
+        console.log("Revive:", by.slice(0, 6), "->", p.id.slice(0, 6), "in", code);
+        standing++; downed--;
+    }
+
+    if (room.mode.friendlyFire) return;
+    if (downed > 0 && standing === 0) {
+        if (!room.wipeAt) {
+            room.wipeAt = now + WIPE_MS;
+            io.to(code).emit("team-wiped", { in: WIPE_MS });
+            console.log("Team wiped in", code, "- everybody up in", WIPE_MS / 1000 + "s");
+        } else if (now >= room.wipeAt) {
+            room.wipeAt = 0;
+            for (const id in players) {
+                const p = players[id];
+                if (p.room === code && p.downed) respawnPlayer(p);
+            }
+        }
+    } else if (room.wipeAt) {
+        /* somebody is standing again - a team mate joined, or came back from a
+           dropped connection - so the fallen wait for them instead. Say so, or
+           the pages keep counting down to a wipe that is not coming. */
+        room.wipeAt = 0;
+        io.to(code).emit("team-wiped", { in: 0, cancelled: true });
+    }
 }
 
 /* ---- Moving between rooms ---- */
@@ -439,6 +606,8 @@ function placeInRoom(socket, p, code) {
     p.yaw = 0; p.pitch = 0;
     p.health = MAX_HEALTH;
     p.alive = true;
+    p.downed = false;
+    p.revive = null;
 
     socket.emit("room-joined", {
         code: code,
@@ -449,18 +618,53 @@ function placeInRoom(socket, p, code) {
         banditHp: waves.difficultyFor(rooms[code]).health,
         scores: scoreRows(code)
     });
-    socket.to(code).emit("player-joined", p);
+    socket.to(code).emit("player-joined", publicPlayer(p));
 
     if (previous) dropRoomIfEmpty(previous);
     console.log("Player", p.id.slice(0, 6), "->", code, "(" + roomCount(code) + " inside)");
 }
 
 io.on("connection", (socket) => {
-    console.log("Player connected:", socket.id);
+    const auth = socket.handshake.auth || {};
+    const offered = (typeof auth.token === "string" && /^[0-9a-f]{32}$/.test(auth.token)) ? auth.token : null;
+    const back = offered && tokens[offered] ? players[tokens[offered]] : null;
 
+    /* Coming back inside the window, to a seat that is still waiting. A token for
+       a player who is not away - the same page open twice - is not a way in:
+       that connection simply becomes a new player. */
+    if (back && back.away && back.room && rooms[back.room]) {
+        clearTimeout(awayTimers[back.id]);
+        delete awayTimers[back.id];
+        back.away = false;
+        back.socketId = socket.id;
+        socket.data.pid = back.id;
+        socket.join(back.room);
+        const room = rooms[back.room];
+        socket.emit("welcome", { id: back.id, token: back.token, resumed: true });
+        socket.emit("room-joined", {
+            code: back.room,
+            mode: room.mode,
+            players: playersIn(back.room),
+            wave: room.wave || 1,
+            cap: waves.capFor(room),
+            banditHp: waves.difficultyFor(room).health,
+            scores: scoreRows(back.room),
+            resumed: true
+        });
+        socket.to(back.room).emit("player-back", publicPlayer(back));
+        console.log("Player", back.id.slice(0, 6), "back in", back.room,
+            "after", Math.round((Date.now() - back.awayAt) / 100) / 10 + "s");
+        registerHandlers(socket);
+        return;
+    }
+
+    console.log("Player connected:", socket.id);
     const spawn = pickSpawn();
     players[socket.id] = {
         id: socket.id,
+        token: newToken(),
+        socketId: socket.id,
+        away: false,
         joinedAt: Date.now(),
         room: null,
         x: spawn[0], y: 1.72, z: spawn[1],
@@ -479,6 +683,8 @@ io.on("connection", (socket) => {
         lastRoomAt: 0
     };
     const me = players[socket.id];
+    socket.data.pid = me.id;
+    tokens[me.token] = me.id;
 
     /* A shared link carries its room code in the connection query, so a friend
        who clicks it lands straight inside instead of in the lobby - unless the
@@ -497,12 +703,18 @@ io.on("connection", (socket) => {
         }
     }
 
-    socket.emit("welcome", { id: socket.id });
+    socket.emit("welcome", { id: me.id, token: me.token, resumed: false });
     placeInRoom(socket, me, startRoom);
+    registerHandlers(socket);
+});
+
+/* Every event a connected player can send. Registered for a brand new
+   connection and for one that has come back, identically. */
+function registerHandlers(socket) {
 
     /* ---- Room controls ---- */
     socket.on("create-room", (m) => {
-        const p = players[socket.id];
+        const p = players[socket.data.pid];
         if (!p) return;
         const now = Date.now();
         if (now - p.lastRoomAt < 1000) return;      // no hammering
@@ -518,7 +730,7 @@ io.on("connection", (socket) => {
     });
 
     socket.on("join-room", (m) => {
-        const p = players[socket.id];
+        const p = players[socket.data.pid];
         if (!p) return;
         const now = Date.now();
         if (now - p.lastRoomAt < 1000) return;
@@ -544,7 +756,7 @@ io.on("connection", (socket) => {
     });
 
     socket.on("leave-room", () => {
-        const p = players[socket.id];
+        const p = players[socket.data.pid];
         if (!p || isLobby(p.room)) return;
         const now = Date.now();
         if (now - p.lastRoomAt < 1000) return;
@@ -556,8 +768,8 @@ io.on("connection", (socket) => {
        Nothing leaves here any more. The move is recorded and marked, and the
        room's next position packet carries it along with everybody else's. */
     socket.on("move", (m) => {
-        const p = players[socket.id];
-        if (!p || !p.room) return;
+        const p = players[socket.data.pid];
+        if (!p || !p.room || p.downed) return;          // lying where they fell
         const move = readMove(m);
         if (!move) return;
         p.x = move.x; p.y = move.y; p.z = move.z;
@@ -569,12 +781,12 @@ io.on("connection", (socket) => {
 
     /* ---- Shot relay (step 7): muzzle flash, tracers and sound only ---- */
     socket.on("shoot", (m) => {
-        const p = players[socket.id];
+        const p = players[socket.data.pid];
         if (!p || !p.room) return;
         const shot = readShot(m);
         if (!shot) return;
         socket.to(p.room).emit("player-shot", {
-            id: socket.id, w: shot.w, o: shot.o, e: shot.e
+            id: p.id, w: shot.w, o: shot.o, e: shot.e
         });
     });
 
@@ -592,7 +804,7 @@ io.on("connection", (socket) => {
          - there is no wall between them (step 15)
        ===================================================================== */
     socket.on("hit", (m) => {
-        const shooter = players[socket.id];
+        const shooter = players[socket.data.pid];
         if (!shooter || !shooter.alive || !shooter.room) return;
 
         const room = rooms[shooter.room];
@@ -613,7 +825,7 @@ io.on("connection", (socket) => {
             const t = m.targets[i];
             if (!t || typeof t.id !== "string") continue;
             const victim = players[t.id];
-            if (!victim || !victim.alive || victim.id === shooter.id) continue;
+            if (!victim || !victim.alive || victim.away || victim.id === shooter.id) continue;
             if (victim.room !== shooter.room) continue;       // no shooting across rooms
 
             const body = strictCount(t.body, w.pellets);
@@ -647,7 +859,7 @@ io.on("connection", (socket) => {
        throw. A client cannot invent a kill.
        ===================================================================== */
     socket.on("bandit-hit", (m) => {
-        const shooter = players[socket.id];
+        const shooter = players[socket.data.pid];
         if (!shooter || !shooter.alive || !shooter.room) return;
         const room = rooms[shooter.room];
         if (!room || !room.bandits) return;
@@ -707,7 +919,7 @@ io.on("connection", (socket) => {
        same trigger pull twice, once on each path.
        ===================================================================== */
     socket.on("boss-hit", (m) => {
-        const shooter = players[socket.id];
+        const shooter = players[socket.data.pid];
         if (!shooter || !shooter.alive || !shooter.room) return;
         const room = rooms[shooter.room];
         if (!room || !room.boss || !room.boss.alive) return;
@@ -743,9 +955,9 @@ io.on("connection", (socket) => {
             shooter.bossKills++;
             /* Winning is worth a wave. The browser did this too - it is the
                reason the number moves at all when a fight runs long. */
-            const up = waves.advance(room, players, now, "boss");
+            const up = waves.advance(room, activePlayers(), now, "boss");
             bandits.applyWave(room);
-            bandits.fillTo(room, players, up.cap);
+            bandits.fillTo(room, activePlayers(), up.cap);
             io.to(room.code).emit("wave", up);
             io.to(room.code).emit("boss-died", {
                 by: shooter.id, t: typeIndex,
@@ -768,7 +980,7 @@ io.on("connection", (socket) => {
        so it is still capped: 20 a report, five reports a second.
        ===================================================================== */
     socket.on("health-delta", (m) => {
-        const p = players[socket.id];
+        const p = players[socket.data.pid];
         if (!p || !p.alive) return;
         if (!m || typeof m.d !== "number" || !Number.isFinite(m.d)) return;
 
@@ -781,18 +993,55 @@ io.on("connection", (socket) => {
         setHealth(p, p.health + d, null, false);
     });
 
-    socket.on("disconnect", () => {
-        const p = players[socket.id];
-        const room = p ? p.room : null;
-        console.log("Player disconnected:", socket.id);
-        delete players[socket.id];
-        if (room) {
-            scoresChanged(room);
-            io.to(room).emit("player-left", { id: socket.id });
-            dropRoomIfEmpty(room);
+    /* ---- Reviving a team mate (step 23) ----
+       The page says when E goes down on somebody and when it comes up; the
+       server does the counting and the checking. */
+    socket.on("revive-start", (m) => {
+        const r = players[socket.data.pid];
+        if (!r || !r.alive || r.away || !r.room || !m || typeof m.id !== "string") return;
+        const room = rooms[r.room];
+        if (!room || room.mode.friendlyFire) return;
+        const t = players[m.id];
+        if (!t || t === r || t.room !== r.room || !t.downed || t.away) return;
+        if (Math.hypot(r.x - t.x, r.z - t.z) > REVIVE_START_RANGE) return;
+        if (t.revive && t.revive.by !== r.id && players[t.revive.by] && players[t.revive.by].alive) return;   // someone is already on it
+        if (t.revive && t.revive.by === r.id) return;                                                      // already counting
+        // one body at a time: letting go of anyone else
+        for (const id in players) {
+            const q = players[id];
+            if (q.revive && q.revive.by === r.id) cancelRevive(q, "switched");
         }
+        t.revive = { by: r.id, startedAt: Date.now() };
+        io.to(r.room).emit("revive-progress", { id: t.id, by: r.id, ms: REVIVE_MS });
     });
-});
+
+    socket.on("revive-stop", (m) => {
+        const r = players[socket.data.pid];
+        if (!r || !m || typeof m.id !== "string") return;
+        const t = players[m.id];
+        if (t && t.revive && t.revive.by === r.id) cancelRevive(t, "released");
+    });
+
+    /* Not gone - away. The seat, the slot and the score wait RECONNECT_MS for
+       the same page to come back; after that it is a normal departure. */
+    socket.on("disconnect", () => {
+        const p = players[socket.data.pid];
+        if (!p || p.socketId !== socket.id) return;     // a newer connection already owns them
+        p.away = true;
+        p.awayAt = Date.now();
+        p.socketId = null;
+        p.moveDirty = false;
+        console.log("Player", p.id.slice(0, 6), "away from", p.room, "- holding the seat",
+            RECONNECT_MS / 1000 + "s");
+        if (p.room) io.to(p.room).emit("player-away", { id: p.id });
+        awayTimers[p.id] = setTimeout(() => {
+            const q = players[p.id];
+            if (!q || !q.away) return;
+            console.log("Player", q.id.slice(0, 6), "did not come back");
+            removePlayer(q);
+        }, RECONNECT_MS);
+    });
+}
 
 /* =========================================================================
    THE SIMULATION LOOP
@@ -815,6 +1064,7 @@ setInterval(() => {
        navigation.js. A room that has just filled for a new wave borrows a
        little time from the next tick instead of stalling everybody's. */
     nav.beginTick();
+    const active = activePlayers();        // away players are invisible to the simulation
 
     for (const code in rooms) {
         const room = rooms[code];
@@ -823,15 +1073,15 @@ setInterval(() => {
            room's bullet list, so they also share the list of what those
            bullets did - the server applies all of it in one place below. */
         const sink = boss.emptySink();
-        bandits.stepRoom(room, players, now, dt, sink);
-        boss.stepRoom(room, players, now, dt, sink);
-        waves.stepRoom(room, players, now, sink);
+        bandits.stepRoom(room, active, now, dt, sink);
+        boss.stepRoom(room, active, now, dt, sink);
+        waves.stepRoom(room, active, now, sink);
 
         /* The wave turned over: everyone is told once, and the room is brought
            up to the strength its new wave allows. */
         if (sink.wave) {
             bandits.applyWave(room);
-            bandits.fillTo(room, players, sink.wave.cap);
+            bandits.fillTo(room, active, sink.wave.cap);
             io.to(code).emit("wave", sink.wave);
             const d = waves.difficultyFor(room);
             console.log("Room", code, "-> wave", sink.wave.n, "(up to",
@@ -852,6 +1102,11 @@ setInterval(() => {
             io.to(code).emit("boss-spawn", sink.bossSpawn);
             console.log("Boss in", code + ":", boss.BOSS_TYPES[sink.bossSpawn.t].name);
         }
+        if (sink.bossPhase) {
+            io.to(code).emit("boss-phase", sink.bossPhase);
+            console.log("Boss in", code + ":", boss.BOSS_TYPES[sink.bossPhase.t].name, "enraged",
+                sink.bossPhase.s ? "(" + sink.bossPhase.s + " summoned)" : "");
+        }
         for (let i = 0; i < sink.bossShots.length; i++) io.to(code).emit("boss-shot", sink.bossShots[i]);
         for (let i = 0; i < sink.hazards.length; i++) io.to(code).emit("boss-hazard", sink.hazards[i]);
         for (let i = 0; i < sink.booms.length; i++) io.to(code).emit("boss-boom", sink.booms[i]);
@@ -868,6 +1123,8 @@ setInterval(() => {
             if (!victim || !victim.alive) continue;
             setHealth(victim, victim.health - h.damage, null, false);
         }
+
+        stepRevives(room, now);
     }
 
     // Snapshot every other tick: 10 a second

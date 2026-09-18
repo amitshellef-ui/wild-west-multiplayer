@@ -1063,10 +1063,12 @@ function playRemoteShot(m) {
     const body = remoteBodies[m.id];
 
     _shotOrigin.set(m.o[0], m.o[1], m.o[2]);
-    if (body && body.rig.parts.muzzle) {
-        body.rig.parts.muzzle.getWorldPosition(_shotOrigin);
-        body.recoil = 0.45;                       // kick the gun arm
-    }
+    const R = body && body.rig.model;
+    if (R && R.kind === 'model') {
+        rigSetWeapon(R, m.w);                     // whatever they are really firing
+        rigShoot(R);
+    } else if (body) body.recoil = 0.45;          // kick the gun arm
+    if (body && body.rig.parts.muzzle) body.rig.parts.muzzle.getWorldPosition(_shotOrigin);
 
     muzzleFlashAt(_shotOrigin, 3.0);
     for (let i = 0; i < m.e.length; i++) {
@@ -1359,9 +1361,11 @@ function initNetwork() {
             return;
         }
         const p = PLAYERS[m.id];
+        const hurt = p && typeof p.health === 'number' && m.health < p.health && m.health > 0;
         if (p) p.health = m.health;
         const body = remoteBodies[m.id];
         if (body) showRemoteHealth(body, m.health);
+        if (body && hurt) remoteHurt(body);
     });
 
     NET.socket.on('player-died', function (m) {
@@ -1385,7 +1389,7 @@ function initNetwork() {
         } else {
             if (m.by === NET.id) { kills++; updateBoard(); }
             const body = remoteBodies[m.id];
-            if (body) startRemoteDeath(body);
+            if (body) startRemoteDeath(body, { downed: !!m.downed });
             if (m.downed) {
                 if (PLAYERS[m.id]) { PLAYERS[m.id].downed = true; if (m.x !== undefined) { PLAYERS[m.id].x = m.x; PLAYERS[m.id].z = m.z; } }
                 setDownedMarker(m.id, true);
@@ -1425,8 +1429,12 @@ function initNetwork() {
     /* --- Reviving (step 23) --- */
     NET.socket.on('revive-progress', function (m) {
         if (!m || !m.id) return;
+        // who was kneeling over them, if anyone - they get up unless it is the same one again
+        const was = REVIVE.progress[m.id] ? REVIVE.progress[m.id].by : null;
         if (m.by) REVIVE.progress[m.id] = { by: m.by, startedAt: performance.now(), ms: m.ms || 5000 };
         else delete REVIVE.progress[m.id];
+        if (was && was !== m.by && !remoteIsReviving(was)) setRemoteReviving(was, false);
+        if (m.by) setRemoteReviving(m.by, true);
         if (m.id === NET.id) {
             REVIVE.me.by = m.by || null;
             REVIVE.me.startedAt = performance.now();
@@ -1437,7 +1445,9 @@ function initNetwork() {
 
     NET.socket.on('player-revived', function (m) {
         if (!m || !m.id) return;
+        const was = REVIVE.progress[m.id] ? REVIVE.progress[m.id].by : null;
         delete REVIVE.progress[m.id];
+        [was, m.by].forEach(function (r) { if (r && !remoteIsReviving(r)) setRemoteReviving(r, false); });
         const who = m.id === NET.id ? 'YOU' : m.id.slice(0, 6).toUpperCase();
         const by = m.by === NET.id ? 'YOU' : (m.by || '').slice(0, 6).toUpperCase();
         if (m.id === NET.id) {
@@ -1450,7 +1460,7 @@ function initNetwork() {
             if (p) { p.downed = false; p.health = m.health; p.buf = [{ t: performance.now(), x: m.x, y: 1.72, z: m.z, yaw: p.yaw || 0, pitch: 0 }]; }
             setDownedMarker(m.id, false);
             const body = remoteBodies[m.id];
-            if (body) endRemoteDeath(body, { health: m.health });
+            if (body) endRemoteDeath(body, { health: m.health }, 0.5);      // gets up where they lay
             if (REVIVE.sentFor === m.id) REVIVE.sentFor = null;
         }
         pushFeed(by + ' revived ' + who);
@@ -1667,6 +1677,9 @@ function initNetwork() {
         // they did not walk here from where we last drew them - do not slide them
         p.buf = [{ t: performance.now(), x: m.x, y: m.y, z: m.z, yaw: m.yaw, pitch: m.pitch }];
         indexSlot(p);
+        // back on their feet from the start of Idle, not halfway through whatever they left in
+        const body = remoteBodies[m.id];
+        if (body && body.alive !== false && !m.downed && body.rig.model.kind === 'model') rigReset(body.rig.model);
         netFeed(m.id.slice(0, 6) + ' RECONNECTED');
     });
 
@@ -3603,14 +3616,46 @@ const MODEL_SPECS = {
         // the model's hand is empty: it holds the cube rig's revolver, set so the
         // barrel points straight ahead at the top of the Shoot clip
         gun: { bone: 'handR', palm: [0.007, 0.097, 0.015], fwd: [0.042, 0.83, -0.557], up: [-0.137, 0.557, 0.819] }
+    },
+    /* The other players (step 26b): a soldier, so a player never reads as a bandit.
+       Everything here was measured in Blender - see models/README.md. */
+    player: {
+        file: 'player.glb',
+        vWalk: 1.45, vRun: 4.32,
+        // A player walks at 5.4 (Run x1.25), aims at 2.6 (Walk x1.79), sprints at 9.2
+        // (Run x2.13, which is why Run may go that fast without the feet sliding)
+        // (window: the speed is measured over the last 0.25s - see updateModelRigs)
+        gait: { idle: 0.35, runUp: 3.6, runDown: 3.2, walkTs: [0.7, 1.8], runTs: [0.75, 2.15], window: 0.25 },
+        steps: { Walk: [0, 9 / 24], Run: [0, 8 / 24] },
+        // Shoot is one kick from the shoulder: raised on the first shot, kicked again on
+        // every shot after it, held while firing and for 0.6s after the last one
+        shoot: { from: 0, to: 0.25, hold: 0.6, fadeIn: 0.1, fadeOut: 0.2 },
+        // Jump is 0.67s. The game keeps a jumper in the air 0.58s; between the take-off
+        // and landing thresholds, through 15 packets a second and drawn at 60fps, the
+        // body is seen in the air for 0.50-0.60s (simulated, median 0.53) - so the clip
+        // runs x1.25 and lands with them
+        jump: 1.25,
+        hit: [
+            { bone: 'hips', center: [0, 0.48, 0.03], size: [0.50, 0.96, 0.40] },     // legs
+            { bone: 'spine', center: [0, 1.25, 0.05], size: [0.62, 0.56, 0.48] },    // torso
+            { bone: 'head', center: [0, 1.746, 0.041], size: [0.28, 0.34, 0.32], head: true }
+        ],
+        // the hands hold whichever of the game's own guns the player last fired
+        // (rigSetWeapon); this is the rifle's frame in handR, the grip at the bone
+        gun: { bone: 'handR', palm: [0, 0, 0], fwd: [-0.146, 0.543, -0.827], up: [-0.094, -0.840, -0.535], arsenal: true }
     }
     /* A new model is one more entry here. What it can carry:
          file              the .glb in models/ (uploaded; pin MODEL_BASE_CDN to the new commit)
          vWalk, vRun       metres a second each clip covers at normal speed
+         gait              speeds (m/s) for Idle / Run / back to Walk and each clip's speed-up range
+                           (optional: MODEL_GAIT)
          steps             footstep moments per clip, in seconds (optional)
-         shoot             { from, to, hold } - the part of Shoot that fires (optional: the whole clip)
+         shoot             { from, to, hold, fadeIn, fadeOut } - the part of Shoot that fires
+                           (optional: the whole clip)
+         jump              Jump's time scale, when the model has one
          hit               the bullet boxes, as above
-         gun               the cube revolver in a hand, as above - or instead
+         gun               the cube revolver in a hand, as above (arsenal: true = the game's guns)
+                           - or instead
          muzzle            { bone, pos } where bullets leave a model that holds its own weapon
          clips             { Walk: 'Fly', Shoot: 'Attack', Hit: null, ... } when its clip names differ
                            from Idle / Walk / Run / Shoot / Hit / Death (null = it has none) */
@@ -3638,9 +3683,10 @@ function bossLook(bt) {
         glow: own.glow !== undefined ? own.glow : BOSS_LOOK_DEFAULT.glow
     };
 }
-/* Every model the game can use: the bandits' cowboy and whatever the bosses wear */
+/* Every model the game can use: the bandits' cowboy, the players' soldier and
+   whatever the bosses wear */
 function wantedModels() {
-    const keys = ['cowboy'];
+    const keys = ['cowboy', 'player'];
     BOSS_TYPES.forEach(function (bt) { const k = bossLook(bt).model; if (keys.indexOf(k) < 0) keys.push(k); });
     return keys;
 }
@@ -3694,7 +3740,24 @@ function onCharacterModel(key, gltf, url, ms) {
     });
     MODEL_DATA[key] = { scene: gltf.scene, clips: clips };
     console.log('[MODELS] ' + key + ' ready in ' + Math.round(ms) + 'ms from ' + url);
+    if (MODEL_SPECS[key].gun && MODEL_SPECS[key].gun.arsenal) warmWorldGuns();
     upgradeRigs();
+}
+
+/* The guns in the other players' hands are lit by the town's lights, not the
+   view model's, so the first one to appear needs its shaders built - measured at
+   2.7 seconds of frozen screen, the first time a team mate fired. Built here
+   instead, once, while the soldier is being unpacked. */
+function warmWorldGuns() {
+    const warm = new THREE.Group();
+    ARSENAL.forEach(function (w, i) {
+        worldGun(i).parts.forEach(function (p) { warm.add(new THREE.Mesh(p.geo, p.mat)); });
+    });
+    const t0 = performance.now();
+    scene.add(warm);
+    renderer.compile(scene, camera);
+    scene.remove(warm);
+    console.log('[MODELS] guns for the other players ready in ' + Math.round(performance.now() - t0) + 'ms');
 }
 
 const _noRaycast = function () { };
@@ -3744,17 +3807,12 @@ function createModelRig(key, isBoss, bt) {
 
     // Where bullets leave: the cube rig's revolver in the hand (grip in the palm, barrel
     // along the aim of the Shoot clip), or a point on a bone for a model with its own weapon
-    let gun = null, muzzle;
-    if (spec.gun) {
+    let gun = null, muzzle = null;
+    if (spec.gun && spec.gun.arsenal) {
+        // filled in by rigSetWeapon below, once the rig exists
+    } else if (spec.gun) {
         gun = createRevolverMesh(1);
-        const gz = new THREE.Vector3().fromArray(spec.gun.fwd).negate().normalize();   // the revolver's barrel is its -Z
-        const gy = new THREE.Vector3().fromArray(spec.gun.up).normalize();
-        const gx = new THREE.Vector3().crossVectors(gy, gz).normalize();
-        gy.crossVectors(gz, gx);
-        gun.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(gx, gy, gz));
-        const gripAt = new THREE.Vector3(0, -0.07, 0.02).applyQuaternion(gun.quaternion);
-        gun.position.fromArray(spec.gun.palm).sub(gripAt);
-        gun.traverse(function (o) { if (o.isMesh) { o.castShadow = false; o.raycast = _noRaycast; } });
+        gunInHand(gun, spec.gun, [0, -0.07, 0.02]);
         bones[spec.gun.bone].add(gun);
         muzzle = gun.userData.muzzle;
     } else {
@@ -3803,9 +3861,95 @@ function createModelRig(key, isBoss, bt) {
         speed: 0, prevX: 0, prevZ: 0, hasPrev: false, back: false, stepT: 0
     };
     blob.visible = false;                    // born "far"; updateModelRigs settles it on the first frame
+    if (spec.gun && spec.gun.arsenal) rigSetWeapon(rig, 0);   // everybody starts with the Winchester
     rigPlayMotion(rig, 'Idle', 0);
     modelRigs.push(rig);
     return rig;
+}
+
+/* A gun (barrel along its -Z, top along +Y) into a hand: `grip` - the point of the
+   gun the hand closes on - lands on the palm, the barrel along `fwd`, the top along
+   `up`, all in the bone's own space. */
+function gunInHand(gun, g, grip) {
+    const gz = new THREE.Vector3().fromArray(g.fwd).negate().normalize();
+    const gy = new THREE.Vector3().fromArray(g.up).normalize();
+    const gx = new THREE.Vector3().crossVectors(gy, gz).normalize();
+    gy.crossVectors(gz, gx);
+    gun.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(gx, gy, gz));
+    const gripAt = new THREE.Vector3().fromArray(grip).applyQuaternion(gun.quaternion);
+    gun.position.fromArray(g.palm).sub(gripAt);
+    gun.traverse(function (o) { if (o.isMesh) { o.castShadow = false; o.raycast = _noRaycast; } });
+}
+
+/* The other players hold the gun they last fired (step 26b) - the game's own
+   first-person models, so what a team mate carries is what they are really
+   shooting. Each one is merged once into a mesh per material and shared by every
+   body: the Winchester alone is thirty little boxes, and seven players holding
+   thirty draw calls each would cost more than the soldiers themselves.
+   Where the right hand closes on each, in the model's own space: */
+const ARSENAL_GRIP = [
+    [0, -0.05, 0.02],       // winchester - the wrist of the stock
+    [0, -0.05, 0.04],       // smg - top of the pistol grip
+    [0, -0.04, 0.00],       // sniper - behind the receiver
+    [0, -0.05, 0.03],       // ar - top of the pistol grip
+    [0, -0.04, 0.00],       // shotgun - behind the receiver
+    [0, -0.04, 0.04]        // deagle - top of the grip
+];
+const _worldGuns = {};      // weapon index -> { parts: [{ geo, mat }], muzzle }
+
+function worldGun(idx) {
+    if (_worldGuns[idx]) return _worldGuns[idx];
+    const src = ARSENAL[idx].model, ud = src.userData;
+    const skip = [ud.fx && ud.fx.flash, ud.fx && ud.fx.flashStar];
+    src.updateMatrixWorld(true);
+    const inv = new THREE.Matrix4().copy(src.matrixWorld).invert();
+    const rel = new THREE.Matrix4();
+    const byMat = new Map();
+    src.traverse(function (o) {
+        if (!o.isMesh || skip.indexOf(o) >= 0) return;
+        rel.multiplyMatrices(inv, o.matrixWorld);
+        let g = o.geometry.clone().applyMatrix4(rel);
+        if (g.index) { const n = g.toNonIndexed(); g.dispose(); g = n; }
+        if (!byMat.has(o.material)) byMat.set(o.material, []);
+        byMat.get(o.material).push(g);
+    });
+    const parts = [];
+    byMat.forEach(function (list, mat) {
+        let n = 0;
+        list.forEach(function (g) { n += g.attributes.position.count; });
+        const pos = new Float32Array(n * 3), nor = new Float32Array(n * 3);
+        let at = 0;
+        list.forEach(function (g) {
+            pos.set(g.attributes.position.array, at * 3);
+            nor.set(g.attributes.normal.array, at * 3);
+            at += g.attributes.position.count;
+            g.dispose();
+        });
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+        geo.computeBoundingSphere();
+        parts.push({ geo: geo, mat: mat });
+    });
+    return (_worldGuns[idx] = { parts: parts, muzzle: ud.muzzle.position.clone() });
+}
+
+function rigSetWeapon(rig, idx) {
+    if (!rig || rig.kind !== 'model' || !rig.spec.gun || !rig.spec.gun.arsenal) return;
+    if (typeof idx !== 'number' || !ARSENAL[idx] || rig.weapon === idx) return;
+    const w = worldGun(idx);
+    const gun = new THREE.Group();
+    w.parts.forEach(function (p) { gun.add(new THREE.Mesh(p.geo, p.mat)); });
+    const muzzle = new THREE.Object3D();
+    muzzle.position.copy(w.muzzle);
+    gun.add(muzzle);
+    gun.userData.shared = true;               // geometry and materials belong to the game's guns
+    gunInHand(gun, rig.spec.gun, ARSENAL_GRIP[idx] || [0, 0, 0]);
+    if (rig.parts.gun && rig.parts.gun.parent) rig.parts.gun.parent.remove(rig.parts.gun);
+    rig.bones[rig.spec.gun.bone].add(gun);
+    rig.parts.gun = gun;
+    rig.parts.muzzle = muzzle;
+    rig.weapon = idx;
 }
 
 /* A clip by what it is for (Idle, Walk, Run, Shoot, Hit, Death), through the
@@ -3821,11 +3965,18 @@ function rigAction(rig, name, half) {
     return c ? rig.mixer.clipAction(c[half]) : null;
 }
 
-/* Both halves onto a looping motion clip, the upper half in step with the legs. */
+/* Both halves onto a looping motion clip, the upper half in step with the legs.
+   Jump is the one motion that plays once and holds its last frame. */
+function rigLoop(a, name) {
+    const once = name === 'Jump';
+    a.setLoop(once ? THREE.LoopOnce : THREE.LoopRepeat, once ? 1 : Infinity);
+    a.clampWhenFinished = once;
+}
+
 function rigPlayMotion(rig, name, fade) {
     const lo = rigAction(rig, name, 'lo');
     if (rig.lower !== lo) {
-        lo.reset(); lo.setLoop(THREE.LoopRepeat, Infinity); lo.clampWhenFinished = false;
+        lo.reset(); rigLoop(lo, name);
         lo.setEffectiveWeight(1); lo.play();
         if (rig.lower && fade > 0) rig.lower.crossFadeTo(lo, fade, false);
         else if (rig.lower) rig.lower.stop();
@@ -3838,7 +3989,7 @@ function rigPlayMotion(rig, name, fade) {
 function rigUpperToMotion(rig, fade) {
     const up = rigAction(rig, rig.motion, 'up');
     if (rig.upper === up) return;
-    up.reset(); up.setLoop(THREE.LoopRepeat, Infinity); up.clampWhenFinished = false;
+    up.reset(); rigLoop(up, rig.motion);
     up.setEffectiveWeight(1);
     up.setEffectiveTimeScale(rig.lower.getEffectiveTimeScale());
     up.play();
@@ -3860,7 +4011,7 @@ function rigShoot(rig) {
         a.reset(); a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = true;
         a.setEffectiveWeight(1); a.setEffectiveTimeScale(1);
         a.play();
-        if (rig.upper && rig.upper !== a) rig.upper.crossFadeTo(a, 0.1, false);
+        if (rig.upper && rig.upper !== a) rig.upper.crossFadeTo(a, sh.fadeIn || 0.1, false);
         rig.upper = a;
         rig.overlay = 'Shoot';
     }
@@ -3895,18 +4046,49 @@ function rigHit(rig) {
 const MODEL_DEATH_SPEED = 1.5;
 
 function rigDie(rig) {
-    if (!rig || rig.kind !== 'model' || rig.full || !rigClip(rig, 'Death')) return;
-    rig.full = 'Death';
+    if (!rig || rig.kind !== 'model' || rig.full) return;
+    rigFull(rig, 'Death', { speed: MODEL_DEATH_SPEED, fade: 0.15 });
+}
+
+/* A whole-body clip - Death, Downed, Revive - owns both halves until rigStand or
+   rigReset. Shots, flinches and the legs' own choice of clip wait until then.
+     loop     keep playing it (Downed, Revive) instead of holding the last frame
+     speed    its time scale
+     fade     seconds to blend in from whatever the body was doing
+     instant  no blend - a latecomer finds them already lying there */
+function rigFull(rig, name, o) {
+    if (!rig || rig.kind !== 'model' || !rigClip(rig, name)) return false;
+    if (rig.full === name) return true;
+    o = o || {};
+    rig.full = name;
     rig.overlay = null;
+    rig.air = false;
     ['lo', 'up'].forEach(function (half) {
-        const a = rigAction(rig, 'Death', half);
-        a.reset(); a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = true;
-        a.setEffectiveWeight(1); a.setEffectiveTimeScale(MODEL_DEATH_SPEED);
+        const a = rigAction(rig, name, half);
+        a.reset();
+        a.setLoop(o.loop ? THREE.LoopRepeat : THREE.LoopOnce, o.loop ? Infinity : 1);
+        a.clampWhenFinished = !o.loop;
+        a.setEffectiveWeight(1); a.setEffectiveTimeScale(o.speed || 1);
         a.play();
+        if (o.instant && !o.loop) a.time = a.getClip().duration;
         const was = half === 'lo' ? rig.lower : rig.upper;
-        if (was && was !== a) was.crossFadeTo(a, 0.15, false);
+        if (was && was !== a) {
+            if (o.instant) was.stop();
+            else was.crossFadeTo(a, o.fade || 0.15, false);
+        }
         if (half === 'lo') rig.lower = a; else rig.upper = a;
     });
+    return true;
+}
+
+/* Out of a whole-body clip and back on the feet, blended - getting up where they
+   lay, or a reviver letting go. */
+function rigStand(rig, fade) {
+    if (!rig || rig.kind !== 'model' || !rig.full) return;
+    rig.full = null;
+    rig.overlay = null;
+    rig.speed = 0; rig.hasPrev = false; rig.back = false; rig.air = false;
+    rigPlayMotion(rig, 'Idle', fade);
 }
 
 /* Standing again, at once - a respawn happens somewhere else, nothing to blend from. */
@@ -3915,27 +4097,44 @@ function rigReset(rig) {
     rig.mixer.stopAllAction();
     rig.lower = null; rig.upper = null;
     rig.full = null; rig.overlay = null;
-    rig.speed = 0; rig.hasPrev = false; rig.back = false;
+    rig.speed = 0; rig.hasPrev = false; rig.back = false; rig.air = false;
     rigPlayMotion(rig, 'Idle', 0);
 }
 
 /* Which legs, and how fast, from how fast the body is actually being drawn to
    move - the same measured speed the cube legs used, so a late packet slows the
-   legs instead of making them skate. Going backwards plays Walk in reverse. */
+   legs instead of making them skate. Going backwards plays Walk in reverse.
+   rig.air (a remote player off the ground) plays Jump. */
+const MODEL_GAIT = { idle: 0.3, runUp: 2.9, runDown: 2.3, walkTs: [0.6, 1.8], runTs: [0.6, 2.2] };
+
 function rigChooseMotion(rig) {
-    const s = rig.scale, v = rig.speed, spec = rig.spec;
+    const s = rig.scale, v = rig.speed, spec = rig.spec, g = spec.gait || MODEL_GAIT;
     let want;
-    if (v < 0.3 * s) want = 'Idle';
+    if (rig.air && rigClip(rig, 'Jump')) want = 'Jump';
+    else if (v < g.idle * s) want = 'Idle';
     else if (rig.back) want = 'Walk';
-    else if (rig.motion === 'Run') want = v > 2.3 * s ? 'Run' : 'Walk';
-    else want = v > 2.9 * s ? 'Run' : 'Walk';
+    else if (rig.motion === 'Run') want = v > g.runDown * s ? 'Run' : 'Walk';
+    else want = v > g.runUp * s ? 'Run' : 'Walk';
     if (want === 'Run' && !rigClip(rig, 'Run')) want = 'Walk';          // a model that only walks
-    if (want !== rig.motion) rigPlayMotion(rig, want, 0.2);
+    if (want !== rig.motion) rigPlayMotion(rig, want, (want === 'Jump' || rig.motion === 'Jump') ? 0.1 : 0.2);
     let ts = 1;
-    if (want === 'Walk') ts = THREE.MathUtils.clamp(v / (spec.vWalk * s), 0.6, 1.8) * (rig.back ? -1 : 1);
-    else if (want === 'Run') ts = THREE.MathUtils.clamp(v / (spec.vRun * s), 0.6, 2.2);
+    if (want === 'Walk') ts = THREE.MathUtils.clamp(v / (spec.vWalk * s), g.walkTs[0], g.walkTs[1]) * (rig.back ? -1 : 1);
+    else if (want === 'Run') ts = THREE.MathUtils.clamp(v / (spec.vRun * s), g.runTs[0], g.runTs[1]);
+    else if (want === 'Jump') ts = spec.jump || 1;
     rig.lower.setEffectiveTimeScale(ts);
     if (!rig.overlay) rig.upper.setEffectiveTimeScale(ts);
+}
+
+/* Looking up and down (remote players): the mixer has just put the neck and head
+   where the clip wants them, and this tips them on top of that - 40% in the neck,
+   60% in the head - about the body's own side-to-side axis, whatever the bones'
+   local axes happen to be. rig.pitch has the cube rig's sign (-pitch). */
+const _tiltQ = new THREE.Quaternion(), _tiltR = new THREE.Quaternion(), _tiltAxis = new THREE.Vector3();
+function rigTilt(rig, bone, a) {
+    _tiltQ.identity();
+    for (let o = bone.parent; o && o !== rig.body; o = o.parent) _tiltQ.premultiply(o.quaternion);
+    _tiltAxis.set(1, 0, 0).applyQuaternion(_tiltQ.invert());
+    bone.quaternion.premultiply(_tiltR.setFromAxisAngle(_tiltAxis, a));
 }
 
 function updateModelRigs(delta) {
@@ -3947,7 +4146,29 @@ function updateModelRigs(delta) {
         if (!rig.root.visible) { rig.hasPrev = false; continue; }
 
         const p = rig.root.position;
-        if (rig.hasPrev && delta > 0) {
+        const win = rig.spec.gait && rig.spec.gait.window;
+        if (win) {
+            /* A player's positions come in 15 times a second, not evenly, so the
+               distance drawn from one frame to the next jumps about: at 2.6 m/s it
+               read anywhere up to Run and flicked between the clips, and it read
+               10-15% fast on average. Measured over the last `window` seconds
+               instead, it is the speed they are really going. */
+            if (!rig.hasPrev) rig.trail = [];
+            const tr = rig.trail;
+            tr.push(now, p.x, p.z);
+            while (tr.length > 6 && now - tr[3] >= win * 1000) tr.splice(0, 3);
+            const span = (now - tr[0]) / 1000;
+            if (span > 0.05) {
+                const dx = p.x - tr[1], dz = p.z - tr[2];
+                let v = Math.hypot(dx, dz) / span;
+                if (v > 40) { v = 0; rig.trail = [now, p.x, p.z]; }       // a teleport, not a run
+                rig.speed += (v - rig.speed) * Math.min(1, 10 * delta);
+                if (v > 0.2) {
+                    const yaw = rig.root.rotation.y;             // the model faces +Z
+                    rig.back = (dx * Math.sin(yaw) + dz * Math.cos(yaw)) / (v * span) < -0.35;
+                }
+            }
+        } else if (rig.hasPrev && delta > 0) {
             const dx = p.x - rig.prevX, dz = p.z - rig.prevZ;
             let inst = Math.hypot(dx, dz) / delta;
             if (inst > 40) inst = 0;                          // a teleport, not a run
@@ -3977,12 +4198,18 @@ function updateModelRigs(delta) {
             if (now >= rig.overlayUntil) {
                 const wasShot = rig.overlay === 'Shoot';
                 rig.overlay = null;
-                rigUpperToMotion(rig, wasShot ? 0.3 : 0.12);    // lowering a gun takes a little longer
+                // lowering a gun takes a little longer
+                rigUpperToMotion(rig, wasShot ? ((rig.spec.shoot && rig.spec.shoot.fadeOut) || 0.3) : 0.12);
             }
         }
 
+        if (rig.pitch && !rig.full && rig.bones.neck && rig.bones.head) {
+            rigTilt(rig, rig.bones.neck, rig.pitch * 0.4);
+            rigTilt(rig, rig.bones.head, rig.pitch * 0.6);
+        }
+
         // footsteps when a foot lands, forwards or backwards through the clip
-        const steps = !rig.full && rig.spec.steps[rig.motion];
+        const steps = !rig.full && rig.spec.steps && rig.spec.steps[rig.motion];
         if (steps && rig.lower) {
             const after = rig.lower.time, dur = rig.lower.getClip().duration;
             const advance = rig.lower.getEffectiveTimeScale() * delta;
@@ -4004,7 +4231,7 @@ function disposeModelRig(rig) {
     rig.parts.materials.forEach(function (m) { m.dispose(); });      // the clones; textures stay shared
     rig.ownGeometry.forEach(function (g) { g.dispose(); });
     rig.hbMat.dispose();
-    if (rig.parts.gun) rig.parts.gun.traverse(function (o) {
+    if (rig.parts.gun && !rig.parts.gun.userData.shared) rig.parts.gun.traverse(function (o) {
         if (o.isMesh) {
             o.geometry.dispose();
             if (o.material !== MAT.gunWood) o.material.dispose();
@@ -4048,6 +4275,12 @@ function upgradeRigs() {
         if (!netBoss.alive) rig.mesh.visible = false;
         showNetBossHealth();
     }
+    // the other players: from cubes to the soldier (step 26b)
+    if (modelReady('player')) {
+        Object.keys(remoteBodies).forEach(function (id) {
+            if (remoteBodies[id].rig.model.kind !== 'model') swapRemoteRig(remoteBodies[id]);
+        });
+    }
 }
 
 /* What destroyServerBandit and friends always did to a cube rig. A model rig
@@ -4066,7 +4299,7 @@ function disposeBoxRig(mesh) {
 
 /* The articulated cube cowboy every bandit wore until step 26a. Unchanged - it is
    still what everybody sees when the model cannot load, and what the other
-   players wear until step 26b. */
+   players wear until the soldier has (step 26b). */
 function createBoxRig(isBoss, bt) {
     const s = isBoss ? 1.75 : 1.0;
     const root = new THREE.Group();
@@ -4296,8 +4529,11 @@ function createBandit(isBoss, bossType, opts) {
     const bt = isBoss ? (bossType || BOSS_TYPES[0]) : null;
     // A model when one has loaded (step 26a): a boss wears its own (BOSS_LOOKS), or the
     // cowboy until that file lands; otherwise, and when asked to, the cube rig.
-    const wants = isBoss ? bossLook(bt).model : 'cowboy';
-    const key = modelReady(wants) ? wants : (modelReady('cowboy') ? 'cowboy' : null);
+    // opts.model asks for one model and nothing else - a player must never stand in
+    // for a while as a cowboy, it waits on the cubes (step 26b).
+    const own = opts && opts.model;
+    const wants = isBoss ? bossLook(bt).model : (own || 'cowboy');
+    const key = modelReady(wants) ? wants : (!own && modelReady('cowboy') ? 'cowboy' : null);
     const rig = (!(opts && opts.box) && key) ? createModelRig(key, isBoss, bt) : createBoxRig(isBoss, bt);
     const s = rig.scale;
     const root = rig.root;
@@ -4369,10 +4605,11 @@ function placeBotAtSpawn(bot) {
 }
 
 /* =========================================================================
-   REMOTE PLAYERS (multiplayer, step 5)
+   REMOTE PLAYERS (multiplayer, step 5; the soldier since step 26b)
 
-   A remote player wears the same articulated cowboy model the bandits use, so
-   there is one rig to maintain. Rather than editing createBandit, we let it
+   A remote player is built by the same createBandit the bandits use, so there
+   is one rig to maintain - since step 26b wearing the soldier model instead of
+   the cowboy (liftRemoteRig). Rather than editing createBandit, we let it
    build a normal bandit and then lift the result out of the bot system: the
    record is spliced out of `bots`, the mesh moves to its own group, and the
    userData.bot tags are dropped. From that moment nothing in the AI, the wave
@@ -4423,17 +4660,21 @@ function makeNamePlate(text, colorHex) {
     return spr;
 }
 
-function createRemoteBody(id) {
-    // Build with the existing rig, then take it out of the bot system.
-    // Still the cube rig: the other players get their own model in step 26b.
-    const rig = createBandit(false, null, { box: true });
+/* Step 26b: the other players wear the soldier (MODEL_SPECS.player), and who is
+   who comes from a soft glow in their own colour over the whole body plus the
+   name plate. Until the file has arrived - or if it never does - they wear the
+   cube cowboy in their colours, as before, and change as soon as it lands. */
+const PLAYER_GLOW = 0.15;
+
+/* Build with the existing rig, then take it out of the bot system. */
+function liftRemoteRig(id, color) {
+    const rig = createBandit(false, null, { model: 'player' });
 
     const idx = bots.indexOf(rig);
     if (idx > -1) bots.splice(idx, 1);
     botGroup.remove(rig.mesh);
     remoteGroup.add(rig.mesh);
 
-    const color = colorForId(id);
     rig.mesh.traverse(function (o) {
         if (o.isMesh) {
             delete o.userData.bot;     // invisible to weapons and AI
@@ -4441,17 +4682,29 @@ function createRemoteBody(id) {
         }
     });
 
-    // Player colours. The coat and hat carry the identity; the shirt takes a
-    // darker shade of the same hue so the torso keeps its shape instead of
-    // reading as one flat slab of colour.
-    const mats = rig.parts.materials;
-    const dark = new THREE.Color(color).multiplyScalar(0.42);
-    if (mats[0]) mats[0].color.copy(dark);                    // shirt
-    if (mats[2]) mats[2].color.setHex(color);                 // coat
-    if (mats[3]) { mats[3].color.setHex(color); mats[3].emissive.setHex(color); mats[3].emissiveIntensity = 0.22; }
+    if (rig.model.kind === 'model') {
+        // the glow is also what a hit flash settles back to
+        rig.model.glow = { hex: color, k: PLAYER_GLOW };
+        rig.parts.materials.forEach(function (m) { m.emissive.setHex(color); m.emissiveIntensity = PLAYER_GLOW; });
+    } else {
+        // Player colours on the cubes. The coat and hat carry the identity; the shirt
+        // takes a darker shade of the same hue so the torso keeps its shape instead
+        // of reading as one flat slab of colour.
+        const mats = rig.parts.materials;
+        const dark = new THREE.Color(color).multiplyScalar(0.42);
+        if (mats[0]) mats[0].color.copy(dark);                    // shirt
+        if (mats[2]) mats[2].color.setHex(color);                 // coat
+        if (mats[3]) { mats[3].color.setHex(color); mats[3].emissive.setHex(color); mats[3].emissiveIntensity = 0.22; }
+    }
 
     rig.parts.barBg.visible = false;
     rig.parts.barFill.visible = false;
+    return rig;
+}
+
+function createRemoteBody(id) {
+    const color = colorForId(id);
+    const rig = liftRemoteRig(id, color);
 
     const plate = makeNamePlate(id.slice(0, 6), color);
     rig.mesh.add(plate);
@@ -4459,30 +4712,53 @@ function createRemoteBody(id) {
     const body = {
         id: id, rig: rig, mesh: rig.mesh, plate: plate, color: color,
         walkPhase: Math.random() * 6.28, speed: 0, recoil: 0,
-        alive: true, deathT: -1, deathDir: 1,
+        alive: true, deathT: -1, deathDir: 1, flashT: 0,
         prevPos: new THREE.Vector3(), hasPrev: false
     };
     remoteBodies[id] = body;
     const known = PLAYERS[id];
     if (known && typeof known.health === 'number') showRemoteHealth(body, known.health);
-    if (known && known.alive === false) startRemoteDeath(body);
-    console.log('[NET] body created for ' + id.slice(0, 6));
+    // (a body that is already down or dead is laid out by updateRemoteBodies)
+    console.log('[NET] body created for ' + id.slice(0, 6) + (rig.model.kind === 'model' ? '' : ' (cubes)'));
     return body;
+}
+
+/* The soldier has arrived after this body was built on the cubes: same record,
+   same place, same state, new body. */
+function swapRemoteRig(body) {
+    const old = body.rig;
+    const rig = liftRemoteRig(body.id, body.color);
+    if (rig.model.kind !== 'model') {                  // cannot happen, but never leave two bodies
+        remoteGroup.remove(rig.mesh);
+        return;
+    }
+    rig.mesh.position.copy(old.mesh.position);
+    rig.mesh.rotation.copy(old.mesh.rotation);
+    rig.mesh.visible = old.mesh.visible;
+    old.mesh.remove(body.plate);
+    rig.mesh.add(body.plate);
+    remoteGroup.remove(old.mesh);
+    disposeBoxRig(old.mesh);
+    body.rig = rig; body.mesh = rig.mesh;
+    const known = PLAYERS[body.id];
+    if (body.alive === false) {
+        rigFull(rig.model, known && known.downed ? 'Downed' : 'Death', { loop: !!(known && known.downed), instant: true });
+    } else if (remoteIsReviving(body.id)) {
+        rigFull(rig.model, 'Revive', { loop: true, instant: true });
+    } else if (known && typeof known.health === 'number') {
+        showRemoteHealth(body, known.health);
+    }
+    console.log('[NET] body for ' + body.id.slice(0, 6) + ' is now the soldier');
 }
 
 function destroyRemoteBody(id) {
     const body = remoteBodies[id];
     if (!body) return;
     remoteGroup.remove(body.mesh);
-    body.mesh.traverse(function (o) {
-        if (o.isMesh) {
-            if (o.geometry) o.geometry.dispose();
-            if (o.material) {
-                if (Array.isArray(o.material)) o.material.forEach(function (m) { m.dispose(); });
-                else o.material.dispose();
-            }
-        }
-    });
+    // a model body lets go of its own materials once it is out of the scene
+    // (updateModelRigs) - its geometry and textures are shared by every player
+    body.mesh.remove(body.plate);
+    if (body.rig.model.kind !== 'model') disposeBoxRig(body.mesh);
     if (body.plate.material.map) body.plate.material.map.dispose();
     body.plate.material.dispose();
     delete remoteBodies[id];
@@ -4596,6 +4872,17 @@ function applyRemoteTransform(p, body, delta) {
     m.rotation.y = shown.yaw + Math.PI;
     const head = body.rig.parts.head;
     if (head) head.rotation.x = THREE.MathUtils.clamp(-shown.pitch, -0.7, 0.7);
+    const R = body.rig.model;
+    if (R && R.kind === 'model') {
+        R.pitch = THREE.MathUtils.clamp(-shown.pitch, -0.7, 0.7);
+        // The height they send carries their head bob (up to 7.5cm) and the camera
+        // shake. Above 20cm they have jumped; back under 10cm they have landed. The
+        // body is drawn 10cm lower than the feet, so the bob never lifts it off the
+        // ground and a jump starts from the ground instead of popping up.
+        const feet = shown.y - EYE_HEIGHT;
+        if (R.air ? feet < 0.10 : feet > 0.20) R.air = !R.air;
+        m.position.y = Math.max(0, feet - 0.10);
+    }
 
     // Speed is measured from what was actually drawn, so a late packet slows the
     // legs down instead of making them skate.
@@ -4622,36 +4909,92 @@ function showRemoteHealth(body, health) {
     P.barFillMat.color.setHex(pct > 0.5 ? 0x5ec24a : (pct > 0.25 ? 0xe0a83c : 0xd94a2b));
 }
 
-function startRemoteDeath(body) {
+/* A player going down. The soldier plays Downed when a team mate can still pick
+   them up (co-op) - straight from wherever the body was, with no Death first:
+   Death ends face down and Downed lies on its back - and Death when they are
+   really dead (free for all). `o.downed` says which, `o.instant` lays out a body
+   a latecomer finds already on the ground, without the sound. */
+function startRemoteDeath(body, o) {
+    o = o || {};
     body.alive = false;
     body.deathT = 0;
     body.deathDir = Math.random() > 0.5 ? 1 : -1;
     body.rig.parts.barBg.visible = false;
     body.rig.parts.barFill.visible = false;
     body.plate.visible = false;
+    const R = body.rig.model;
+    if (R && R.kind === 'model') {
+        if (o.downed) rigFull(R, 'Downed', { loop: true, fade: 0.45, instant: o.instant });
+        else rigFull(R, 'Death', { fade: 0.15, instant: o.instant });
+    }
+    if (o.instant) return;
     sfxBotDeath(body.mesh.position);
     spawnParticles(body.mesh.position.clone().setY(1.2), 0x8a2a1a, 20, 4);
 }
 
-function endRemoteDeath(body, m) {
+/* On their feet again. `standFade` = getting up where they lay (revived); without
+   it they have respawned somewhere else and simply stand there. */
+function endRemoteDeath(body, m, standFade) {
     body.alive = true;
     body.deathT = -1;
     body.plate.visible = true;
     body.mesh.visible = true;
-    const P = body.rig.parts;
-    P.bob.rotation.set(0, 0, 0);
-    P.bob.position.y = 0;
-    P.armL.rotation.set(0, 0, 0.12);
-    P.armR.rotation.set(0, 0, -0.14);
-    P.legL.rotation.x = 0; P.legR.rotation.x = 0;
+    const R = body.rig.model;
+    if (R && R.kind === 'model') {
+        if (standFade) rigStand(R, standFade);
+        else rigReset(R);
+    } else {
+        const P = body.rig.parts;
+        P.bob.rotation.set(0, 0, 0);
+        P.bob.position.y = 0;
+        P.armL.rotation.set(0, 0, 0.12);
+        P.armR.rotation.set(0, 0, -0.14);
+        P.legL.rotation.x = 0; P.legR.rotation.x = 0;
+    }
     body.hasPrev = false;
     body.speed = 0;
     showRemoteHealth(body, m.health);
 }
 
+/* Somebody holding E on a fallen team mate kneels over them for as long as it
+   lasts (step 26b). Nothing to do for our own revives - we have no body. */
+function remoteIsReviving(id) {
+    return Object.keys(REVIVE.progress).some(function (k) { return REVIVE.progress[k].by === id; });
+}
+function setRemoteReviving(id, on) {
+    if (!id || id === NET.id) return;
+    const body = remoteBodies[id];
+    if (!body || body.alive === false) return;
+    const R = body.rig.model;
+    if (!R || R.kind !== 'model') return;
+    if (on) rigFull(R, 'Revive', { loop: true, fade: 0.25 });
+    else if (R.full === 'Revive') rigStand(R, 0.25);
+}
+
+/* Hit, as the server tells it: a flinch in the upper body and a short flash that
+   settles back to the player's own glow. */
+function remoteHurt(body) {
+    const R = body.rig.model;
+    if (!R || R.kind !== 'model' || body.alive === false) return;
+    rigHit(R);
+    body.flashT = 0.12;
+}
+function tickRemoteFlash(body, delta) {
+    const R = body.rig.model;
+    if (!body.flashT || !R || R.kind !== 'model') return;
+    body.flashT = Math.max(0, body.flashT - delta);
+    const on = body.flashT > 0, g = R.glow;
+    body.rig.parts.materials.forEach(function (m) {
+        m.emissive.setHex(on ? 0x772211 : (g ? g.hex : 0x000000));
+        m.emissiveIntensity = on ? 0.8 : (g ? g.k : 0);
+    });
+}
+
 /* Mirrors the bandit death fall, so a player dropping looks like anyone else
-   dropping. Runs instead of the walk cycle while it lasts. */
+   dropping. Runs instead of the walk cycle while it lasts. (Cube rig only - the
+   soldier has its own clips.) */
 function updateRemoteDeath(body, delta) {
+    if (body.rig.model && body.rig.model.kind === 'model') return;
     body.deathT += delta;
     const t = Math.min(1, body.deathT / 0.75);
     const e = 1 - Math.pow(1 - t, 3);
@@ -4673,10 +5016,13 @@ function updateRemoteBodies(delta) {
             body = createRemoteBody(id);
             if (PLAYERS[id].downed || PLAYERS[id].alive === false) {
                 body.mesh.position.set(PLAYERS[id].x, 0, PLAYERS[id].z);
-                startRemoteDeath(body);
+                body.mesh.rotation.y = (PLAYERS[id].yaw || 0) + Math.PI;
+                // already lying there when we arrived: no fall, no sound
+                startRemoteDeath(body, { downed: !!PLAYERS[id].downed, instant: true });
             }
         }
         applyRemoteTransform(PLAYERS[id], body, d);
+        tickRemoteFlash(body, d);
         // connection lost: gone from sight until they come back
         if (PLAYERS[id].away) { body.mesh.visible = false; body.awayHidden = true; }
         else if (body.awayHidden) { body.mesh.visible = true; body.awayHidden = false; }

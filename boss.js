@@ -9,8 +9,8 @@
    90 seconds, the next name down the list, and everyone in the room fights the
    same one at the same time.
 
-   The nine of them (eight until step 27) differ in more than health. Each has an ability, and the
-   ability is the reason the fight feels different:
+   The ten of them (eight until step 27, nine until 28) differ in more than health. Each has an
+   ability, and the ability is the reason the fight feels different:
 
      burst     three rounds per trigger pull
      charge    closes the distance at a run and hits you with his shoulder
@@ -22,6 +22,8 @@
      ghost     disappears and reappears somewhere else
      slam      hits the ground and hurts everyone standing near it
      poison    throws a bottle that leaves a cloud sitting on the ground
+     dragon    breathes fire that burns on the ground, swoops - and is the last
+               (step 28 - see DRAGON; killing it wins the game)
 
    All of it is simulated here. The clients are told what happened - the shot,
    the throw, the explosion, the cloud - and they draw it. No client decides
@@ -48,7 +50,10 @@ const BOSS_TYPES = [
     { id: "dynamite", name: "DYNAMITE DAISY", ability: "TNT TOSS", hp: 850, fireDelay: 1600, speed: 3.2 },
     { id: "ghost", name: "GHOST-WALKER COLE", ability: "VANISH", hp: 800, fireDelay: 900, speed: 4.0 },
     { id: "slam", name: "THUNDER-HOOF BART", ability: "EARTHQUAKE", hp: 1300, fireDelay: 1400, speed: 2.8 },
-    { id: "poison", name: "POISON-DOC REED", ability: "TOXIC CLOUD", hp: 880, fireDelay: 1300, speed: 3.0 }
+    { id: "poison", name: "POISON-DOC REED", ability: "TOXIC CLOUD", hp: 880, fireDelay: 1300, speed: 3.0 },
+    // step 28 - the last one. Breathes fire from a distance (see DRAGON) and swoops;
+    // killing it ends the game (`final` - server.js freezes the room and says so).
+    { id: "dragon", name: "THE WYRM OF RED MESA", ability: "HELLFIRE", hp: 2400, fireDelay: 1600, speed: 3.4, radius: 1.3, keepDistance: 12, final: true }
 ];
 
 const BOSS = {
@@ -102,6 +107,23 @@ const ROBOT = {
     steamRadius: 3, steamDamage: 4, steamLife: 3
 };
 
+/* ---- The dragon (step 28) -----------------------------------------------------
+   The last boss. It keeps its distance (keepDistance 12 on its row) and breathes
+   fire: a fireball lobbed to land where you are standing when it lets go, which
+   bursts into a pool of fire on the ground - so the answer is to keep moving, and
+   not to go back to where it just landed. Anybody within swoopTrigger with a line
+   to it gets swooped: a run at breakneck speed that hits hard if it arrives.
+   Phase two ("THE SKY BURNS") roars four bandits in, breathes two fireballs at a
+   time in a fan, and swoops far more often. */
+const DRAGON = {
+    breathSpeed: 18,           // metres a second along the ground; the arc takes what it takes
+    breathMinFlight: 0.35,     // seconds - even point blank it is a lob, not a shove
+    poolRadius: 4.2, poolDamage: 8, poolLife: 4,     // bites every BOSS.cloudTick like the poison
+    swoopTrigger: 22, swoopEveryMs: 6000, swoopForMs: 1400, swoopSpeed: 16,
+    swoopHitRange: 2.9, swoopDamage: 30,
+    p2: { summon: 4, breaths: 2, fanSpread: 0.35, swoopEveryMs: 3500 }
+};
+
 /* ---- Phase two (step 21) ---------------------------------------------------
    Below 30% health every boss changes. All of them fire a third faster, move a
    little quicker and are drawn enraged; each also gets one thing of its own, so
@@ -115,7 +137,8 @@ const ROBOT = {
      ghost     vanishes twice as often
      slam      a wider, more frequent quake
      poison    two bottles a throw, and the cloud lingers for 8 seconds
-     robot     OVERDRIVE: spins up in 0.3s, fires for 4s, and vents steam (ROBOT.p2) */
+     robot     OVERDRIVE: spins up in 0.3s, fires for 4s, and vents steam (ROBOT.p2)
+     dragon    THE SKY BURNS: four bandits, two fireballs a breath, swoops (DRAGON.p2) */
 const PHASE2 = {
     at: 0.3,
     fireScale: 0.75,           // x the time between shots
@@ -147,7 +170,8 @@ const GUN = {
     ghost: { shots: 1, spread: 0.022, perMetre: 0.0016, damage: 15, speed: 42 },
     slam: { shots: 1, spread: 0.022, perMetre: 0.0016, damage: 18, speed: 42 },
     dynamite: { shots: 0 },
-    poison: { shots: 0 }
+    poison: { shots: 0 },
+    dragon: { shots: 0 }
 };
 
 function round2(v) { return Math.round(v * 100) / 100; }
@@ -332,9 +356,54 @@ function throwHazard(room, b, target, kind, sink, turn) {
     });
 }
 
+/* The dragon's breath (step 28): lobbed so that it comes down where the target is
+   standing now, at breathSpeed along the ground - so it lands on a player who
+   stays put, and behind one who keeps moving. It bursts on the ground (stepHazards)
+   into a pool of fire. `turn` swings it sideways for the fan of phase two. */
+function breathFire(room, b, target, sink, turn) {
+    const oy = BOSS.eyeHeight;
+    let tx = target.x - b.x, tz = target.z - b.z;
+    if (turn) {
+        const c = Math.cos(turn), sn = Math.sin(turn);
+        const rx = tx * c - tz * sn, rz = tx * sn + tz * c;
+        tx = rx; tz = rz;
+    }
+    const flat = Math.hypot(tx, tz) || 0.01;
+    const T = Math.max(DRAGON.breathMinFlight, flat / DRAGON.breathSpeed);
+    const vx = tx / T, vz = tz / T;
+    const vy = (0.12 - oy) / T + 0.5 * BOSS.gravity * T;    // on the ground at T
+    const id = room.nextHazardId++;
+    room.hazards.push({
+        id: id, kind: "fire",
+        ox: b.x, oz: b.z, x: b.x, z: b.z,
+        vx: vx, vz: vz,
+        t: 0, T: T                                          // lands at T - see stepHazards
+    });
+    sink.hazards.push({
+        i: id, k: "fire",
+        o: [round2(b.x), round2(oy), round2(b.z)],
+        v: [round2(vx), round2(vy), round2(vz)],
+        f: round2(T)
+    });
+}
+
 function stepHazards(room, players, dt, sink) {
     for (let i = room.hazards.length - 1; i >= 0; i--) {
         const h = room.hazards[i];
+        if (h.kind === "fire") {
+            /* On its arc by the clock, not step by step - so it comes down exactly
+               where it was aimed, at exactly T, whatever the tick length. Fire does
+               not bounce: it bursts where it lands. */
+            h.t += dt;
+            if (h.t < h.T) continue;
+            h.x = h.ox + h.vx * h.T;
+            h.z = h.oz + h.vz * h.T;
+            room.hazards.splice(i, 1);
+            sink.booms.push({ i: h.id, k: "fire", p: [round2(h.x), 0.12, round2(h.z)], l: DRAGON.poolLife, r: DRAGON.poolRadius });
+            // the pool bites straight away - landing on somebody is not a free second
+            room.clouds.push({ x: h.x, z: h.z, life: DRAGON.poolLife, tick: BOSS.cloudTick, r: DRAGON.poolRadius, dmg: DRAGON.poolDamage });
+            continue;
+        }
         h.life -= dt;
         h.vy -= BOSS.gravity * dt;
         h.x += h.vx * dt;
@@ -437,6 +506,27 @@ function tickAbility(room, b, players, near, now, dt, sink) {
 
     if (id === "robot") { tickRobot(room, b, players, near, now, dt, sink); return; }
 
+    /* The dragon's swoop (step 28): the charge, with its own numbers. It rides
+       on chargeUntil so the walking stands aside and the clients see the flag. */
+    if (id === "dragon") {
+        if (b.hasLos && near && near.dist < DRAGON.swoopTrigger && now >= b.abilityAt) {
+            b.abilityAt = now + (b.phase === 2 ? DRAGON.p2.swoopEveryMs : DRAGON.swoopEveryMs);
+            b.chargeUntil = now + DRAGON.swoopForMs;
+            sink.roars.push({ p: [round2(b.x), round2(b.z)] });
+        }
+        if (b.chargeUntil && now < b.chargeUntil && near) {
+            const step = DRAGON.swoopSpeed * dt;
+            const d = near.dist || 0.01;
+            moveAxis(b, ((near.player.x - b.x) / d) * step, ((near.player.z - b.z) / d) * step);
+            if (Math.hypot(near.player.x - b.x, near.player.z - b.z) < DRAGON.swoopHitRange) {
+                b.chargeUntil = 0;
+                sink.hits.push({ playerId: near.player.id, damage: DRAGON.swoopDamage, from: "boss" });
+                sink.slams.push({ p: [round2(b.x), round2(b.z)], k: "swoop" });
+            }
+        }
+        return;
+    }
+
     if (id === "ghost") {
         if (now >= b.abilityAt) {
             b.abilityAt = now + (b.phase === 2 ? PHASE2.ghostEveryMs : BOSS.ghostEveryMs);
@@ -505,6 +595,10 @@ function enterPhase2(room, b, players, now, sink) {
     b.ringAt = now + 1200;
     let summoned = 0;
     if (b.type.id === "snipe") summoned = bandits.summon(room, players, b.x, b.z, PHASE2.summonCount);
+    if (b.type.id === "dragon") {
+        summoned = bandits.summon(room, players, b.x, b.z, DRAGON.p2.summon);
+        b.abilityAt = Math.min(b.abilityAt, now + 1500);   // and it comes for you
+    }
     sink.bossPhase = { t: b.typeIndex, s: summoned };
     sink.roars.push({ p: [round2(b.x), round2(b.z)] });
 }
@@ -527,7 +621,8 @@ function ringVolley(room, b, sink) {
 function stepBoss(room, b, players, now, dt, sink) {
     const near = nearestPlayer(room, players, b.x, b.z);
     if (b.phase !== 2 && b.health <= b.maxHealth * PHASE2.at) enterPhase2(room, b, players, now, sink);
-    const keepDistance = (b.phase === 2 && b.type.id === "snipe") ? PHASE2.snipeKeepDistance : BOSS.keepDistance;
+    const keepDistance = (b.phase === 2 && b.type.id === "snipe") ? PHASE2.snipeKeepDistance
+        : (b.type.keepDistance || BOSS.keepDistance);                 // step 28: the dragon stands off at 12
 
     if (now >= b.losAt) {
         b.losAt = now + 180 + Math.random() * 100;
@@ -552,6 +647,10 @@ function stepBoss(room, b, players, now, dt, sink) {
         if (b.hasLos && near.dist < keepDistance + 4 && near.dist > keepDistance - 4) {
             wantsMove = false;
         }
+        /* A boss with a distance of its own (the dragon, step 28) does not walk
+           into you when you are too close - it backs off (the strafe below) to
+           where it breathes from. The others close in, as they always have. */
+        if (b.type.keepDistance && b.hasLos && near.dist <= keepDistance - 4) wantsMove = false;
     } else {
         if (!b.patrolTarget || Math.hypot(b.patrolTarget.x - b.x, b.patrolTarget.z - b.z) < 2.2) {
             b.patrolTarget = nav.randomNavPoint();
@@ -658,6 +757,11 @@ function stepBoss(room, b, players, now, dt, sink) {
         } else if (b.type.id === "poison") {
             const n = p2 ? PHASE2.poisonBottles : 1;
             for (let i = 0; i < n; i++) throwHazard(room, b, near.player, "poison", sink, (i - (n - 1) / 2) * PHASE2.poisonSpread * 2);
+        } else if (b.type.id === "dragon") {
+            if (!(b.chargeUntil && now < b.chargeUntil)) {      // not in the middle of a swoop
+                const n = p2 ? DRAGON.p2.breaths : 1;
+                for (let i = 0; i < n; i++) breathFire(room, b, near.player, sink, (i - (n - 1) / 2) * DRAGON.p2.fanSpread);
+            }
         } else {
             fire(room, b, near.player, near.dist, sink);
         }
@@ -767,6 +871,6 @@ function clearBoss(room) {
 }
 
 module.exports = {
-    BOSS, BOSS_TYPES, PHASE2, ROBOT, GUN, initRoom, stepRoom, snapshot, hurt,
+    BOSS, BOSS_TYPES, PHASE2, ROBOT, DRAGON, GUN, initRoom, stepRoom, snapshot, hurt,
     secondsToBoss, clearBoss, emptySink
 };

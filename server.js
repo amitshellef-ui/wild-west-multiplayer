@@ -109,11 +109,21 @@ function createRoom(code, modeId) {
         mode: MODES[modeId] || MODES[DEFAULT_MODE],
         createdAt: Date.now()
     };
-    bandits.initRoom(rooms[code]);
-    boss.initRoom(rooms[code]);
-    waves.initRoom(rooms[code]);
-    missions.initRoom(rooms[code]);
+    resetRoomState(rooms[code], Date.now());
     return rooms[code];
+}
+
+/* A room back at the start of a game: wave 1, the first boss 90 seconds away,
+   the opening bandits, no mission - and not won. The same reset for a new room,
+   a room going from empty to occupied, and "new game" on the victory screen. */
+function resetRoomState(room, now) {
+    bandits.initRoom(room);
+    boss.initRoom(room, now);
+    waves.initRoom(room, now);
+    missions.initRoom(room);
+    room.won = null;
+    room.wipeAt = 0;
+    room.startedAt = now;
 }
 createRoom(PUBLIC_ROOM, DEFAULT_MODE);
 
@@ -607,6 +617,56 @@ function finishMission(room, res) {
     console.log("Mission in", room.code + ":", res.k, res.ok ? "done" : "failed", "(" + res.why + ")");
 }
 
+/* =========================================================================
+   THE END OF THE GAME (step 28)
+
+   The dragon is the last boss (`final` on its row in boss.js). When it falls the
+   game is won: the room is told, with the final table, and it stops - every
+   bandit still standing drops, no wave turns over, no boss comes. It stays that
+   way until somebody in the room presses "new game" (`room-restart`), which puts
+   it back to the start exactly the way an empty room is reset when somebody walks
+   in, with everybody back on their feet at a spawn point and the scores at zero.
+
+   Somebody who walks into a won room - or comes back to one - is shown the same
+   screen and the same button. A won room that everybody leaves is reset by the
+   next person through the door, like any empty room.
+   ========================================================================= */
+const RESTART_GAP_MS = 1000;
+
+function winRoom(room, killer, typeIndex, fallen, headshot, now) {
+    const code = room.code;
+    // the table as it stands, with who each slot was - someone may leave before it is read
+    const rows = [];
+    for (const id in players) {
+        const p = players[id];
+        if (p.room !== code) continue;
+        rows.push([p.slot, p.kills, p.deaths, Math.round(p.bossDamage), p.bossKills, p.id]);
+    }
+    room.won = {
+        by: killer.id, t: typeIndex,
+        x: Math.round(fallen.x * 100) / 100, z: Math.round(fallen.z * 100) / 100,
+        headshot: !!headshot,
+        wave: room.wave || 1,
+        ms: now - (room.startedAt || now),
+        scores: rows
+    };
+    // the town goes quiet: whoever was still shooting drops where they stand
+    for (const id in room.bandits) {
+        const b = room.bandits[id];
+        b.alive = false;
+        b.health = 0;
+    }
+    room.bullets = [];
+    room.hazards = [];
+    room.clouds = [];
+    room.nextBossAt = Infinity;
+    if (room.mission) finishMission(room, missions.cancel(room, "won"));
+    io.to(code).emit("bandits", { b: bandits.snapshot(room) });      // now, not on the next heartbeat
+    io.to(code).emit("room-won", room.won);
+    console.log("Room", code, "WON - the dragon fell to", killer.id.slice(0, 6), "on wave", room.won.wave,
+        "after", Math.round(room.won.ms / 1000) + "s");
+}
+
 /* ---- Moving between rooms ---- */
 function placeInRoom(socket, p, code) {
     const previous = p.room;
@@ -628,10 +688,7 @@ function placeInRoom(socket, p, code) {
     assignSlot(p, code);
 
     if (roomWasEmpty && rooms[code]) {
-        bandits.initRoom(rooms[code]);
-        boss.initRoom(rooms[code]);
-        waves.initRoom(rooms[code]);
-        missions.initRoom(rooms[code]);
+        resetRoomState(rooms[code], Date.now());
         console.log("Room", code, "was empty - back to wave 1:", bandits.BANDIT.startCount,
             "bandits, up to", waves.capFor(rooms[code]),
             "| boss in", (boss.BOSS.firstBossMs / 1000) + "s");
@@ -657,7 +714,8 @@ function placeInRoom(socket, p, code) {
         cap: waves.capFor(rooms[code]),
         banditHp: waves.difficultyFor(rooms[code]).health,
         scores: scoreRows(code),
-        mission: missions.publicState(rooms[code], Date.now())
+        mission: missions.publicState(rooms[code], Date.now()),
+        won: rooms[code].won || null
     });
     socket.to(code).emit("player-joined", publicPlayer(p));
 
@@ -691,6 +749,7 @@ io.on("connection", (socket) => {
             banditHp: waves.difficultyFor(room).health,
             scores: scoreRows(back.room),
             mission: missions.publicState(room, Date.now()),
+            won: room.won || null,
             resumed: true
         });
         socket.to(back.room).emit("player-back", publicPlayer(back));
@@ -867,6 +926,7 @@ function registerHandlers(socket) {
 
         const room = rooms[shooter.room];
         if (!room || !room.mode.friendlyFire) return;   // co-operative: nothing to do
+        if (room.won) return;                           // the game is over (step 28)
 
         if (!m || typeof m !== "object") return;
         if (typeof m.w !== "number" || (m.w | 0) !== m.w || m.w < 0 || m.w >= WEAPONS.length) return;
@@ -1008,6 +1068,20 @@ function registerHandlers(socket) {
             shooter.bossDamage += Math.max(0, healthBefore - res.boss.health);
             scoresChanged(room.code);
         }
+        if (res && res.killed && res.boss.type.final) {
+            // the last boss (step 28): no next wave, no next boss - the game is won
+            shooter.kills++;
+            shooter.bossKills++;
+            io.to(room.code).emit("boss-died", {
+                by: shooter.id, t: typeIndex,
+                x: Math.round(res.boss.x * 100) / 100,
+                z: Math.round(res.boss.z * 100) / 100,
+                headshot: head > 0,
+                nextIn: 0, won: true
+            });
+            winRoom(room, shooter, typeIndex, res.boss, head > 0, now);
+            return;
+        }
         if (res && res.killed) {
             shooter.kills++;
             shooter.bossKills++;
@@ -1074,6 +1148,43 @@ function registerHandlers(socket) {
         io.to(r.room).emit("revive-progress", { id: t.id, by: r.id, ms: REVIVE_MS });
     });
 
+    /* ---- "New game" on the victory screen (step 28) ----
+       Anybody in a won room may press it, once; the first press restarts the
+       room for everybody, and any press after that finds a room that is not
+       won any more and does nothing. */
+    socket.on("room-restart", () => {
+        const p = players[socket.data.pid];
+        if (!p || !p.room || p.away) return;
+        const room = rooms[p.room];
+        if (!room || !room.won) return;
+        const now = Date.now();
+        if (now - (p.restartAt || 0) < RESTART_GAP_MS) return;
+        p.restartAt = now;
+
+        const code = room.code;
+        resetRoomState(room, now);
+        for (const id in players) {
+            const q = players[id];
+            if (q.room !== code) continue;
+            q.kills = 0; q.deaths = 0; q.bossDamage = 0; q.bossKills = 0;
+        }
+        room.scoresDirty = false;
+        // first the room's new state, so the pages reset before anybody is moved
+        io.to(code).emit("room-restarted", {
+            by: p.id,
+            wave: room.wave || 1,
+            cap: waves.capFor(room),
+            banditHp: waves.difficultyFor(room).health,
+            scores: scoreRows(code)
+        });
+        // then everybody on their feet, at a spawn point, full health
+        for (const id in players) {
+            const q = players[id];
+            if (q.room === code) respawnPlayer(q);
+        }
+        console.log("Room", code, "- new game, started by", p.id.slice(0, 6));
+    });
+
     socket.on("revive-stop", (m) => {
         const r = players[socket.data.pid];
         if (!r || !m || typeof m.id !== "string") return;
@@ -1127,6 +1238,11 @@ setInterval(() => {
 
     for (const code in rooms) {
         const room = rooms[code];
+
+        /* A won room (step 28) is frozen: nothing moves, fires, spawns or ticks
+           down until somebody starts a new game. Revives still finish, so a
+           player lying there when the dragon fell can be picked up. */
+        if (room.won) { stepRevives(room, now); continue; }
 
         /* One sink for both simulations. The bandits and the boss share the
            room's bullet list, so they also share the list of what those
@@ -1204,6 +1320,12 @@ setInterval(() => {
             let occupied = false;
             for (const id in players) if (players[id].room === code) { occupied = true; break; }
             if (!occupied) continue;
+            /* A won room: the fallen bandits once a second (a latecomer still sees
+               them lying there), no boss clock, no wave clock - nothing is coming. */
+            if (room.won) {
+                if ((tick % 20) === 0) io.to(code).emit("bandits", { b: bandits.snapshot(room) });
+                continue;
+            }
             io.to(code).emit("bandits", { b: bandits.snapshot(room) });
 
             /* The boss goes out at the same rate while it is alive, and once a

@@ -235,6 +235,35 @@
     #room-msg { font-size: 11px; color: #c47a52; margin-top: 9px; min-height: 14px; }
     #room-msg.ok { color: #79cc79; }
 
+    /* The end of the game (step 28): the dragon is down. Above the menu, and it stays
+       until somebody starts a new game. */
+    #victory {
+        position: absolute; inset: 0; z-index: 12; display: none; direction: ltr;   /* the page is rtl; the table reads left to right */
+        flex-direction: column; justify-content: center; align-items: center; text-align: center;
+        background: radial-gradient(ellipse at 50% 30%, rgba(160,70,20,0.35), rgba(0,0,0,0.9) 72%), rgba(18,8,2,0.88);
+    }
+    #victory .vc-title { font-size: 72px; color: #ffcf5a; letter-spacing: 10px;
+        text-shadow: 0 0 30px rgba(255,160,40,0.55), 3px 4px 0 #3a1a04; animation: vcGlow 2.4s ease-in-out infinite; }
+    @keyframes vcGlow { 0%,100% { text-shadow: 0 0 22px rgba(255,160,40,0.45), 3px 4px 0 #3a1a04 } 50% { text-shadow: 0 0 44px rgba(255,120,20,0.8), 3px 4px 0 #3a1a04 } }
+    #victory .vc-sub { font-size: 17px; color: #ff9a5a; letter-spacing: 3px; margin-top: 4px; }
+    #victory .vc-he { font-size: 16px; color: #f3d9c0; margin-top: 8px; direction: rtl; font-family: 'Segoe UI', Tahoma, sans-serif; }
+    #victory .vc-by { font-size: 13px; color: #ffe1a0; margin: 10px 0 14px; letter-spacing: 2px; }
+    #victory table { border-collapse: collapse; font-size: 13px; color: #f0dcb4; min-width: 420px;
+        background: rgba(30,18,6,0.8); border: 1px solid #8b5a2b; }
+    #victory th { font-size: 10px; color: #c49a5a; letter-spacing: 1px; font-weight: normal; padding: 8px 10px 5px; text-align: right; }
+    #victory td { padding: 5px 10px; text-align: right; border-top: 1px solid rgba(139,90,43,0.35); font-variant-numeric: tabular-nums; }
+    #victory th:first-child, #victory td:first-child { text-align: left; }
+    #victory tr.me td { color: #fff2c8; }
+    #victory .sw { display: inline-block; width: 9px; height: 9px; margin-right: 7px; border: 1px solid #000; vertical-align: -1px; }
+    #victory .slayer { color: #ffcf5a; margin-left: 6px; }
+    #victory .vc-foot { font-size: 11px; color: #a07c4c; margin-top: 9px; letter-spacing: 1px; }
+    #victory button { margin-top: 22px; font-family: 'Segoe UI', Tahoma, sans-serif; font-size: 19px; color: #ffe1a0;
+        background: rgba(90,50,14,0.85); border: 2px solid #c47a2b; border-radius: 3px; padding: 11px 38px; cursor: pointer;
+        animation: pulse 1.8s ease-in-out infinite; }
+    #victory button:hover { background: rgba(130,72,20,0.95); }
+    #victory button:disabled { opacity: 0.55; cursor: default; animation: none; }
+    #victory .vc-note { font-size: 11px; color: #9c8156; margin-top: 8px; direction: rtl; font-family: 'Segoe UI', Tahoma, sans-serif; min-height: 14px; }
+
     #loading { position: absolute; bottom: 24px; color: #6b5330; font-size: 11px; font-family: 'Segoe UI', Tahoma, sans-serif; }
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -369,6 +398,20 @@
     <div id="loading">Winchester + SMG + Sniper + AR + Shotgun + Deagle</div>
 </div>
 
+<div id="victory">
+    <div class="vc-title">VICTORY</div>
+    <div class="vc-sub" id="vc-sub">&#9760; THE WYRM OF RED MESA HAS FALLEN &#9760;</div>
+    <div class="vc-he">&#1492;&#1491;&#1512;&#1511;&#1493;&#1503; &#1492;&#1493;&#1508;&#1500; &middot; &#1492;&#1506;&#1497;&#1497;&#1512;&#1492; &#1504;&#1497;&#1510;&#1500;&#1492;</div>
+    <div class="vc-by" id="vc-by"></div>
+    <table>
+        <thead><tr><th>GUN</th><th>KILLS</th><th>DEATHS</th><th>BOSS DMG</th><th>BOSSES</th></tr></thead>
+        <tbody id="vc-body"></tbody>
+    </table>
+    <div class="vc-foot" id="vc-foot"></div>
+    <button id="btn-newgame">&#1502;&#1513;&#1495;&#1511; &#1495;&#1491;&#1513;</button>
+    <div class="vc-note" id="vc-note"></div>
+</div>
+
 <script>
 window.addEventListener('contextmenu', e => e.preventDefault());
 
@@ -456,6 +499,128 @@ function tickScoreboard(now) {
     if (el) el.style.display = want ? 'block' : 'none';
     if (want) renderScoreboard();
 }
+
+/* =========================================================================
+   VICTORY (step 28)
+
+   The dragon is the last boss. Online the server says the room has won
+   (`room-won`, or `won` in room-joined for somebody walking in afterwards) and
+   freezes it; this draws the final table and the one button that matters.
+   Anybody's press restarts the room for everybody (`room-restart` ->
+   `room-restarted`). Offline it is the same screen with our own row, and the
+   button starts a fresh single player game.
+   ========================================================================= */
+const VICTORY = { shown: false, data: null, askedAt: 0 };
+
+function fmtClock(ms) {
+    const s = Math.max(0, Math.round((ms || 0) / 1000));
+    const m = Math.floor(s / 60);
+    return m + ':' + String(s % 60).padStart(2, '0');
+}
+
+function showVictory(w) {
+    VICTORY.shown = true;
+    VICTORY.data = w;
+    const online = !!(NET.connected && NET.room);
+    let rows;
+    if (online) {
+        // [slot, kills, deaths, bossDamage, bossKills, id] - the id, because someone may have left since
+        rows = (w.scores || []).map(function (r) {
+            return { id: r[5], me: r[5] === NET.id, kills: r[1], deaths: r[2], dmg: r[3], bosses: r[4] };
+        }).filter(function (r) { return typeof r.id === 'string'; });
+    } else {
+        rows = [{ id: null, me: true, kills: kills, deaths: deaths, dmg: Math.round(localBossDamage), bosses: localBossKills }];
+    }
+    rows.sort(function (a, b) { return (b.kills - a.kills) || (b.dmg - a.dmg); });
+    document.getElementById('vc-body').innerHTML = rows.map(function (r) {
+        const name = r.me ? 'YOU' : r.id.slice(0, 6).toUpperCase();
+        const col = r.me ? '#ffe9a8' : ('#' + colorForId(r.id).toString(16).padStart(6, '0'));
+        const slayer = online ? r.id === w.by : r.me;
+        return '<tr' + (r.me ? ' class="me"' : '') + '>' +
+            '<td><span class="sw" style="background:' + col + '"></span>' + name +
+            (slayer ? '<span class="slayer" title="dragon slayer">★</span>' : '') + '</td>' +
+            '<td>' + r.kills + '</td><td>' + r.deaths + '</td>' +
+            '<td>' + r.dmg + '</td><td>' + r.bosses + '</td></tr>';
+    }).join('');
+    const bt = BOSS_TYPES[(w.t || 0) % BOSS_TYPES.length];
+    document.getElementById('vc-sub').textContent = '☠ ' + bt.name + ' HAS FALLEN ☠';
+    const by = !online || w.by === NET.id ? 'YOU' : String(w.by || '').slice(0, 6).toUpperCase();
+    document.getElementById('vc-by').textContent = (w.headshot ? 'HEADSHOT · ' : '') + 'DRAGON SLAIN BY ' + by;
+    document.getElementById('vc-foot').textContent = 'WAVE ' + (w.wave || wave) + ' · ' + fmtClock(w.ms) +
+        (online ? ' · ROOM ' + NET.room : ' · SINGLE PLAYER');
+    document.getElementById('vc-note').textContent = online ? 'מתחיל מחדש לכל מי שבחדר — גל 1, בוס 1' : '';
+    const btn = document.getElementById('btn-newgame');
+    btn.disabled = false;
+    document.getElementById('victory').style.display = 'flex';
+    scoreboardUntil = 0;
+    ui.bossBar.style.display = 'none';
+    ui.waveLine.innerText = 'VICTORY';
+    if (document.pointerLockElement) document.exitPointerLock();
+}
+
+function hideVictory() {
+    VICTORY.shown = false;
+    VICTORY.data = null;
+    document.getElementById('victory').style.display = 'none';
+}
+
+/* Online: somebody pressed "new game" and the server has put the room back to
+   wave 1. Our own game starts over the way single player does (one gun, full
+   ammo, nothing unlocked, a clean score); the server's player-respawn for each
+   of us follows straight after and puts everybody at a spawn point. */
+function onRoomRestarted(m) {
+    kills = 0; deaths = 0; localBossDamage = 0; localBossKills = 0;
+    resetGame();
+    SCORES.rows = Array.isArray(m.scores) ? m.scores : [];
+    wave = m.wave || 1;
+    netWaveCap = m.cap || banditCap(wave);
+    netBanditMaxHp = m.banditHp || banditDifficulty(wave).health;
+    ui.waveLine.innerText = 'WAVE ' + wave;
+    clearServerBandits();
+    clearBanditBullets();
+    clearNetBossState();
+    resetMission();
+    // nobody is lying on the ground or kneeling over anybody from the last fight
+    Object.keys(reviveMarkers).forEach(function (id) { setDownedMarker(id, false); });
+    REVIVE.progress = {};
+    REVIVE.sentFor = null;
+    Object.keys(remoteBodies).forEach(function (id) {
+        const body = remoteBodies[id];
+        if (PLAYERS[id]) PLAYERS[id].downed = false;
+        endRemoteDeath(body, { health: 100 });
+    });
+    updateBoard();
+    netFeed('NEW GAME');
+    pushFeed('NEW GAME — WAVE 1');
+    ui.cta.innerText = 'לחץ כדי לשלוף';
+    // whoever pressed the button is still on the button's click: straight back in
+    if (m.by === NET.id) document.body.requestPointerLock();
+}
+
+/* Offline: the dragon we killed ourselves. */
+function localVictory(bt) {
+    showVictory({ t: BOSS_TYPES.indexOf(bt), wave: wave, ms: performance.now() - gameStartTime, headshot: false });
+}
+
+document.getElementById('btn-newgame').addEventListener('click', function (e) {
+    e.stopPropagation();
+    initAudio();
+    if (NET.connected && NET.room && NET.socket) {
+        // the server restarts the room for everybody; room-restarted brings us back
+        const t = performance.now();
+        if (t - VICTORY.askedAt < 1000) return;
+        VICTORY.askedAt = t;
+        NET.socket.emit('room-restart');
+        this.disabled = true;
+        document.getElementById('vc-note').textContent = 'מתחיל משחק חדש...';
+        return;
+    }
+    hideVictory();
+    kills = 0; deaths = 0; localBossDamage = 0; localBossKills = 0;
+    resetGame();
+    ui.waveLine.innerText = 'WAVE 1';
+    document.body.requestPointerLock();
+});
 
 /* =========================================================================
    DOWNED AND REVIVED (multiplayer, step 23)
@@ -747,7 +912,7 @@ function onMissionEnd(res) {
     const name = MISSION_INFO[res.k] ? MISSION_INFO[res.k].name : 'MISSION';
     clearMissionVisuals();
     MS.m = null;
-    if (res.why === 'wave') { panel.style.display = 'none'; return; }
+    if (res.why === 'wave' || res.why === 'won') { panel.style.display = 'none'; return; }
 
     let line;
     if (res.ok) {
@@ -1329,6 +1494,9 @@ function initNetwork() {
         } else {
             netFeed('ROOM ' + data.code);
         }
+        // a room that has already won (step 28): the same screen and the same button
+        if (data.won) showVictory(data.won);
+        else if (VICTORY.shown) hideVictory();
     });
 
     NET.socket.on('room-error', function (e) {
@@ -1649,8 +1817,24 @@ function initNetwork() {
         startNetBossDeath();
         pushFeed((m.headshot ? 'HEADSHOT! ' : '') + bt.name + ' IS DOWN');
         if (m.by === NET.id) { kills++; onKillReward(); }
+        if (m.won) { sfxBossRoar(at); return; }         // the last one (step 28): room-won follows
         applyBossReward();
         showScoreboardFor(5000);
+    });
+
+    /* --- The end of the game (step 28) --- */
+    NET.socket.on('room-won', function (m) {
+        if (!m) return;
+        clearBanditBullets();
+        Object.keys(netHazards).forEach(dropNetHazard);
+        netFeed('VICTORY');
+        pushFeed('THE DRAGON IS DEAD — THE TOWN IS SAVED');
+        showVictory(m);
+    });
+
+    NET.socket.on('room-restarted', function (m) {
+        hideVictory();
+        onRoomRestarted(m || {});
     });
 
     /* --- Remote gunfire (step 7). Cosmetic: no damage is applied. --- */
@@ -1959,6 +2143,13 @@ function sfxSteam(pos) {
     const d = chain(pos, 0.7, 40); if (!d) return;
     noiseBurst(d, { type: 'highpass', freq: 2600, dur: 0.9, vol: 0.5 });
     noiseBurst(d, { type: 'bandpass', freq: 900, q: 0.7, dur: 0.6, vol: 0.3 });
+}
+/* The dragon's breath leaving (step 28): a roaring whoosh, low and long. */
+function sfxFireBreath(pos) {
+    const d = chain(pos, 0.9, 70); if (!d) return;
+    noiseBurst(d, { type: 'lowpass', freq: 650, dur: 0.75, vol: 0.9 });
+    noiseBurst(d, { type: 'bandpass', freq: 1500, q: 0.5, dur: 0.45, vol: 0.4 });
+    tone(d, { type: 'sawtooth', f0: 95, f1: 55, dur: 0.5, vol: 0.25 });
 }
 function sfxSniper(pos) {
     const d = chain(pos, pos ? 1.0 : 0.7, 90); if (!d) return;
@@ -3548,7 +3739,9 @@ const BOSS_TYPES = [
     { id: 'dynamite', name: 'DYNAMITE DAISY', ability: 'TNT TOSS', hp: 850, fireDelay: 1600, speed: 3.2, shirt: 0x6a1820, pants: 0x2a1418, hat: 0x3a1014, coat: 0x5a2028, eye: 0xff3344 },
     { id: 'ghost', name: 'GHOST-WALKER COLE', ability: 'VANISH', hp: 800, fireDelay: 900, speed: 4.0, shirt: 0x2a2a38, pants: 0x1a1a28, hat: 0x101018, coat: 0x3a3a50, eye: 0xccaaff },
     { id: 'slam', name: 'THUNDER-HOOF BART', ability: 'EARTHQUAKE', hp: 1300, fireDelay: 1400, speed: 2.8, shirt: 0x4a3818, pants: 0x2a2210, hat: 0x201808, coat: 0x5a4820, eye: 0xffaa33 },
-    { id: 'poison', name: 'POISON-DOC REED', ability: 'TOXIC CLOUD', hp: 880, fireDelay: 1300, speed: 3.0, shirt: 0x184a28, pants: 0x102818, hat: 0x0c2010, coat: 0x205830, eye: 0x44ff66 }
+    { id: 'poison', name: 'POISON-DOC REED', ability: 'TOXIC CLOUD', hp: 880, fireDelay: 1300, speed: 3.0, shirt: 0x184a28, pants: 0x102818, hat: 0x0c2010, coat: 0x205830, eye: 0x44ff66 },
+    // step 28: the last one - killing it wins the game (BOSS_DRAGON, BOSS_LOOKS)
+    { id: 'dragon', name: 'THE WYRM OF RED MESA', ability: 'HELLFIRE', hp: 2400, fireDelay: 1600, speed: 3.4, radius: 1.3, keepDistance: 12, final: true, shirt: 0x6a1a10, pants: 0x3a100a, hat: 0x2a0806, coat: 0x8a2412, eye: 0xff7a1a }
 ];
 const bossHazards = [];
 
@@ -3572,7 +3765,8 @@ const BOSS_PHASE2_TEXT = {
     ghost: 'ENRAGED \u00b7 RESTLESS SPIRIT',
     slam: 'ENRAGED \u00b7 AFTERSHOCKS',
     poison: 'ENRAGED \u00b7 DOUBLE DOSE',
-    robot: 'OVERDRIVE \u00b7 STEAM VENTS'
+    robot: 'OVERDRIVE \u00b7 STEAM VENTS',
+    dragon: 'THE SKY BURNS \u00b7 DOUBLE BREATH'
 };
 
 /* The robot's gatling (step 27) - ROBOT in boss.js; online those are the ones that
@@ -3585,6 +3779,19 @@ const BOSS_ROBOT = {
     stompTrigger: 4, stompRadius: 5, stompDamage: 20, stompEveryMs: 4000,
     p2: { spinMs: 300, fireMs: 4000, coolMs: 2000, fireTurn: 1.2 },
     steamRadius: 3, steamDamage: 4, steamLife: 3
+};
+
+/* The dragon (step 28) - DRAGON in boss.js; online those are the ones that count,
+   this copy drives single player. The breath is lobbed to come down where you
+   stand at breathSpeed along the ground and burns there (a pool); the swoop is a
+   charge with its own numbers. */
+const BOSS_DRAGON = {
+    breathSpeed: 18,
+    breathMinFlight: 0.35,
+    poolRadius: 4.2, poolDamage: 8, poolLife: 4,
+    swoopTrigger: 22, swoopEveryMs: 6000, swoopForMs: 1400, swoopSpeed: 16,
+    swoopHitRange: 2.9, swoopDamage: 30,
+    p2: { summon: 4, breaths: 2, fanSpread: 0.35, swoopEveryMs: 3500 }
 };
 
 function enrageRig(parts) {
@@ -3723,6 +3930,35 @@ const MODEL_SPECS = {
         // and lowers it (28-40): the gatling loops the middle for as long as the
         // server says it fires (rigGatling), instead of one kick per round
         gatling: [8, 28]
+    },
+    /* The last boss (step 28), worn at x2.2 - measured in Three from the file, in the
+       standing model: 1.63 tall, 1.9 wing to wing, head bone at 1.28 (2.8m worn, the
+       server's eye line), the head turned to its left. It has no legs to walk on:
+       moving is Fly, a little off the ground (hover), and standing still is Idle.
+       Attack rears back (0-0.5s) and lunges at 0.63-0.75 - the breath leaves on the
+       lunge, so a breath plays 0.6 -> 0.8 and holds a moment. */
+    dragon: {
+        file: 'dragon.glb',
+        clips: { Walk: 'Fly', Run: 'Fly', Shoot: 'Attack', Hit: null },
+        // Fly at timeScale 1 looks like its chase speed, 3.4 m/s
+        vWalk: 1.545, vRun: 1.545,
+        gait: { idle: 0.25, runUp: 99, runDown: 98, walkTs: [0.8, 1.6], runTs: [0.8, 1.6] },
+        hover: 0.6,             // metres off the ground while it flies
+        deathLift: 0.06,        // Death rolls it onto its side with the torso 0.02 under the ground
+        shoot: { from: 0.6, to: 0.8, hold: 0.35, fadeIn: 0.08, fadeOut: 0.3 },
+        hit: [
+            { bone: 'hips', center: [0.05, 0.33, 0.0], size: [0.56, 0.62, 0.42] },        // legs
+            { bone: 'spine', center: [0.03, 0.64, 0.25], size: [0.46, 0.44, 0.74] },      // body
+            { bone: 'neck2', center: [0.03, 1.04, 0.56], size: [0.22, 0.30, 0.26] },      // neck
+            { bone: 'head', center: [0.11, 1.39, 0.72], size: [0.28, 0.28, 0.38], head: true },
+            { bone: 'tail2', center: [0.22, 0.42, -0.40], size: [0.36, 0.26, 0.40] },     // tail
+            { bone: 'tail4', center: [0.62, 0.28, -0.77], size: [0.36, 0.14, 0.30] },
+            // the wings are a big target on purpose - the last boss is hittable from afar
+            { bone: 'wing_foreL', center: [0.64, 1.06, -0.27], size: [0.50, 0.85, 0.70] },
+            { bone: 'wing_foreR', center: [-0.64, 1.06, -0.27], size: [0.50, 0.85, 0.70] }
+        ],
+        // the mouth, on the head bone (the snout runs along the bone's +Y)
+        muzzle: { bone: 'head', pos: [0, 0.38, 0] }
     }
     /* A new model is one more entry here. What it can carry:
          file              the .glb in models/ (uploaded; pin MODEL_BASE_CDN to the new commit)
@@ -3738,6 +3974,8 @@ const MODEL_SPECS = {
                            - or instead
          muzzle            { bone, pos } where bullets leave a model that holds its own weapon
          gatling           [from, to] frames of Shoot looped while a gatling fires (rigGatling)
+         hover             metres the body lifts while it moves (a flier - the dragon)
+         deathLift         model units the body rises through Death, if the clip sinks it
          clips             { Walk: 'Fly', Shoot: 'Attack', Hit: null, ... } when its clip names differ
                            from Idle / Walk / Run / Shoot / Hit / Death (null = it has none) */
 };
@@ -3755,7 +3993,8 @@ const BOSS_LOOKS = {
     burst: {}, charge: {},
     robot: { model: 'robot', scale: 1.5, tint: 0 },       // step 27: head at ~2.6m, the server's eye line 2.83
     snipe: {}, spray: {},
-    dynamite: {}, ghost: {}, slam: {}, poison: {}
+    dynamite: {}, ghost: {}, slam: {}, poison: {},
+    dragon: { model: 'dragon', scale: 2.2, tint: 0, glow: 0.08 }       // step 28: head at 2.8m, 4.2m wing to wing
 };
 function bossLook(bt) {
     const own = (bt && BOSS_LOOKS[bt.id]) || {};
@@ -4326,6 +4565,13 @@ function updateModelRigs(delta) {
         if (!rig.full) rigChooseMotion(rig);
         const before = rig.lower ? rig.lower.time : 0;
         rig.mixer.update(delta);
+
+        // a flier lifts off while it moves and settles to land (step 28, the dragon)
+        if (rig.spec.hover || rig.spec.deathLift) {
+            const flying = !rig.full && (rig.motion === 'Walk' || rig.motion === 'Run');
+            const want = rig.full === 'Death' ? (rig.spec.deathLift || 0) * rig.scale : (flying ? (rig.spec.hover || 0) : 0);
+            rig.body.position.y += (want - rig.body.position.y) * Math.min(1, 3 * delta);
+        }
 
         if (rig.overlay) {
             if (rig.upper.time >= rig.overlayStop) rig.upper.paused = true;   // hold the aim
@@ -5583,7 +5829,8 @@ function updateNetBoss(delta) {
                 P.armL.rotation.x = -e * 0.9;
                 P.armR.rotation.x = -e * 1.2;
             }
-            if (netBoss.deathT > 2.4) destroyNetBoss();
+            // the last boss stays where it fell until the next game (step 28)
+            if (netBoss.deathT > 2.4 && !(netBoss.type && netBoss.type.final)) destroyNetBoss();
         }
         return;
     }
@@ -5623,8 +5870,193 @@ const netHazards = {};
 const netClouds = [];
 const HAZARD_GRAVITY = 18;
 
+/* ---- The dragon's fire (step 28) --------------------------------------------
+   Drawn the same online and offline: a fireball trailing sparks on its way down,
+   and where it lands a pool of fire as wide as the damage it does, so everybody
+   can see where not to stand. It flickers and burns down over its life. The
+   damage is the server's online, updateBossHazards' offline - this only draws. */
+const _fireBallGeo = new THREE.SphereGeometry(0.34, 10, 8);
+const _fireBallMat = new THREE.MeshBasicMaterial({ color: 0xffb048 });
+const _firePoolGeo = new THREE.PlaneGeometry(2, 2).rotateX(-Math.PI / 2);
+let _fireGlowMat = null, _firePoolTex = null;
+const firePools = [];
+
+function fireGlowMaterial() {
+    if (_fireGlowMat) return _fireGlowMat;
+    const c = document.createElement('canvas');
+    c.width = c.height = 64;
+    const x = c.getContext('2d');
+    const g = x.createRadialGradient(32, 32, 0, 32, 32, 32);
+    g.addColorStop(0, 'rgba(255,244,190,1)');
+    g.addColorStop(0.35, 'rgba(255,140,40,0.75)');
+    g.addColorStop(1, 'rgba(255,50,0,0)');
+    x.fillStyle = g;
+    x.fillRect(0, 0, 64, 64);
+    _fireGlowMat = new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), blending: THREE.AdditiveBlending, depthWrite: false, transparent: true });
+    return _fireGlowMat;
+}
+
+function firePoolTexture() {
+    if (_firePoolTex) return _firePoolTex;
+    const c = document.createElement('canvas');
+    c.width = c.height = 128;
+    const x = c.getContext('2d');
+    const g = x.createRadialGradient(64, 64, 0, 64, 64, 64);
+    g.addColorStop(0, 'rgba(255,150,40,0.85)');
+    g.addColorStop(0.5, 'rgba(225,75,10,0.72)');
+    g.addColorStop(0.88, 'rgba(140,22,0,0.5)');
+    g.addColorStop(1, 'rgba(60,8,0,0)');
+    x.fillStyle = g;
+    x.fillRect(0, 0, 128, 128);
+    // tongues of flame, so it reads as fire and not as a lamp on the ground
+    for (let i = 0; i < 90; i++) {
+        const a = Math.random() * Math.PI * 2, r = Math.random() * 56;
+        x.fillStyle = 'rgba(255,' + (140 + Math.floor(Math.random() * 100)) + ',40,' + (0.25 + Math.random() * 0.4) + ')';
+        x.beginPath();
+        x.arc(64 + Math.cos(a) * r, 64 + Math.sin(a) * r, 2 + Math.random() * 7, 0, Math.PI * 2);
+        x.fill();
+    }
+    _firePoolTex = new THREE.CanvasTexture(c);
+    return _firePoolTex;
+}
+
+function fireBallMesh() {
+    const m = new THREE.Mesh(_fireBallGeo, _fireBallMat);
+    const glow = new THREE.Sprite(fireGlowMaterial());
+    glow.scale.set(2.2, 2.2, 1);
+    m.add(glow);
+    m.userData.fire = true;             // shared geometry and materials: removed, never disposed
+    return m;
+}
+
+/* Embers that rise instead of falling - the particle pool with the gravity turned
+   round, drawn as soft round sparks rather than squares. */
+let _emberTex = null;
+function emberTexture() {
+    if (_emberTex) return _emberTex;
+    const c = document.createElement('canvas');
+    c.width = c.height = 32;
+    const x = c.getContext('2d');
+    const g = x.createRadialGradient(16, 16, 0, 16, 16, 16);
+    g.addColorStop(0, 'rgba(255,255,255,1)');
+    g.addColorStop(0.4, 'rgba(255,255,255,0.7)');
+    g.addColorStop(1, 'rgba(255,255,255,0)');
+    x.fillStyle = g;
+    x.fillRect(0, 0, 32, 32);
+    return (_emberTex = new THREE.CanvasTexture(c));
+}
+function spawnEmbers(point, color, count, spd) {
+    const pos = [], vel = [];
+    for (let i = 0; i < count; i++) {
+        pos.push(point.x, point.y, point.z);
+        vel.push((Math.random() - 0.5) * spd, Math.random() * spd + 0.8, (Math.random() - 0.5) * spd);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    const mat = new THREE.PointsMaterial({ color: color, size: 0.16, map: emberTexture(), transparent: true, opacity: 1, depthWrite: false, blending: THREE.AdditiveBlending });
+    const sys = new THREE.Points(geo, mat);
+    scene.add(sys);
+    particlePool.push({ sys: sys, vel: vel, life: 0.7, max: 0.7, grav: 1.5 });
+}
+
+const FIRE_COLORS = [0xff5a10, 0xff9a2a, 0xffd060];
+
+function spawnFirePool(x, z, radius, life) {
+    // normal blending: added on top of the bright sand it burned out to white
+    const mat = new THREE.MeshBasicMaterial({ map: firePoolTexture(), transparent: true, depthWrite: false, opacity: 0 });
+    const mesh = new THREE.Mesh(_firePoolGeo, mat);
+    mesh.scale.set(radius, 1, radius);
+    mesh.position.set(x, 0.05, z);
+    mesh.rotation.y = Math.random() * Math.PI * 2;
+    mesh.renderOrder = 2;
+    mesh.raycast = function () { };
+    scene.add(mesh);
+    firePools.push({ mesh: mesh, life: life, max: life, puff: 0, r: radius, x: x, z: z, seed: Math.random() * 10 });
+    const p = new THREE.Vector3(x, 0.5, z);
+    spawnParticles(p, 0xff7a1a, 26, 7);
+    spawnEmbers(p, 0xffc050, 18, 3);
+    spawnDust(p.clone().setY(0.1), 12);
+    sfxExplosion(p);
+    const d = camera.position.distanceTo(p);
+    if (d < 10) camShake = Math.min(0.7, camShake + 0.3 * (1 - d / 10));
+}
+
+function updateFirePools(delta) {
+    for (let i = firePools.length - 1; i >= 0; i--) {
+        const f = firePools[i];
+        f.life -= delta;
+        const age = f.max - f.life;
+        f.mesh.material.opacity = Math.min(1, age / 0.15) * Math.max(0, Math.min(1, f.life / 0.8)) *
+            (0.78 + 0.22 * Math.sin(age * 21 + f.seed));
+        f.mesh.rotation.y += delta * 0.35;
+        f.puff -= delta;
+        if (f.puff <= 0 && f.life > 0.3) {
+            f.puff = 0.12;               // a few pools can burn at once: keep the draw calls down
+            const a = Math.random() * Math.PI * 2, rr = Math.sqrt(Math.random()) * f.r * 0.9;
+            spawnEmbers(new THREE.Vector3(f.x + Math.cos(a) * rr, 0.15, f.z + Math.sin(a) * rr),
+                FIRE_COLORS[Math.floor(Math.random() * 3)], 3, 1.2);
+        }
+        if (f.life <= 0) {
+            scene.remove(f.mesh);
+            f.mesh.material.dispose();
+            firePools.splice(i, 1);
+        }
+    }
+}
+
+function clearFirePools() {
+    firePools.forEach(function (f) { scene.remove(f.mesh); f.mesh.material.dispose(); });
+    firePools.length = 0;
+}
+
+/* The breath leaving the mouth: the Attack lunge, the whoosh, and a fireball that
+   comes down at `land` after `T` seconds - from wherever the mouth is drawn, on
+   the arc that meets the server's at the ground. */
+let lastBreathSfx = 0;
+function launchFireball(rig, from, land, T) {
+    const mesh = fireBallMesh();
+    mesh.position.copy(from);
+    scene.add(mesh);
+    const vel = new THREE.Vector3((land.x - from.x) / T, (land.y - from.y) / T + 0.5 * HAZARD_GRAVITY * T, (land.z - from.z) / T);
+    if (rig) rigShoot(rig);
+    muzzleFlashAt(from, 3.0);
+    spawnEmbers(from, 0xffa030, 10, 2.5);
+    // two in a fan are one breath
+    const t = performance.now();
+    if (t - lastBreathSfx > 150) { lastBreathSfx = t; sfxFireBreath(from); }
+    return { mesh: mesh, kind: 'fire', from: from.clone(), vel: vel, t: 0, T: T, life: T, trail: 0 };
+}
+
+/* One step of a flying fireball, on its arc by the clock like the server's; true
+   once it has come down. */
+function stepFireball(h, delta) {
+    h.life -= delta;
+    h.t += delta;
+    const t = Math.min(h.t, h.T);
+    h.mesh.position.copy(h.from).addScaledVector(h.vel, t);
+    h.mesh.position.y -= 0.5 * HAZARD_GRAVITY * t * t;
+    h.trail -= delta;
+    if (h.trail <= 0) {
+        h.trail = 0.035;
+        spawnEmbers(h.mesh.position, FIRE_COLORS[Math.floor(Math.random() * 3)], 2, 0.8);
+    }
+    return h.t >= h.T;
+}
+
 function spawnNetHazard(m) {
     if (!m || !m.o || !m.v) return;
+    if (m.k === 'fire') {
+        /* The server lobs it from the dragon's middle to come down at the ground
+           after m.f seconds; drawn from the mouth to the same spot at the same
+           moment. Where it lands, and what that costs, is the server's boom. */
+        const T = Math.max(0.1, m.f || 0.5);
+        const land = new THREE.Vector3(m.o[0] + m.v[0] * T, 0.12, m.o[2] + m.v[2] * T);
+        const from = new THREE.Vector3(m.o[0], m.o[1], m.o[2]);
+        const rig = netBoss.rig;
+        if (rig && rig.parts.muzzle) rig.parts.muzzle.getWorldPosition(from);
+        netHazards[m.i] = launchFireball(rig && rig.model, from, land, T);
+        return;
+    }
     const kind = m.k === 'tnt' ? 'tnt' : 'poison';
     const geo = kind === 'tnt'
         ? new THREE.CylinderGeometry(0.12, 0.12, 0.32, 8)
@@ -5650,15 +6082,24 @@ function dropNetHazard(id) {
     const h = netHazards[id];
     if (!h) return;
     scene.remove(h.mesh);
-    if (h.mesh.geometry) h.mesh.geometry.dispose();
-    if (h.mesh.material) h.mesh.material.dispose();
+    if (!h.mesh.userData.fire) {                 // a fireball's geometry and material are shared
+        if (h.mesh.geometry) h.mesh.geometry.dispose();
+        if (h.mesh.material) h.mesh.material.dispose();
+    }
     delete netHazards[id];
 }
 
 function updateNetHazards(delta) {
+    updateFirePools(delta);
     const ids = Object.keys(netHazards);
     for (let i = 0; i < ids.length; i++) {
         const h = netHazards[ids[i]];
+        if (h.kind === 'fire') {
+            // down: gone from the air; the pool comes with the server's boom
+            if (!h.down) { if (stepFireball(h, delta)) { h.down = true; h.mesh.visible = false; } }
+            else { h.life -= delta; if (h.life < -0.5) dropNetHazard(ids[i]); }     // the boom was lost
+            continue;
+        }
         h.life -= delta;
         h.vel.y -= HAZARD_GRAVITY * delta;
         h.mesh.position.addScaledVector(h.vel, delta);
@@ -5708,6 +6149,9 @@ function onBossBoom(m) {
         spawnParticles(p.clone().setY(0.6), 0xe8eef2, 26, 4);
         sfxSteam(p);
         netClouds.push({ pos: p.clone(), life: m.l || 3, puff: 0, steam: true, r: m.r || 3 });
+    } else if (m.k === 'fire') {
+        // the dragon's breath came down (step 28) - the server does the burning
+        spawnFirePool(p.x, p.z, m.r || BOSS_DRAGON.poolRadius, m.l || BOSS_DRAGON.poolLife);
     } else {
         spawnParticles(p.clone(), 0x44ff66, 20, 3);
         sfxRevolver(p);
@@ -5719,6 +6163,7 @@ function clearNetBossState() {
     destroyNetBoss();
     Object.keys(netHazards).forEach(dropNetHazard);
     netClouds.length = 0;
+    clearFirePools();
     netBoss.countdown = -1;
 }
 
@@ -5903,11 +6348,13 @@ function updateBot(bot, delta, now) {
 
     /* ---------- decide the destination ---------- */
     let goal = null, wantsMove = true,
-        desired = bot.isBoss ? ((bot.phase2 && bot.bossType.id === 'snipe') ? BOSS_PHASE2.snipeKeep : 9) : 11;
+        desired = bot.isBoss ? ((bot.phase2 && bot.bossType.id === 'snipe') ? BOSS_PHASE2.snipeKeep : (bot.bossType.keepDistance || 9)) : 11;
 
     if (bot.state === 'chase') {
         goal = camera.position;
         if (bot.hasLOS && dist < desired + 4 && dist > desired - 4) wantsMove = false;
+        // the dragon backs off to breathe instead of walking into you (step 28, as in boss.js)
+        if (bot.isBoss && bot.bossType.keepDistance && bot.hasLOS && dist <= desired - 4) wantsMove = false;
     } else {
         if (!bot.patrolTarget || pos.distanceTo(bot.patrolTarget) < 2.2) {
             bot.patrolTarget = randomNavPoint();
@@ -6082,6 +6529,10 @@ function enterLocalBossPhase2(bot) {
     showBossEnraged(bot.bossType, bot.mesh.position, true);
     let called = 0;
     if (bot.bossType.id === 'snipe') called = summonLocalBandits(bot, BOSS_PHASE2.summonCount);
+    if (bot.bossType.id === 'dragon') {
+        called = summonLocalBandits(bot, BOSS_DRAGON.p2.summon);
+        bot.abilityT = Math.min(bot.abilityT, 1.5);        // and it comes for you
+    }
     pushFeed(bot.bossType.name + ' IS ENRAGED' + (called ? ' \u2014 ' + called + ' GUNS CALLED IN' : ''));
 }
 
@@ -6144,6 +6595,12 @@ function botShoot(bot, dist) {
         sfxRifleShot(bot.mesh.position);
         return;
     }
+    if (ability === 'dragon') {
+        if (bot.chargeUntil && performance.now() < bot.chargeUntil) return;     // not mid-swoop
+        const n = bot.phase2 ? BOSS_DRAGON.p2.breaths : 1;
+        for (let i = 0; i < n; i++) localBreath(bot, muzzlePos, (i - (n - 1) / 2) * BOSS_DRAGON.p2.fanSpread);
+        return;
+    }
     if (ability === 'poison') {
         const bottles = bot.phase2 ? BOSS_PHASE2.poisonBottles : 1;
         for (let i = 0; i < bottles; i++) throwHazard(bot, muzzlePos, 'poison', (i - (bottles - 1) / 2) * BOSS_PHASE2.poisonSpread * 2);
@@ -6192,6 +6649,21 @@ function botShoot(bot, dist) {
     else if (ability === 'spray') sfxSmg(bot.mesh.position);
     else if (bot.isBoss) sfxRifleShot(bot.mesh.position);
     else sfxRevolver(bot.mesh.position);
+}
+
+/* The dragon's breath, single player (step 28) - breathFire in boss.js: aimed from
+   its middle at the ground where you stand (swung by `turn` for the fan), at
+   breathSpeed along the ground; drawn leaving its mouth. */
+function localBreath(bot, mouth, turn) {
+    const p = bot.mesh.position;
+    let tx = camera.position.x - p.x, tz = camera.position.z - p.z;
+    if (turn) {
+        const c = Math.cos(turn), sn = Math.sin(turn);
+        const rx = tx * c - tz * sn, rz = tx * sn + tz * c;
+        tx = rx; tz = rz;
+    }
+    const T = Math.max(BOSS_DRAGON.breathMinFlight, Math.hypot(tx, tz) / BOSS_DRAGON.breathSpeed);
+    bossHazards.push(launchFireball(null, mouth, new THREE.Vector3(p.x + tx, 0.12, p.z + tz), T));
 }
 
 function throwHazard(bot, from, kind, turn) {
@@ -6255,6 +6727,18 @@ function updateBossHazards(delta) {
                 }
             }
             if (h.life <= 0) bossHazards.splice(i, 1);
+            continue;
+        }
+        if (h.kind === 'fire') {
+            // the dragon's breath (step 28): down, and burning - biting at once, like the server's
+            if (!stepFireball(h, delta)) continue;
+            const at = h.mesh.position;
+            scene.remove(h.mesh);
+            spawnFirePool(at.x, at.z, BOSS_DRAGON.poolRadius, BOSS_DRAGON.poolLife);
+            bossHazards[i] = {
+                mesh: null, kind: 'cloud', pos: new THREE.Vector3(at.x, 0.12, at.z), radius: BOSS_DRAGON.poolRadius,
+                life: BOSS_DRAGON.poolLife, tick: 0.46, dmg: BOSS_DRAGON.poolDamage, fire: true
+            };
             continue;
         }
         h.life -= delta;
@@ -6340,6 +6824,31 @@ function tickBossAbility(bot, delta, now, dist, toPlayer) {
     bot.abilityT -= delta;
 
     if (id === 'robot') { tickLocalRobot(bot, delta, now, dist); return; }
+
+    // the dragon's swoop (step 28) - the charge with its own numbers, as in boss.js
+    if (id === 'dragon') {
+        const D = BOSS_DRAGON;
+        if (bot.hasLOS && dist < D.swoopTrigger && bot.abilityT <= 0) {
+            bot.abilityT = (bot.phase2 ? D.p2.swoopEveryMs : D.swoopEveryMs) / 1000;
+            bot.chargeUntil = now + D.swoopForMs;
+            spawnDust(bot.mesh.position.clone().setY(0.1), 16);
+            sfxBossRoar(bot.mesh.position);
+        }
+        if (bot.chargeUntil && now < bot.chargeUntil) {
+            const step = D.swoopSpeed * delta;
+            const n = dist > 0.01 ? step / dist : 0;
+            moveBotAxis(bot, toPlayer.x * n, toPlayer.z * n);
+            const left = Math.hypot(camera.position.x - bot.mesh.position.x, camera.position.z - bot.mesh.position.z);
+            if (left < D.swoopHitRange) {
+                takeDamage(D.swoopDamage);
+                bot.chargeUntil = 0;
+                spawnParticles(bot.mesh.position.clone().setY(0.25), 0xffaa33, 24, 5);
+                sfxExplosion(bot.mesh.position);
+                camShake = Math.min(0.7, camShake + 0.4);
+            }
+        }
+        return;
+    }
 
     if (id === 'ghost') {
         if (bot.abilityT <= 0) {
@@ -7174,6 +7683,9 @@ function resetGame() {
     botBullets.length = 0;
     bossHazards.forEach(function (h) { if (h.mesh) scene.remove(h.mesh); });
     bossHazards.length = 0;
+    clearFirePools();
+    // the dragon left lying where it fell last game (step 28)
+    botGroup.children.slice().forEach(function (o) { botGroup.remove(o); });
     camera.position.set(0, EYE_HEIGHT, 3);
     yaw = 0; pitch = 0; velY = 0;
     // Online the room's bandits come from the server; only spawn our own when
@@ -7241,6 +7753,14 @@ function onBossDefeated() {
     const fallen = bossObj;
     const idx = bots.indexOf(bossObj);
     if (idx > -1) bots.splice(idx, 1);
+    if (fallen && fallen.bossType && fallen.bossType.final) {
+        // the last one (step 28): the game is won - it lies there until the next game
+        localBossKills++;
+        sfxBossRoar(fallen.mesh.position);
+        pushFeed('THE DRAGON IS DEAD — THE TOWN IS SAVED');
+        setTimeout(function () { localVictory(fallen.bossType); }, 1600);
+        return;
+    }
     setTimeout(function () { if (fallen) botGroup.remove(fallen.mesh); }, 2500);
     if (bots.filter(function (b) { return !b.isBoss; }).length < 4) {
         for (let i = 0; i < 2; i++) createBandit(false);

@@ -9,11 +9,13 @@
    90 seconds, the next name down the list, and everyone in the room fights the
    same one at the same time.
 
-   The eight of them differ in more than health. Each has an ability, and the
+   The nine of them (eight until step 27) differ in more than health. Each has an ability, and the
    ability is the reason the fight feels different:
 
      burst     three rounds per trigger pull
      charge    closes the distance at a run and hits you with his shoulder
+     robot     spins up a gatling, plants its feet and hoses where it faces
+               (step 27 - see ROBOT)
      snipe     one accurate round from further than you can answer
      spray     a wall of lead, cheap per bullet
      dynamite  lobs a stick that lands where you were
@@ -38,6 +40,9 @@ const bandits = require("./bandits");
 const BOSS_TYPES = [
     { id: "burst", name: "BLACK-JACK McCREADY", ability: "TRIPLE BURST", hp: 900, fireDelay: 850, speed: 3.1 },
     { id: "charge", name: "IRON-LUNG HANK", ability: "BULL CHARGE", hp: 1100, fireDelay: 1100, speed: 3.6 },
+    // step 27 - the first boss with a model of its own. Its gun is a cycle, not a
+    // fire delay (see ROBOT); fireDelay is the gap between rounds while it fires.
+    { id: "robot", name: "TIN-STAR MARSHAL", ability: "GATLING ARM", hp: 1400, fireDelay: 90, speed: 2.4, radius: 0.95 },
     { id: "snipe", name: "WIDOW-MAKER SAL", ability: "LONGSHOT", hp: 750, fireDelay: 2100, speed: 2.6 },
     { id: "spray", name: "MACHINE-GUN MURPHY", ability: "LEAD STORM", hp: 1000, fireDelay: 120, speed: 3.0 },
     { id: "dynamite", name: "DYNAMITE DAISY", ability: "TNT TOSS", hp: 850, fireDelay: 1600, speed: 3.2 },
@@ -81,6 +86,22 @@ const BOSS = {
     gravity: 18
 };
 
+/* ---- The robot's gatling (step 27) ------------------------------------------
+   Not a round at a time. A cycle: it spins the barrels up (heard, not fired),
+   then fires a round every roundMs for fireMs, then cools down. While it spins
+   and fires it stands still and turns slowly (fireTurn, radians a second), and
+   the rounds go where it is facing, not where you are - so the answer to it is
+   to move round its side. Anybody who comes within stompTrigger gets stomped.
+   Phase two ("OVERDRIVE") spins up faster, fires longer, and vents a cloud of
+   steam round its feet at the end of every burst: getting close costs. */
+const ROBOT = {
+    spinMs: 800, fireMs: 2500, coolMs: 2000, roundMs: 90,
+    fireTurn: 0.9,             // radians a second while planted
+    stompTrigger: 4, stompRadius: 5, stompDamage: 20, stompEveryMs: 4000,
+    p2: { spinMs: 300, fireMs: 4000, coolMs: 2000, fireTurn: 1.2 },
+    steamRadius: 3, steamDamage: 4, steamLife: 3
+};
+
 /* ---- Phase two (step 21) ---------------------------------------------------
    Below 30% health every boss changes. All of them fire a third faster, move a
    little quicker and are drawn enraged; each also gets one thing of its own, so
@@ -93,7 +114,8 @@ const BOSS = {
      dynamite  three sticks in a fan
      ghost     vanishes twice as often
      slam      a wider, more frequent quake
-     poison    two bottles a throw, and the cloud lingers for 8 seconds */
+     poison    two bottles a throw, and the cloud lingers for 8 seconds
+     robot     OVERDRIVE: spins up in 0.3s, fires for 4s, and vents steam (ROBOT.p2) */
 const PHASE2 = {
     at: 0.3,
     fireScale: 0.75,           // x the time between shots
@@ -121,6 +143,7 @@ const GUN = {
     charge: { shots: 1, spread: 0.04, perMetre: 0, damage: 15, speed: 42 },
     snipe: { shots: 1, spread: 0.006, perMetre: 0, damage: 32, speed: 72 },
     spray: { shots: 1, spread: 0.055, perMetre: 0.0012, damage: 8, speed: 48 },
+    robot: { shots: 1, spread: 0.055, perMetre: 0.0012, damage: 8, speed: 48 },
     ghost: { shots: 1, spread: 0.022, perMetre: 0.0016, damage: 15, speed: 42 },
     slam: { shots: 1, spread: 0.022, perMetre: 0.0016, damage: 18, speed: 42 },
     dynamite: { shots: 0 },
@@ -143,11 +166,11 @@ function initRoom(room, now) {
 
 /* Far enough away that it does not land on top of anybody, close enough that
    it is walking towards the fight rather than across the map. */
-function pickBossSpawn(room, players) {
+function pickBossSpawn(room, players, radius) {
     let fallback = nav.randomNavPoint();
     for (let attempt = 0; attempt < 60; attempt++) {
         const p = nav.randomNavPoint();
-        if (nav.collidesAt(p.x, p.z, BOSS.radius)) continue;
+        if (nav.collidesAt(p.x, p.z, radius || BOSS.radius)) continue;
         let nearest = Infinity;
         for (const id in players) {
             const pl = players[id];
@@ -167,7 +190,8 @@ function spawnBoss(room, players, now) {
     const typeIndex = room.bossIndex % BOSS_TYPES.length;
     room.bossIndex++;
 
-    const p = pickBossSpawn(room, players);
+    const radius = type.radius || BOSS.radius;      // step 27: a bigger body keeps out of walls
+    const p = pickBossSpawn(room, players, radius);
     room.boss = {
         typeIndex: typeIndex,
         type: type,
@@ -175,6 +199,7 @@ function spawnBoss(room, players, now) {
         yaw: Math.random() * Math.PI * 2,
         health: type.hp,
         maxHealth: type.hp,
+        radius: radius,
         alive: true,
         state: "chase",             // it came here for a reason
         path: null,
@@ -199,8 +224,9 @@ function spawnBoss(room, players, now) {
 
 /* ---- Helpers shared with the bandit brain ------------------------------- */
 function moveAxis(b, dx, dz) {
-    if (dx !== 0 && !nav.collidesAt(b.x + dx, b.z, BOSS.radius)) b.x += dx;
-    if (dz !== 0 && !nav.collidesAt(b.x, b.z + dz, BOSS.radius)) b.z += dz;
+    const r = b.radius || BOSS.radius;
+    if (dx !== 0 && !nav.collidesAt(b.x + dx, b.z, r)) b.x += dx;
+    if (dz !== 0 && !nav.collidesAt(b.x, b.z + dz, r)) b.z += dz;
 }
 
 function nearestPlayer(room, players, fromX, fromZ) {
@@ -342,15 +368,74 @@ function stepHazards(room, players, dt, sink) {
         c.tick += dt;
         if (c.tick > BOSS.cloudTick) {
             c.tick = 0;
-            splash(room, players, c.x, c.z, BOSS.cloudRadius, BOSS.cloudDamage, false, sink);
+            splash(room, players, c.x, c.z, c.r || BOSS.cloudRadius, c.dmg || BOSS.cloudDamage, false, sink);
         }
         if (c.life <= 0) room.clouds.splice(i, 1);
+    }
+}
+
+/* The robot's round: along the way it is facing, dropping towards the target's
+   chest - so a player who has got round its side is not hit, however near. */
+function fireFacing(room, b, target, sink) {
+    const g = GUN.robot;
+    const oy = BOSS.eyeHeight;
+    const hx = Math.sin(b.yaw), hz = Math.cos(b.yaw);
+    const flat = Math.max(1, Math.hypot(target.x - b.x, target.z - b.z));
+    const drop = ((target.y || 1.72) - oy) / flat;
+    const spread = g.spread + flat * g.perMetre;
+    let dx = hx + (Math.random() - 0.5) * spread * 2;
+    let dy = drop + (Math.random() - 0.5) * spread * 1.5;
+    let dz = hz + (Math.random() - 0.5) * spread * 2;
+    const n = Math.hypot(dx, dy, dz) || 1;
+    dx /= n; dy /= n; dz /= n;
+    room.bullets.push({ x: b.x, y: oy, z: b.z, dx: dx, dy: dy, dz: dz, life: 0, from: -1, dmg: g.damage, spd: g.speed });
+    sink.bossShots.push({ k: "robot", o: [round2(b.x), round2(oy), round2(b.z)], d: [round3(dx), round3(dy), round3(dz)] });
+}
+
+/* A cloud with its own size and bite (the robot's steam), next to the poison's. */
+function ventSteam(room, b, sink) {
+    const id = room.nextHazardId++;
+    room.clouds.push({ x: b.x, z: b.z, life: ROBOT.steamLife, tick: 0, r: ROBOT.steamRadius, dmg: ROBOT.steamDamage });
+    sink.booms.push({ i: id, k: "steam", p: [round2(b.x), 0.12, round2(b.z)], l: ROBOT.steamLife, r: ROBOT.steamRadius });
+}
+
+/* spin -> fire -> cool -> ready. b.gState is sent to the clients (snapshot) so
+   they can spin the barrels and hold the gun up for exactly as long as it lasts. */
+function tickRobot(room, b, players, near, now, dt, sink) {
+    const G = b.phase === 2 ? ROBOT.p2 : ROBOT;
+    if (!b.gState) b.gState = "ready";
+    if (b.gState === "ready") {
+        if (b.hasLos && near && near.dist < BOSS.fireRange && now >= b.abilityAt) {
+            b.gState = "spin"; b.gUntil = now + G.spinMs;
+        }
+    } else if (b.gState === "spin") {
+        if (now >= b.gUntil) { b.gState = "fire"; b.gUntil = now + G.fireMs; b.gNext = now; }
+    } else if (b.gState === "fire") {
+        // a round every roundMs; with nobody to aim at it keeps the barrels turning
+        while (now >= b.gNext && b.gNext < b.gUntil) {
+            if (near) fireFacing(room, b, near.player, sink);
+            b.gNext += ROBOT.roundMs;
+        }
+        if (now >= b.gUntil) {
+            b.gState = "cool"; b.gUntil = now + G.coolMs;
+            if (b.phase === 2) ventSteam(room, b, sink);
+        }
+    } else if (b.gState === "cool") {
+        if (now >= b.gUntil) b.gState = "ready";
+    }
+    // the stomp is its own clock, gun or no gun
+    if (near && near.dist < ROBOT.stompTrigger && now >= (b.stompAt || 0)) {
+        b.stompAt = now + ROBOT.stompEveryMs;
+        splash(room, players, b.x, b.z, ROBOT.stompRadius, ROBOT.stompDamage, false, sink);
+        sink.slams.push({ p: [round2(b.x), round2(b.z)], k: "stomp", r: ROBOT.stompRadius });
     }
 }
 
 /* ---- Abilities ---------------------------------------------------------- */
 function tickAbility(room, b, players, near, now, dt, sink) {
     const id = b.type.id;
+
+    if (id === "robot") { tickRobot(room, b, players, near, now, dt, sink); return; }
 
     if (id === "ghost") {
         if (now >= b.abilityAt) {
@@ -366,7 +451,7 @@ function tickAbility(room, b, players, near, now, dt, sink) {
             let placed = false;
             for (let k = 0; k < 40 && !placed; k++) {
                 const dest = nav.randomNavPoint();
-                if (nav.collidesAt(dest.x, dest.z, BOSS.radius)) continue;
+                if (nav.collidesAt(dest.x, dest.z, b.radius || BOSS.radius)) continue;
                 if (near) {
                     const d = Math.hypot(dest.x - near.player.x, dest.z - near.player.z);
                     if (d <= BOSS.blinkMin || d > BOSS.blinkMax) continue;
@@ -496,10 +581,12 @@ function stepBoss(room, b, players, now, dt, sink) {
 
     /* --- walking --- */
     const charging = b.chargeUntil && now < b.chargeUntil;
+    // the robot plants its feet while the barrels spin and fire (step 27)
+    const planted = b.gState === "spin" || b.gState === "fire";
     const baseSpeed = b.type.speed * (b.phase === 2 ? PHASE2.speedScale : 1);
     const speed = b.state === "chase" ? baseSpeed : baseSpeed * 0.55;
     let moved = false;
-    if (!charging && wantsMove && b.path && b.pathIndex < b.path.length) {
+    if (!charging && !planted && wantsMove && b.path && b.pathIndex < b.path.length) {
         const wp = b.path[b.pathIndex];
         const dx = wp.x - b.x, dz = wp.z - b.z;
         const d = Math.hypot(dx, dz);
@@ -511,7 +598,7 @@ function stepBoss(room, b, players, now, dt, sink) {
             moved = true;
         }
     }
-    if (!charging && !moved && b.state === "chase" && near && b.hasLos) {
+    if (!charging && !planted && !moved && b.state === "chase" && near && b.hasLos) {
         if (now >= b.strafeAt) {
             b.strafeAt = now + 1100 + Math.random() * 1800;
             b.strafeDir *= -1;
@@ -547,7 +634,7 @@ function stepBoss(room, b, players, now, dt, sink) {
             b.path = null;
             b.repathAt = 0;
             if (b.wedgedFor >= 1600) {
-                const spot = nav.freeSpotNear(b.x, b.z, 2, 14, BOSS.radius);
+                const spot = nav.freeSpotNear(b.x, b.z, 2, 14, b.radius || BOSS.radius);
                 if (spot) { b.x = spot.x; b.z = spot.z; }
                 b.wedgedFor = 0;
             }
@@ -562,7 +649,7 @@ function stepBoss(room, b, players, now, dt, sink) {
     /* --- shooting --- */
     const range = b.type.id === "snipe" ? BOSS.snipeRange : BOSS.fireRange;
     const fireDelay = b.type.fireDelay * (b.phase === 2 ? PHASE2.fireScale : 1);
-    if (b.hasLos && near && near.dist < range && now - b.lastShot > fireDelay) {
+    if (b.type.id !== "robot" && b.hasLos && near && near.dist < range && now - b.lastShot > fireDelay) {
         b.lastShot = now + (Math.random() - 0.5) * 350;
         const p2 = b.phase === 2;
         if (b.type.id === "dynamite") {
@@ -589,7 +676,11 @@ function stepBoss(room, b, players, now, dt, sink) {
         let d = want - b.yaw;
         while (d > Math.PI) d -= Math.PI * 2;
         while (d < -Math.PI) d += Math.PI * 2;
-        b.yaw += d * Math.min(1, 9 * dt);
+        if (planted) {
+            // slowly: getting round its side is the way out of the stream
+            const turn = (b.phase === 2 ? ROBOT.p2.fireTurn : ROBOT.fireTurn) * dt;
+            b.yaw += Math.max(-turn, Math.min(turn, d));
+        } else b.yaw += d * Math.min(1, 9 * dt);
     }
 }
 
@@ -641,7 +732,9 @@ function snapshot(room, now) {
         Math.round(b.health),
         b.ghostUntil > t ? 1 : 0,
         (b.chargeUntil && b.chargeUntil > t) ? 1 : 0,
-        b.phase === 2 ? 1 : 0
+        b.phase === 2 ? 1 : 0,
+        // step 27: the robot's gun - 1 spinning up, 2 firing (0 for everybody else)
+        b.gState === "spin" ? 1 : (b.gState === "fire" ? 2 : 0)
     ];
 }
 
@@ -674,6 +767,6 @@ function clearBoss(room) {
 }
 
 module.exports = {
-    BOSS, BOSS_TYPES, PHASE2, initRoom, stepRoom, snapshot, hurt,
+    BOSS, BOSS_TYPES, PHASE2, ROBOT, GUN, initRoom, stepRoom, snapshot, hurt,
     secondsToBoss, clearBoss, emptySink
 };

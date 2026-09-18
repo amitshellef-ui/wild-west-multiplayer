@@ -1583,11 +1583,23 @@ function initNetwork() {
         if (tNow - (netBoss.lastShotSfx || 0) > 60) {
             netBoss.lastShotSfx = tNow;
             if (m.k === 'snipe') sfxSniper(flashAt);
-            else if (m.k === 'spray') sfxSmg(flashAt);
+            else if (m.k === 'spray' || m.k === 'robot') sfxSmg(flashAt);
             else sfxRifleShot(flashAt);
         }
-        spawnBanditBullet([flashAt.x, flashAt.y, flashAt.z], m.d,
-            m.k === 'snipe' ? 72 : (m.k === 'spray' ? 48 : 42));
+        let drawDir = m.d;
+        if (m.k === 'robot') {
+            // The server fires from the robot's middle; its gun is a metre out on its
+            // left arm. Drawn from the barrel along the same line, every round would
+            // pass a metre beside whoever it hit - so it is drawn from the barrel to
+            // where the server's round is at our distance (step 27).
+            const D = Math.hypot(camera.position.x - m.o[0], camera.position.z - m.o[2]);
+            const flatLen = Math.hypot(m.d[0], m.d[2]) || 1;
+            const k = D / flatLen;
+            const aim = new THREE.Vector3(m.o[0] + m.d[0] * k, m.o[1] + m.d[1] * k, m.o[2] + m.d[2] * k).sub(flashAt).normalize();
+            drawDir = [aim.x, aim.y, aim.z];
+        }
+        spawnBanditBullet([flashAt.x, flashAt.y, flashAt.z], drawDir,
+            m.k === 'snipe' ? 72 : ((m.k === 'spray' || m.k === 'robot') ? 48 : 42));
     });
 
     NET.socket.on('boss-phase', function (m) {
@@ -1934,6 +1946,19 @@ function sfxSmg(pos) {
     const d = chain(pos, pos ? 0.7 : 0.42, 55); if (!d) return;
     noiseBurst(d, { type: 'bandpass', freq: 2400, q: 1.1, dur: 0.05, vol: 0.55 });
     tone(d, { type: 'square', f0: 220, f1: 70, dur: 0.07, vol: 0.18 });
+}
+/* The robot's barrels winding up (step 27): the warning before the stream. */
+function sfxGatlingSpin(pos, ms) {
+    const d = chain(pos, 0.8, 60); if (!d) return;
+    const dur = (ms || 800) / 1000;
+    tone(d, { type: 'sawtooth', f0: 90, f1: 520, dur: dur, vol: 0.22 });
+    tone(d, { type: 'square', f0: 45, f1: 260, dur: dur, vol: 0.1 });
+}
+/* Steam venting round the robot's feet in overdrive. */
+function sfxSteam(pos) {
+    const d = chain(pos, 0.7, 40); if (!d) return;
+    noiseBurst(d, { type: 'highpass', freq: 2600, dur: 0.9, vol: 0.5 });
+    noiseBurst(d, { type: 'bandpass', freq: 900, q: 0.7, dur: 0.6, vol: 0.3 });
 }
 function sfxSniper(pos) {
     const d = chain(pos, pos ? 1.0 : 0.7, 90); if (!d) return;
@@ -3516,6 +3541,8 @@ function createRevolverMesh(s) {
 const BOSS_TYPES = [
     { id: 'burst', name: 'BLACK-JACK McCREADY', ability: 'TRIPLE BURST', hp: 900, fireDelay: 850, speed: 3.1, shirt: 0x20242c, pants: 0x1a1a1e, hat: 0x141418, coat: 0x2a1d14, eye: 0xff6a20 },
     { id: 'charge', name: 'IRON-LUNG HANK', ability: 'BULL CHARGE', hp: 1100, fireDelay: 1100, speed: 3.6, shirt: 0x4a2a18, pants: 0x2a2018, hat: 0x3a2410, coat: 0x5a3018, eye: 0xffcc44 },
+    // step 27: a model of its own (BOSS_LOOKS); these colours are for the cube rig if it cannot load
+    { id: 'robot', name: 'TIN-STAR MARSHAL', ability: 'GATLING ARM', hp: 1400, fireDelay: 90, speed: 2.4, radius: 0.95, shirt: 0x5a5e66, pants: 0x3a3d44, hat: 0x2a2c30, coat: 0x6a6e78, eye: 0x33ffee },
     { id: 'snipe', name: 'WIDOW-MAKER SAL', ability: 'LONGSHOT', hp: 750, fireDelay: 2100, speed: 2.6, shirt: 0x243018, pants: 0x1a2214, hat: 0x101408, coat: 0x2a3820, eye: 0x66ff88 },
     { id: 'spray', name: 'MACHINE-GUN MURPHY', ability: 'LEAD STORM', hp: 1000, fireDelay: 120, speed: 3.0, shirt: 0x3a3a48, pants: 0x222228, hat: 0x18181c, coat: 0x404050, eye: 0x88ccff },
     { id: 'dynamite', name: 'DYNAMITE DAISY', ability: 'TNT TOSS', hp: 850, fireDelay: 1600, speed: 3.2, shirt: 0x6a1820, pants: 0x2a1418, hat: 0x3a1014, coat: 0x5a2028, eye: 0xff3344 },
@@ -3544,7 +3571,20 @@ const BOSS_PHASE2_TEXT = {
     dynamite: 'ENRAGED \u00b7 TRIPLE TNT',
     ghost: 'ENRAGED \u00b7 RESTLESS SPIRIT',
     slam: 'ENRAGED \u00b7 AFTERSHOCKS',
-    poison: 'ENRAGED \u00b7 DOUBLE DOSE'
+    poison: 'ENRAGED \u00b7 DOUBLE DOSE',
+    robot: 'OVERDRIVE \u00b7 STEAM VENTS'
+};
+
+/* The robot's gatling (step 27) - ROBOT in boss.js; online those are the ones that
+   count, this copy drives single player. Spin up (no rounds) -> a round every
+   roundMs -> cool down; planted, and turning slowly (radians a second), while
+   it spins and fires. */
+const BOSS_ROBOT = {
+    spinMs: 800, fireMs: 2500, coolMs: 2000, roundMs: 90,
+    fireTurn: 0.9,
+    stompTrigger: 4, stompRadius: 5, stompDamage: 20, stompEveryMs: 4000,
+    p2: { spinMs: 300, fireMs: 4000, coolMs: 2000, fireTurn: 1.2 },
+    steamRadius: 3, steamDamage: 4, steamLife: 3
 };
 
 function enrageRig(parts) {
@@ -3660,6 +3700,29 @@ const MODEL_SPECS = {
         // the hands hold whichever of the game's own guns the player last fired
         // (rigSetWeapon); this is the rifle's frame in handR, the grip at the bone
         gun: { bone: 'handR', palm: [0, 0, 0], fwd: [-0.146, 0.543, -0.827], up: [-0.094, -0.840, -0.535], arsenal: true }
+    },
+    /* Boss 3 (step 27), worn at x1.5. Measured in Three from the file (not in Blender):
+       the planted foot's speed in Walk and Run, the frame each foot lands, the mesh
+       around each group of bones in the standing model, and the tip of the gatling
+       on the left hand in the aimed part of Shoot. */
+    robot: {
+        file: 'robot.glb',
+        vWalk: 0.94, vRun: 2.68,
+        // it walks at 2.4 (x1.5 = Walk x1.7), and 2.76 enraged
+        gait: { idle: 0.3, runUp: 2.9, runDown: 2.3, walkTs: [0.6, 2.2], runTs: [0.6, 2.2] },
+        steps: { Walk: [16 / 24, 36 / 24], Run: [10 / 24, 22 / 24] },
+        hit: [
+            { bone: 'hips', center: [-0.03, 0.557, 0.02], size: [0.62, 1.11, 0.44] },      // legs
+            // torso: stops where the head box starts (1.54 after MODEL_HITBOX_MUL) - measured
+            // with the shoulder pads it reached 1.75 and every shot at the head counted as body
+            { bone: 'spine', center: [-0.026, 1.30, -0.017], size: [0.90, 0.40, 0.46] },
+            { bone: 'head', center: [-0.027, 1.733, -0.017], size: [0.34, 0.32, 0.36], head: true }
+        ],
+        muzzle: { bone: 'handL', pos: [0.023, 0.257, 0.001] },
+        // Shoot raises the arm (0-8), shakes on a four-frame beat while firing (8-28)
+        // and lowers it (28-40): the gatling loops the middle for as long as the
+        // server says it fires (rigGatling), instead of one kick per round
+        gatling: [8, 28]
     }
     /* A new model is one more entry here. What it can carry:
          file              the .glb in models/ (uploaded; pin MODEL_BASE_CDN to the new commit)
@@ -3674,6 +3737,7 @@ const MODEL_SPECS = {
          gun               the cube revolver in a hand, as above (arsenal: true = the game's guns)
                            - or instead
          muzzle            { bone, pos } where bullets leave a model that holds its own weapon
+         gatling           [from, to] frames of Shoot looped while a gatling fires (rigGatling)
          clips             { Walk: 'Fly', Shoot: 'Attack', Hit: null, ... } when its clip names differ
                            from Idle / Walk / Run / Shoot / Hit / Death (null = it has none) */
 };
@@ -3688,7 +3752,9 @@ const MODEL_SPECS = {
      glow   a soft glow in the boss's eye colour, so each of them reads differently */
 const BOSS_LOOK_DEFAULT = { model: 'cowboy', scale: 1.75, tint: 0.35, glow: 0.12 };
 const BOSS_LOOKS = {
-    burst: {}, charge: {}, snipe: {}, spray: {},
+    burst: {}, charge: {},
+    robot: { model: 'robot', scale: 1.5, tint: 0 },       // step 27: head at ~2.6m, the server's eye line 2.83
+    snipe: {}, spray: {},
     dynamite: {}, ghost: {}, slam: {}, poison: {}
 };
 function bossLook(bt) {
@@ -3737,17 +3803,22 @@ function loadCharacterModel(key) {
     })([MODEL_BASE_CDN + spec.file, MODEL_BASE_LOCAL + spec.file]);
 }
 
+function splitClip(c) {
+    const lo = [], up = [];
+    c.tracks.forEach(function (t) { (MODEL_LOWER[t.name.split('.')[0]] ? lo : up).push(t); });
+    return {
+        full: c,
+        lo: new THREE.AnimationClip(c.name + '.lo', c.duration, lo),
+        up: new THREE.AnimationClip(c.name + '.up', c.duration, up)
+    };
+}
+
 function onCharacterModel(key, gltf, url, ms) {
     const clips = {};
-    gltf.animations.forEach(function (c) {
-        const lo = [], up = [];
-        c.tracks.forEach(function (t) { (MODEL_LOWER[t.name.split('.')[0]] ? lo : up).push(t); });
-        clips[c.name] = {
-            full: c,
-            lo: new THREE.AnimationClip(c.name + '.lo', c.duration, lo),
-            up: new THREE.AnimationClip(c.name + '.up', c.duration, up)
-        };
-    });
+    gltf.animations.forEach(function (c) { clips[c.name] = splitClip(c); });
+    // the part of Shoot a gatling loops while it fires (step 27, MODEL_SPECS.robot)
+    const gat = MODEL_SPECS[key].gatling;
+    if (gat && clips.Shoot) clips.ShootLoop = splitClip(THREE.AnimationUtils.subclip(clips.Shoot.full, 'ShootLoop', gat[0], gat[1], 24));
     gltf.scene.traverse(function (o) {
         if (o.isSkinnedMesh) {
             // culling uses the bind pose; a body falling over leaves it, so give it room
@@ -4020,7 +4091,7 @@ function rigUpperToMotion(rig, fade) {
    before easing back into whatever the legs are doing. A shot during the hold
    kicks again from the aimed pose instead of raising the gun twice. */
 function rigShoot(rig) {
-    if (!rig || rig.kind !== 'model' || rig.full) return;
+    if (!rig || rig.kind !== 'model' || rig.full || rig.spec.gatling) return;     // a gatling: rigGatling
     const a = rigAction(rig, 'Shoot', 'up');
     if (!a) return;
     const sh = rig.spec.shoot || { from: 0, to: a.getClip().duration, hold: 0 };
@@ -4041,7 +4112,7 @@ function rigShoot(rig) {
 /* A flinch in the upper half. Never over a shot, and at most every 0.4s so a
    stream of pellets does not freeze the body in one pose. */
 function rigHit(rig) {
-    if (!rig || rig.kind !== 'model' || rig.full || rig.overlay === 'Shoot' || rig.overlay === 'Reload') return;
+    if (!rig || rig.kind !== 'model' || rig.full || rig.overlay === 'Shoot' || rig.overlay === 'Reload' || rig.overlay === 'Gatling') return;
     const now = performance.now();
     if (now - rig.lastHit < 400) return;
     const a = rigAction(rig, 'Hit', 'up');
@@ -4055,6 +4126,31 @@ function rigHit(rig) {
     rig.overlay = 'Hit';
     rig.overlayStop = a.getClip().duration;
     rig.overlayUntil = now + a.getClip().duration * 1000;
+}
+
+/* The robot's gatling (step 27). 1 = spinning up: the arm comes up and holds the
+   aim; 2 = firing: the shaking middle of Shoot loops; 0 = back to whatever the
+   legs are doing. Driven by the server's snapshot online and by tickLocalRobot
+   offline, so the gun is up for exactly as long as it is really firing. */
+function rigGatling(rig, state) {
+    if (!rig || rig.kind !== 'model' || !rig.spec.gatling || rig.full) return;
+    const a = rigAction(rig, 'ShootLoop', 'up');
+    if (!a) return;
+    if (state) {
+        if (rig.overlay !== 'Gatling') {
+            a.reset(); a.setLoop(THREE.LoopRepeat, Infinity); a.clampWhenFinished = false;
+            a.setEffectiveWeight(1); a.play();
+            if (rig.upper && rig.upper !== a) rig.upper.crossFadeTo(a, 0.25, false);
+            rig.upper = a;
+            rig.overlay = 'Gatling';
+            rig.overlayStop = Infinity;
+            rig.overlayUntil = Infinity;
+        }
+        a.setEffectiveTimeScale(state === 2 ? 1 : 0);
+    } else if (rig.overlay === 'Gatling') {
+        rig.overlay = null;
+        rigUpperToMotion(rig, 0.35);
+    }
 }
 
 /* A reload (step 26c), in the upper half only - the legs keep going. The clip is
@@ -4583,7 +4679,7 @@ function createBandit(isBoss, bossType, opts) {
         maxHealth: isBoss ? bt.hp : banditDifficulty(wave).health,
         health: isBoss ? bt.hp : banditDifficulty(wave).health,
         alive: true, scale: s,
-        radius: isBoss ? 0.85 : 0.5,
+        radius: isBoss ? (bt.radius || 0.85) : 0.5,          // step 27: the robot is wider
         eyeHeight: (isBoss ? 1.75 : 1.0) * 1.62,
         parts: rig.parts, model: rig,
         walkPhase: Math.random() * 6.28,
@@ -5432,6 +5528,11 @@ function onBossState(m) {
         netBoss.charging = r[5] === 1;
         // somebody who walked in mid-rage never saw the moment it happened
         if (r[6] === 1 && !netBoss.phase2) enterNetBossPhase2(false);
+        // step 27: the robot's gatling - 1 spinning up, 2 firing (older servers send nothing)
+        const gs = r[7] || 0;
+        if (gs === 1 && netBoss.gState !== 1 && netBoss.mesh) sfxGatlingSpin(netBoss.mesh.position, netBoss.phase2 ? 300 : 800);
+        netBoss.gState = gs;
+        rigGatling(netBoss.rig && netBoss.rig.model, gs);
         netBoss.buf.push({ t: performance.now(), x: r[0], z: r[1], yaw: r[2] });
         if (netBoss.buf.length > 14) netBoss.buf.shift();
         netBoss.countdown = -1;
@@ -5578,8 +5679,14 @@ function updateNetHazards(delta) {
         c.life -= delta;
         c.puff -= delta;
         if (c.puff <= 0) {
-            c.puff = 0.5;
-            spawnParticles(c.pos.clone().setY(0.5 + Math.random()), 0x44ff66, 5, 1.2);
+            c.puff = c.steam ? 0.25 : 0.5;
+            if (c.steam) {
+                // the robot's steam: white, low, all round its feet
+                const a = Math.random() * Math.PI * 2, rr = Math.random() * (c.r || 3);
+                spawnParticles(c.pos.clone().set(c.pos.x + Math.cos(a) * rr, 0.4 + Math.random() * 0.8, c.pos.z + Math.sin(a) * rr), 0xe8eef2, 6, 1.6);
+            } else {
+                spawnParticles(c.pos.clone().setY(0.5 + Math.random()), 0x44ff66, 5, 1.2);
+            }
         }
         if (c.life <= 0) netClouds.splice(i, 1);
     }
@@ -5596,6 +5703,11 @@ function onBossBoom(m) {
         spawnDust(p.clone().setY(0.1), 18);
         sfxExplosion(p);
         if (camera.position.distanceTo(p) < 12) camShake = Math.min(0.7, camShake + 0.35);
+    } else if (m.k === 'steam') {
+        // the robot venting in overdrive (step 27) - the server does the damage
+        spawnParticles(p.clone().setY(0.6), 0xe8eef2, 26, 4);
+        sfxSteam(p);
+        netClouds.push({ pos: p.clone(), life: m.l || 3, puff: 0, steam: true, r: m.r || 3 });
     } else {
         spawnParticles(p.clone(), 0x44ff66, 20, 3);
         sfxRevolver(p);
@@ -5833,7 +5945,11 @@ function updateBot(bot, delta, now) {
     }
 
     let moving = false;
-    if (moveDir && wantsMove) {
+    // the robot plants its feet while the barrels spin and fire (step 27)
+    const planted = bot.gState === 'spin' || bot.gState === 'fire';
+    if (planted) {
+        // no walking, no strafing
+    } else if (moveDir && wantsMove) {
         const step = speed * delta;
         moveBotAxis(bot, moveDir.x * step, moveDir.z * step);
         moving = true;
@@ -5875,7 +5991,11 @@ function updateBot(bot, delta, now) {
     let dy = targetYaw - bot.mesh.rotation.y;
     while (dy > Math.PI) dy -= Math.PI * 2;
     while (dy < -Math.PI) dy += Math.PI * 2;
-    bot.mesh.rotation.y += dy * Math.min(1, 9 * delta);
+    if (planted) {
+        // slowly: getting round its side is the way out of the stream
+        const turn = (bot.phase2 ? BOSS_ROBOT.p2.fireTurn : BOSS_ROBOT.fireTurn) * delta;
+        bot.mesh.rotation.y += Math.max(-turn, Math.min(turn, dy));
+    } else bot.mesh.rotation.y += dy * Math.min(1, 9 * delta);
 
     /* ---------- walk cycle ---------- */
     const P = bot.parts;
@@ -5935,7 +6055,8 @@ function updateBot(bot, delta, now) {
     /* ---------- shooting ---------- */
     if (bot.isBoss && bot.bossType) tickBossAbility(bot, delta, now, dist, toPlayer);
 
-    if (bot.hasLOS && dist < (bot.isBoss && bot.bossType && bot.bossType.id === 'snipe' ? 70 : 38) && now - bot.lastShot > bot.fireDelay && bot.aimBlend > 0.6) {
+    const gatling = bot.isBoss && bot.bossType && bot.bossType.id === 'robot';       // its gun is tickLocalRobot
+    if (!gatling && bot.hasLOS && dist < (bot.isBoss && bot.bossType && bot.bossType.id === 'snipe' ? 70 : 38) && now - bot.lastShot > bot.fireDelay && bot.aimBlend > 0.6) {
         bot.lastShot = now + (Math.random() - 0.5) * 350;
         botShoot(bot, dist);
     }
@@ -6124,7 +6245,15 @@ function updateBossHazards(delta) {
             h.life -= delta;
             h.tick += delta;
             const d = Math.hypot(camera.position.x - h.pos.x, camera.position.z - h.pos.z);
-            if (d < h.radius && h.tick > 0.45) { h.tick = 0; takeDamage(6); }
+            if (d < h.radius && h.tick > 0.45) { h.tick = 0; takeDamage(h.dmg || 6); }
+            if (h.steam) {                                   // the robot's steam (step 27)
+                h.puff -= delta;
+                if (h.puff <= 0) {
+                    h.puff = 0.25;
+                    const a = Math.random() * Math.PI * 2, rr = Math.random() * h.radius;
+                    spawnParticles(new THREE.Vector3(h.pos.x + Math.cos(a) * rr, 0.4 + Math.random() * 0.8, h.pos.z + Math.sin(a) * rr), 0xe8eef2, 6, 1.6);
+                }
+            }
             if (h.life <= 0) bossHazards.splice(i, 1);
             continue;
         }
@@ -6137,9 +6266,80 @@ function updateBossHazards(delta) {
     }
 }
 
+/* The robot, single player (step 27) - the same cycle as tickRobot in boss.js:
+   spin up -> a round every roundMs along the way it faces -> cool down, the
+   stomp on its own clock, and steam after every burst in overdrive. */
+function tickLocalRobot(bot, delta, now, dist) {
+    const G = bot.phase2 ? BOSS_ROBOT.p2 : BOSS_ROBOT;
+    if (!bot.gState) { bot.gState = 'ready'; bot.gReadyAt = now + 2000; }     // a breath before the first burst
+    if (bot.gState === 'ready') {
+        if (bot.hasLOS && dist < 38 && now >= bot.gReadyAt) {
+            bot.gState = 'spin'; bot.gUntil = now + G.spinMs;
+            sfxGatlingSpin(bot.mesh.position, G.spinMs);
+        }
+    } else if (bot.gState === 'spin') {
+        if (now >= bot.gUntil) { bot.gState = 'fire'; bot.gUntil = now + G.fireMs; bot.gNext = now; }
+    } else if (bot.gState === 'fire') {
+        while (now >= bot.gNext && bot.gNext < bot.gUntil) { localGatlingRound(bot, dist); bot.gNext += BOSS_ROBOT.roundMs; }
+        if (now >= bot.gUntil) {
+            bot.gState = 'cool'; bot.gUntil = now + G.coolMs;
+            if (bot.phase2) localSteam(bot);
+        }
+    } else if (bot.gState === 'cool') {
+        if (now >= bot.gUntil) { bot.gState = 'ready'; bot.gReadyAt = now; }
+    }
+    rigGatling(bot.model, bot.gState === 'spin' ? 1 : (bot.gState === 'fire' ? 2 : 0));
+
+    if (dist < BOSS_ROBOT.stompTrigger && now >= (bot.stompAt || 0)) {
+        bot.stompAt = now + BOSS_ROBOT.stompEveryMs;
+        spawnParticles(bot.mesh.position.clone().setY(0.2), 0xffaa33, 24, 5);
+        spawnDust(bot.mesh.position.clone().setY(0.08), 20);
+        sfxExplosion(bot.mesh.position);
+        if (dist < BOSS_ROBOT.stompRadius) takeDamage(BOSS_ROBOT.stompDamage);
+        camShake = Math.min(0.7, camShake + 0.4);
+    }
+}
+
+/* One round, where the robot faces - not where you are. */
+function localGatlingRound(bot, dist) {
+    const from = new THREE.Vector3();
+    bot.parts.muzzle.getWorldPosition(from);
+    const yawNow = bot.mesh.rotation.y, flat = Math.max(1, dist);
+    const spread = 0.055 + flat * 0.0012;
+    // the gun is on its left arm, a metre off its middle: the stream leaves the
+    // barrel and meets the line it faces at your distance - not a metre beside it
+    const p = bot.mesh.position;
+    const aim = new THREE.Vector3(p.x + Math.sin(yawNow) * flat, camera.position.y, p.z + Math.cos(yawNow) * flat);
+    const dir = aim.sub(from).normalize();
+    dir.x += (Math.random() - 0.5) * spread * 2;
+    dir.y += (Math.random() - 0.5) * spread * 1.5;
+    dir.z += (Math.random() - 0.5) * spread * 2;
+    dir.normalize();
+    const b = new THREE.Mesh(botBulletGeo, botBulletMat);
+    b.position.copy(from);
+    b.userData = { dir: dir, life: 0, damage: 8, speed: 48 };
+    scene.add(b);
+    botBullets.push(b);
+    muzzleFlashAt(from, 3.2);
+    const t = performance.now();
+    if (t - (bot.lastShotSfx || 0) > 60) { bot.lastShotSfx = t; sfxSmg(bot.mesh.position); }
+}
+
+function localSteam(bot) {
+    const p = bot.mesh.position.clone().setY(0.12);
+    spawnParticles(p.clone().setY(0.6), 0xe8eef2, 26, 4);
+    sfxSteam(p);
+    bossHazards.push({
+        mesh: null, kind: 'cloud', pos: p, radius: BOSS_ROBOT.steamRadius, life: BOSS_ROBOT.steamLife, tick: 0,
+        dmg: BOSS_ROBOT.steamDamage, steam: true, puff: 0
+    });
+}
+
 function tickBossAbility(bot, delta, now, dist, toPlayer) {
     const id = bot.bossType.id;
     bot.abilityT -= delta;
+
+    if (id === 'robot') { tickLocalRobot(bot, delta, now, dist); return; }
 
     if (id === 'ghost') {
         if (bot.abilityT <= 0) {

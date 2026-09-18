@@ -3730,7 +3730,8 @@ function createRevolverMesh(s) {
 }
 
 const BOSS_TYPES = [
-    { id: 'burst', name: 'BLACK-JACK McCREADY', ability: 'TRIPLE BURST', hp: 900, fireDelay: 850, speed: 3.1, shirt: 0x20242c, pants: 0x1a1a1e, hat: 0x141418, coat: 0x2a1d14, eye: 0xff6a20 },
+    // step 30a: the skeleton cowboy, a model of its own (BOSS_LOOKS); these colours are for the cube rig if it cannot load
+    { id: 'skeleton', name: 'BONES McCREADY', ability: 'QUICK DRAW', hp: 900, fireDelay: 1100, speed: 3.0, shirt: 0xd8ccb0, pants: 0x3a2616, hat: 0x4a2e18, coat: 0x4a3020, eye: 0x7dff5a },
     { id: 'charge', name: 'IRON-LUNG HANK', ability: 'BULL CHARGE', hp: 1100, fireDelay: 1100, speed: 3.6, shirt: 0x4a2a18, pants: 0x2a2018, hat: 0x3a2410, coat: 0x5a3018, eye: 0xffcc44 },
     // step 27: a model of its own (BOSS_LOOKS); these colours are for the cube rig if it cannot load
     { id: 'robot', name: 'TIN-STAR MARSHAL', ability: 'GATLING ARM', hp: 1400, fireDelay: 90, speed: 2.4, radius: 0.95, shirt: 0x5a5e66, pants: 0x3a3d44, hat: 0x2a2c30, coat: 0x6a6e78, eye: 0x33ffee },
@@ -3751,13 +3752,13 @@ const bossHazards = [];
    single player. */
 const BOSS_PHASE2 = {
     at: 0.3, fireScale: 0.75, speedScale: 1.15,
-    burstShots: 5, chargeEvery: 2.8, summonCount: 3, snipeKeep: 18,
+    chargeEvery: 2.8, summonCount: 3, snipeKeep: 18,
     ringEvery: 3, ringRounds: 12, fanSticks: 3, fanSpread: 0.35,
     ghostEvery: 2.2, slamRadius: 9, slamTrigger: 11, slamEvery: 3.2,
     poisonBottles: 2, poisonSpread: 0.22, cloudLife: 8
 };
 const BOSS_PHASE2_TEXT = {
-    burst: 'ENRAGED \u00b7 FIVE-ROUND BURSTS',
+    skeleton: 'ENRAGED \u00b7 QUICKER DRAW',
     charge: 'ENRAGED \u00b7 NON-STOP CHARGES',
     snipe: 'ENRAGED \u00b7 CALLED FOR BACKUP',
     spray: 'ENRAGED \u00b7 RING OF LEAD',
@@ -3829,7 +3830,7 @@ function showBossEnraged(bt, where, loud) {
    - it has no bone masks, so every clip is cut once into a lower half (legs and
      hips) and an upper half. The legs keep walking while the arms shoot.
    ========================================================================= */
-const MODEL_BASE_CDN = 'https://cdn.jsdelivr.net/gh/amitshellef-ui/wild-west-multiplayer@d0d2256187a52670e47ddceed160ad13c481af65/models/';
+const MODEL_BASE_CDN = 'https://cdn.jsdelivr.net/gh/amitshellef-ui/wild-west-multiplayer@08a3cfa6f7e547f42c4e7476704c0a02ba52de7f/models/';   // step 30a: + skeleton.glb
 const MODEL_BASE_LOCAL = '/models/';
 const MODEL_FORCE_CUBES = /[?&]cubes\b/.test(location.search);   // ?cubes = the old rig, for comparisons
 const MODEL_HITBOX_MUL = 1.2;                                       // the same margin the cube rig uses
@@ -3959,6 +3960,28 @@ const MODEL_SPECS = {
         ],
         // the mouth, on the head bone (the snout runs along the bone's +Y)
         muzzle: { bone: 'head', pos: [0, 0.38, 0] }
+    },
+    /* Boss 1 (step 30a), the skeleton cowboy, worn at x1.6. Measured in Three from the
+       file (models/README.md): the planted foot's speed in Walk and Run, the frame each
+       foot lands, the mesh around each group of bones in the standing model. It carries
+       its own revolver: holstered on the right hip in every clip but Shoot and Draw, and
+       its tip is a bone of its own (`muzzle`). Shoot draws (0-7), fires on frame 8, holds
+       and holsters again (18-30): a shot plays 7 -> 12, so the gun leaves the holster in
+       the fade-in - a quick draw - and goes back into it as the aim eases out. */
+    skeleton: {
+        file: 'skeleton.glb',
+        vWalk: 0.625, vRun: 2.335,
+        // it walks at 3.0 (x1.6 = Run x0.8), patrols at 1.65 (Walk x1.65), and 3.45 enraged
+        gait: { idle: 0.3, runUp: 2.6, runDown: 2.2, walkTs: [0.6, 2.2], runTs: [0.6, 2.2] },
+        steps: { Walk: [0, 16 / 24], Run: [0, 8 / 24] },
+        shoot: { from: 7 / 24, to: 12 / 24, hold: 0.45, fadeIn: 0.1, fadeOut: 0.3 },
+        hit: [
+            { bone: 'hips', center: [0, 0.50, 0.01], size: [0.56, 1.00, 0.38] },      // legs, boots and chaps
+            // torso: stops where the head box starts (1.54 after MODEL_HITBOX_MUL), as on the robot
+            { bone: 'spine', center: [0, 1.26, -0.03], size: [0.50, 0.47, 0.36] },
+            { bone: 'head', center: [0, 1.726, 0.0], size: [0.28, 0.32, 0.30], head: true }   // skull and hat crown, not the brim
+        ],
+        muzzle: { bone: 'muzzle', pos: [0, 0, 0] }
     }
     /* A new model is one more entry here. What it can carry:
          file              the .glb in models/ (uploaded; pin MODEL_BASE_CDN to the new commit)
@@ -3990,8 +4013,9 @@ const MODEL_SPECS = {
      glow   a soft glow in the boss's eye colour, so each of them reads differently */
 const BOSS_LOOK_DEFAULT = { model: 'cowboy', scale: 1.75, tint: 0.35, glow: 0.12 };
 const BOSS_LOOKS = {
-    burst: {}, charge: {},
-    robot: { model: 'robot', scale: 1.5, tint: 0 },       // step 27: head at ~2.6m, the server's eye line 2.83
+    skeleton: { model: 'skeleton', scale: 1.6, tint: 0, glow: 0.1 },    // step 30a: head at ~2.6m, like the robot
+    charge: {},
+    robot:{ model: 'robot', scale: 1.5, tint: 0 },       // step 27: head at ~2.6m, the server's eye line 2.83
     snipe: {}, spray: {},
     dynamite: {}, ghost: {}, slam: {}, poison: {},
     dragon: { model: 'dragon', scale: 2.2, tint: 0, glow: 0.08 }       // step 28: head at 2.8m, 4.2m wing to wing
@@ -6610,7 +6634,7 @@ function botShoot(bot, dist) {
         return;
     }
 
-    const shots = ability === 'burst' ? (bot.phase2 ? BOSS_PHASE2.burstShots : 3) : 1;
+    const shots = 1;
     const baseDir = new THREE.Vector3().subVectors(camera.position, muzzlePos).normalize();
     let spread = (bot.isBoss ? 0.022 : 0.035) + dist * 0.0016;
     if (!bot.isBoss) spread *= banditDifficulty(wave).spreadScale;
@@ -6619,14 +6643,14 @@ function botShoot(bot, dist) {
     if (ability === 'charge') spread = 0.04;
 
     let dmg = bot.isBoss ? 15 : 10;
+    if (ability === 'skeleton') { dmg = 24; spread = 0.02 + dist * 0.0014; }     // GUN.skeleton in boss.js
     if (ability === 'snipe') dmg = 32;
     if (ability === 'spray') dmg = 8;
     if (ability === 'slam') dmg = 18;
 
     for (let i = 0; i < shots; i++) {
         const dir = baseDir.clone();
-        const off = ability === 'burst' ? (i - (shots - 1) / 2) * 0.055 : 0;
-        dir.x += (Math.random() - 0.5) * spread * 2 + off;
+        dir.x += (Math.random() - 0.5) * spread * 2;
         dir.y += (Math.random() - 0.5) * spread * 1.5;
         dir.z += (Math.random() - 0.5) * spread * 2;
         dir.normalize();
@@ -6636,7 +6660,7 @@ function botShoot(bot, dist) {
         b.userData = {
             dir: dir, life: 0,
             damage: dmg,
-            speed: ability === 'snipe' ? 72 : (ability === 'spray' ? 48 : 42)
+            speed: ability === 'snipe' ? 72 : (ability === 'spray' ? 48 : (ability === 'skeleton' ? 46 : 42))
         };
         scene.add(b);
         botBullets.push(b);

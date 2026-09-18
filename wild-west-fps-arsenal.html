@@ -1064,6 +1064,7 @@ function playRemoteShot(m) {
 
     _shotOrigin.set(m.o[0], m.o[1], m.o[2]);
     const R = body && body.rig.model;
+    if (body) body.reload = null;                 // a shot ends a reload (the clip too: rigShoot)
     if (R && R.kind === 'model') {
         rigSetWeapon(R, m.w);                     // whatever they are really firing
         rigShoot(R);
@@ -1288,7 +1289,17 @@ function initNetwork() {
             PLAYERS[p.id] = p;
             indexSlot(p);
             if (p.downed) setDownedMarker(p.id, true);
+            // a revive already under way when we walked in (step 26c): who is kneeling, and how far along
+            if (p.downed && p.revive && p.revive.by) {
+                REVIVE.progress[p.id] = { by: p.revive.by, startedAt: performance.now() - (p.revive.ms - p.revive.left), ms: p.revive.ms };
+            }
         });
+        if (meInRoom && meInRoom.downed && meInRoom.revive && meInRoom.revive.by) {
+            REVIVE.me.by = meInRoom.revive.by;
+            REVIVE.me.startedAt = performance.now() - (meInRoom.revive.ms - meInRoom.revive.left);
+            REVIVE.me.ms = meInRoom.revive.ms;
+            REVIVE.progress[NET.id] = { by: meInRoom.revive.by, startedAt: REVIVE.me.startedAt, ms: REVIVE.me.ms };
+        }
         // Our own bandits are not this room's bandits, and neither is our boss
         clearServerBandits();
         clearBanditBullets();
@@ -1632,6 +1643,11 @@ function initNetwork() {
 
     /* --- Remote gunfire (step 7). Cosmetic: no damage is applied. --- */
     NET.socket.on('player-shot', function (m) { playRemoteShot(m); });
+    NET.socket.on('player-reload', function (m) {
+        if (!m || !m.id || typeof m.ms !== 'number') return;
+        const body = remoteBodies[m.id];
+        if (body) remoteReload(body, m.ms);
+    });
 
     /* --- Where everybody is (steps 3 and 4, batched in step 14) ---
        One packet for the whole room, fifteen times a second, carrying only the
@@ -1838,8 +1854,9 @@ function sfxLeverCock() {
     noiseBurst(d, { type: 'bandpass', freq: 2300, q: 6, dur: 0.06, vol: 0.45, delay: 0.11 });
     tone(d, { type: 'square', f0: 850, f1: 480, dur: 0.05, vol: 0.09, delay: 0.11 });
 }
-function sfxShellInsert(i) {
-    const d = chain(null, 0.5, 1); if (!d) return;
+function sfxShellInsert(i, pos) {
+    // pos: somebody else loading, heard only from close by (step 26c)
+    const d = pos ? chain(pos, 0.3, 12) : chain(null, 0.5, 1); if (!d) return;
     noiseBurst(d, { type: 'bandpass', freq: 2700 + Math.random() * 900, q: 5, dur: 0.06, vol: 0.5, delay: i * 0.001 });
     tone(d, { type: 'sine', f0: 1200 + Math.random() * 400, f1: 700, dur: 0.05, vol: 0.08, delay: i * 0.001 });
 }
@@ -4024,7 +4041,7 @@ function rigShoot(rig) {
 /* A flinch in the upper half. Never over a shot, and at most every 0.4s so a
    stream of pellets does not freeze the body in one pose. */
 function rigHit(rig) {
-    if (!rig || rig.kind !== 'model' || rig.full || rig.overlay === 'Shoot') return;
+    if (!rig || rig.kind !== 'model' || rig.full || rig.overlay === 'Shoot' || rig.overlay === 'Reload') return;
     const now = performance.now();
     if (now - rig.lastHit < 400) return;
     const a = rigAction(rig, 'Hit', 'up');
@@ -4038,6 +4055,27 @@ function rigHit(rig) {
     rig.overlay = 'Hit';
     rig.overlayStop = a.getClip().duration;
     rig.overlayUntil = now + a.getClip().duration * 1000;
+}
+
+/* A reload (step 26c), in the upper half only - the legs keep going. The clip is
+   one magazine change of 1.5s; a reload of `ms` plays it a whole number of times,
+   sped up or slowed down to fit: a full Winchester (3.2s) twice at x0.94, a full
+   SMG (9.8s) seven times at x1.07. A shot cuts it short (rigShoot takes the upper
+   half over), as a shot does in the game; a flinch does not. */
+function rigReload(rig, ms) {
+    if (!rig || rig.kind !== 'model' || rig.full) return;
+    const a = rigAction(rig, 'Reload', 'up');
+    if (!a) return;
+    const dur = a.getClip().duration, secs = ms / 1000;
+    const n = Math.max(1, Math.round(secs / dur));
+    a.reset(); a.setLoop(THREE.LoopRepeat, n); a.clampWhenFinished = true;
+    a.setEffectiveWeight(1); a.setEffectiveTimeScale(n * dur / secs);
+    a.play();
+    if (rig.upper && rig.upper !== a) rig.upper.crossFadeTo(a, 0.15, false);
+    rig.upper = a;
+    rig.overlay = 'Reload';
+    rig.overlayStop = Infinity;
+    rig.overlayUntil = performance.now() + ms;
 }
 
 /* The clip is 2s, but a dead bandit is hidden at 1.9s (the boss at 2.4s) - played
@@ -4971,6 +5009,22 @@ function setRemoteReviving(id, on) {
     else if (R.full === 'Revive') rigStand(R, 0.25);
 }
 
+/* Somebody reloading (step 26c): the soldier changes magazines for as long as the
+   reload lasts, and each round clicks in at the moment it does for them (0.35s,
+   then every 0.3s). A shot of theirs ends both - see playRemoteShot. */
+function remoteReload(body, ms) {
+    if (body.alive === false) return;
+    rigReload(body.rig.model, ms);
+    body.reload = { at: performance.now(), n: Math.max(0, Math.round((ms / 1000 - 0.8) / 0.3)), done: 0 };
+}
+function tickRemoteReload(body) {
+    const r = body.reload;
+    if (!r) return;
+    if (body.alive === false || r.done >= r.n) { body.reload = null; return; }
+    const t = (performance.now() - r.at) / 1000;
+    while (r.done < r.n && t >= 0.35 + 0.3 * r.done) { r.done++; sfxShellInsert(r.done, body.mesh.position); }
+}
+
 /* Hit, as the server tells it: a flinch in the upper body and a short flash that
    settles back to the player's own glow. */
 function remoteHurt(body) {
@@ -5019,10 +5073,14 @@ function updateRemoteBodies(delta) {
                 body.mesh.rotation.y = (PLAYERS[id].yaw || 0) + Math.PI;
                 // already lying there when we arrived: no fall, no sound
                 startRemoteDeath(body, { downed: !!PLAYERS[id].downed, instant: true });
+            } else if (remoteIsReviving(id) && body.rig.model.kind === 'model') {
+                // already kneeling over somebody when we arrived (step 26c)
+                rigFull(body.rig.model, 'Revive', { loop: true, instant: true });
             }
         }
         applyRemoteTransform(PLAYERS[id], body, d);
         tickRemoteFlash(body, d);
+        tickRemoteReload(body);
         // connection lost: gone from sight until they come back
         if (PLAYERS[id].away) { body.mesh.visible = false; body.awayHidden = true; }
         else if (body.awayHidden) { body.mesh.visible = true; body.awayHidden = false; }
@@ -7172,6 +7230,11 @@ function startReload() {
     WPN.shellsToLoad = Math.min(mag - clip, reserve);
     WPN.reloadShells = 0;
     updateAmmoUI();
+    // the others see the soldier change magazines (step 26c) - the same length as
+    // the reload cycle in updateWeapon: 0.35s, 0.3s a round, 0.45s to close up
+    if (NET.connected && NET.socket && NET.room) {
+        NET.socket.emit('reload', { ms: Math.round((0.35 + WPN.shellsToLoad * 0.3 + 0.45) * 1000) });
+    }
 }
 
 /* ---------- Weapon animation ---------- */

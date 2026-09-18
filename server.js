@@ -180,14 +180,21 @@ function newToken() {
 }
 
 /* What other players may know about a player. Deliberately short: no token,
-   no timers, no rate-limit bookkeeping. */
+   no timers, no rate-limit bookkeeping. One exception (step 26c): a body lying
+   there with a team mate already kneeling over it says who, and how much of
+   the revive is left - otherwise somebody who walks in halfway through sees the
+   reviver standing and a bar that never started. */
 function publicPlayer(p) {
-    return {
+    const out = {
         id: p.id, slot: p.slot,
         x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
         health: p.health, alive: p.alive, away: !!p.away, downed: !!p.downed,
         kills: p.kills, deaths: p.deaths
     };
+    if (p.downed && p.revive) {
+        out.revive = { by: p.revive.by, ms: REVIVE_MS, left: Math.max(0, REVIVE_MS - (Date.now() - p.revive.startedAt)) };
+    }
+    return out;
 }
 
 /* The simulation's view of the world: everybody who is actually connected. An
@@ -715,7 +722,8 @@ io.on("connection", (socket) => {
         lastBanditHitAt: 0,
         lastBossHitAt: 0,
         lastDeltaAt: 0,
-        lastRoomAt: 0
+        lastRoomAt: 0,
+        reloadAt: 0
     };
     const me = players[socket.id];
     socket.data.pid = me.id;
@@ -823,6 +831,21 @@ function registerHandlers(socket) {
         socket.to(p.room).emit("player-shot", {
             id: p.id, w: shot.w, o: shot.o, e: shot.e
         });
+    });
+
+    /* ---- Reload relay (step 26c): so the others see the soldier change
+       magazines. Looks only, like the shot relay - the server does not count
+       ammunition and does not start now. `ms` is how long the reload takes,
+       worked out by the page from the rounds it is loading. */
+    socket.on("reload", (m) => {
+        const p = players[socket.data.pid];
+        if (!p || !p.room || !p.alive || p.downed || p.away) return;
+        const ms = m && m.ms;
+        if (typeof ms !== "number" || !Number.isFinite(ms) || ms < 300 || ms > 12000) return;
+        const now = Date.now();
+        if (now - p.reloadAt < 500) return;
+        p.reloadAt = now;
+        socket.to(p.room).emit("player-reload", { id: p.id, ms: Math.round(ms) });
     });
 
     /* =====================================================================

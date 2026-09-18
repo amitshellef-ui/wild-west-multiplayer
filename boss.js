@@ -12,8 +12,9 @@
    The ten of them (eight until step 27, nine until 28) differ in more than health. Each has an
    ability, and the ability is the reason the fight feels different:
 
-     burst     three rounds per trigger pull
-     charge    closes the distance at a run and hits you with his shoulder
+     skeleton  a quick-draw revolver, one round a draw (step 30a - the first boss,
+               instead of the old triple-burst gunman; its abilities come in 30b-30d)
+     charge   closes the distance at a run and hits you with his shoulder
      robot     spins up a gatling, plants its feet and hoses where it faces
                (step 27 - see ROBOT)
      snipe     one accurate round from further than you can answer
@@ -40,7 +41,9 @@ const bandits = require("./bandits");
    model. Anything here that the client also reads - the name, the ability
    label, the health - has to match it, so the bar says what the fight is. */
 const BOSS_TYPES = [
-    { id: "burst", name: "BLACK-JACK McCREADY", ability: "TRIPLE BURST", hp: 900, fireDelay: 850, speed: 3.1 },
+    // step 30a - the skeleton cowboy, a model of its own. It draws from the hip, fires one
+    // round and holsters again, so the delay is a whole draw (GUN.skeleton)
+    { id: "skeleton", name: "BONES McCREADY", ability: "QUICK DRAW", hp: 900, fireDelay: 1100, speed: 3.0 },
     { id: "charge", name: "IRON-LUNG HANK", ability: "BULL CHARGE", hp: 1100, fireDelay: 1100, speed: 3.6 },
     // step 27 - the first boss with a model of its own. Its gun is a cycle, not a
     // fire delay (see ROBOT); fireDelay is the gap between rounds while it fires.
@@ -129,7 +132,7 @@ const DRAGON = {
    little quicker and are drawn enraged; each also gets one thing of its own, so
    the end of a fight is not just the start of it with less health left.
 
-     burst     five rounds a pull instead of three
+     skeleton  only the common part for now (draws a third faster) - step 30
      charge    charges back to back
      snipe     calls three bandits to her and backs off to 18 metres
      spray     every 3 seconds, a ring of 12 rounds in every direction
@@ -143,7 +146,6 @@ const PHASE2 = {
     at: 0.3,
     fireScale: 0.75,           // x the time between shots
     speedScale: 1.15,
-    burstShots: 5,
     chargeEveryMs: 2800,
     summonCount: 3,
     snipeKeepDistance: 18,
@@ -162,7 +164,7 @@ const PHASE2 = {
 
 /* Per-ability gunplay. Anything missing falls back to the first row. */
 const GUN = {
-    burst: { shots: 3, spread: 0.022, perMetre: 0.0016, damage: 15, speed: 42, spacing: 0.055 },
+    skeleton: { shots: 1, spread: 0.02, perMetre: 0.0014, damage: 24, speed: 46 },
     charge: { shots: 1, spread: 0.04, perMetre: 0, damage: 15, speed: 42 },
     snipe: { shots: 1, spread: 0.006, perMetre: 0, damage: 32, speed: 72 },
     spray: { shots: 1, spread: 0.055, perMetre: 0.0012, damage: 8, speed: 48 },
@@ -284,7 +286,7 @@ function splash(room, players, x, z, radius, damage, falloff, sink, y) {
 
 /* ---- Shooting ---------------------------------------------------------- */
 function fire(room, b, target, dist, sink) {
-    const g = GUN[b.type.id] || GUN.burst;
+    const g = GUN[b.type.id] || GUN.skeleton;
     const ox = b.x, oy = BOSS.eyeHeight, oz = b.z;
     const tx = target.x, ty = target.y || 1.72, tz = target.z;
 
@@ -293,7 +295,7 @@ function fire(room, b, target, dist, sink) {
     bx /= len; by /= len; bz /= len;
 
     const spread = g.spread + dist * (g.perMetre || 0);
-    const shots = (b.phase === 2 && b.type.id === "burst") ? PHASE2.burstShots : g.shots;
+    const shots = g.shots;
 
     for (let i = 0; i < shots; i++) {
         const off = g.spacing ? (i - (shots - 1) / 2) * g.spacing : 0;

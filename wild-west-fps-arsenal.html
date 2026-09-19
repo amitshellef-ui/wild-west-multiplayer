@@ -570,6 +570,7 @@ function hideVictory() {
    of us follows straight after and puts everybody at a spawn point. */
 function onRoomRestarted(m) {
     kills = 0; deaths = 0; localBossDamage = 0; localBossKills = 0;
+    setPlayerMaxHealth(m.maxHealth || 100);            // step 32: back to 100
     resetGame();
     SCORES.rows = Array.isArray(m.scores) ? m.scores : [];
     wave = m.wave || 1;
@@ -1431,6 +1432,7 @@ function initNetwork() {
         if (!data) return;
         NET.room = data.code;
         if (data.mode) NET.mode = data.mode;
+        setPlayerMaxHealth(data.maxHealth || 100);        // step 32: the room's (older servers: 100)
         SCORES.rows = Array.isArray(data.scores) ? data.scores : [];
         Object.keys(reviveMarkers).forEach(function (id) { setDownedMarker(id, false); });
         REVIVE.progress = {};
@@ -1841,6 +1843,13 @@ function initNetwork() {
     NET.socket.on('room-restarted', function (m) {
         hideVictory();
         onRoomRestarted(m || {});
+    });
+
+    // step 32: a boss is down - everybody's most health is 25 higher (the health itself
+    // follows as the usual player-health)
+    NET.socket.on('max-health', function (m) {
+        if (!m) return;
+        setPlayerMaxHealth(m.max, m.add || 25);
     });
 
     /* --- Remote gunfire (step 7). Cosmetic: no damage is applied. --- */
@@ -5376,7 +5385,7 @@ function applyRemoteTransform(p, body, delta) {
 /* The rig already carries the bandit health bar; reuse it rather than build a
    second one. Hidden at full health so the town is not full of floating bars. */
 function showRemoteHealth(body, health) {
-    const pct = Math.max(0, Math.min(1, health / 100));
+    const pct = Math.max(0, Math.min(1, health / playerMaxHealth));     // the room's most health (step 32)
     const P = body.rig.parts;
     const show = pct < 1 && pct > 0;
     P.barBg.visible = show;
@@ -8155,6 +8164,7 @@ function switchWeapon(idx) {
    ========================================================================= */
 const MAX_CLIP = 8;
 let playerHealth = 100, playerSprint = 100;
+let playerMaxHealth = 100;            // step 32: grows by 25 with every boss the room brings down (online)
 let kills = 0, deaths = 0;
 let clip = MAX_CLIP, reserve = 64;
 let isReloading = false, isAiming = false, isLocked = false;
@@ -8266,11 +8276,21 @@ const ui = {
 };
 
 function updateHealthUI() {
-    const p = Math.max(0, playerHealth);
-    ui.hpFill.style.width = p + '%';
+    // step 32: the bar is the share of the room's most health; the number is the health itself
+    const p = Math.max(0, playerHealth), pct = Math.min(100, p / playerMaxHealth * 100);
+    ui.hpFill.style.width = pct + '%';
     ui.hpText.innerText = Math.round(p);
-    ui.hpFill.style.background = p <= 30 ? 'linear-gradient(180deg,#ff3b2b,#7a1200)'
-        : (p <= 60 ? 'linear-gradient(180deg,#e0a83c,#8a5c12)' : 'linear-gradient(180deg,#d94a2b,#8e2412)');
+    ui.hpFill.style.background = pct <= 30 ? 'linear-gradient(180deg,#ff3b2b,#7a1200)'
+        : (pct <= 60 ? 'linear-gradient(180deg,#e0a83c,#8a5c12)' : 'linear-gradient(180deg,#d94a2b,#8e2412)');
+}
+/* Step 32: every boss the room brings down raises everybody's most health by 25
+   (the server's number - `max-health`, and in room-joined / room-restarted). */
+function setPlayerMaxHealth(max, announce) {
+    if (typeof max !== 'number' || !(max > 0)) max = 100;
+    const up = max > playerMaxHealth;
+    playerMaxHealth = max;
+    if (announce && up) pushFeed('MAX HEALTH +' + announce + ' → ' + max);
+    updateHealthUI();
 }
 function updateSprintUI() {
     ui.spFill.style.width = Math.max(0, playerSprint) + '%';
@@ -8381,8 +8401,8 @@ function takeDamage(amount) {
     }
 }
 function onKillReward() {
-    reportHealthDelta(Math.min(4, 100 - playerHealth));
-    playerHealth = Math.min(100, playerHealth + 4);
+    reportHealthDelta(Math.min(4, playerMaxHealth - playerHealth));
+    playerHealth = Math.min(playerMaxHealth, playerHealth + 4);
     playerSprint = Math.min(100, playerSprint + 12);
     wpnAmmo[currentWpn].reserve = reserve = reserve + 6;
     updateHealthUI(); updateSprintUI(); updateAmmoUI();
@@ -8394,7 +8414,7 @@ function gameOver() {
     ui.menu.style.display = 'flex';
 }
 function resetGame() {
-    playerHealth = 100; playerSprint = 100;
+    playerHealth = playerMaxHealth; playerSprint = 100;
     unlockedWeapons = 1; currentWpn = 0;
     for (let i = 0; i < ARSENAL.length; i++) {
         wpnAmmo[i].clip = ARSENAL[i].mag;
@@ -9082,9 +9102,9 @@ function updatePlayer(delta, now) {
     }
 
     // Slow health regen out of combat
-    if (playerHealth > 0 && playerHealth < 100 && now - lastDamageTime > 6500) {
+    if (playerHealth > 0 && playerHealth < playerMaxHealth && now - lastDamageTime > 6500) {
         const before = playerHealth;
-        playerHealth = Math.min(100, playerHealth + 4.5 * delta);
+        playerHealth = Math.min(playerMaxHealth, playerHealth + 4.5 * delta);
         reportHealthDelta(playerHealth - before);
         updateHealthUI();
     }

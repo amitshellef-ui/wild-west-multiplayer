@@ -102,6 +102,7 @@ function pickLobby() {
 
 const rooms = {};                      // code -> room record
 const players = {};                    // player id -> player record (see RECONNECTING)
+const MAX_HEALTH = 100;                // where every room starts (step 32: it grows - maxHealthOf)
 
 function createRoom(code, modeId) {
     rooms[code] = {
@@ -124,6 +125,7 @@ function resetRoomState(room, now) {
     room.won = null;
     room.wipeAt = 0;
     room.startedAt = now;
+    room.maxHealth = MAX_HEALTH;              // step 32: back to 100 with the game
 }
 createRoom(PUBLIC_ROOM, DEFAULT_MODE);
 
@@ -161,8 +163,25 @@ function dropRoomIfEmpty(code) {
     }
 }
 
-const MAX_HEALTH = 100;
 const RESPAWN_MS = 4000;
+/* Step 32: every boss the room brings down (all but the last - that one ends the
+   game) raises everybody's most health by BOSS_HEALTH_BONUS and fills it: 100, 125,
+   150... for everyone in the room, whoever fired the last shot. The room keeps it
+   until a new game (or until it empties); a latecomer walks in with the room's. */
+const BOSS_HEALTH_BONUS = 25;
+function maxHealthOf(p) {
+    const room = p && p.room ? rooms[p.room] : null;
+    return (room && room.maxHealth) || MAX_HEALTH;
+}
+function raiseRoomHealth(room) {
+    room.maxHealth = (room.maxHealth || MAX_HEALTH) + BOSS_HEALTH_BONUS;
+    io.to(room.code).emit("max-health", { max: room.maxHealth, add: BOSS_HEALTH_BONUS });
+    for (const id in players) {
+        const p = players[id];
+        // the downed and the dead get the new top when they are back on their feet
+        if (p.room === room.code && p.alive && !p.downed) setHealth(p, p.health + BOSS_HEALTH_BONUS, null, false);
+    }
+}
 
 /* =========================================================================
    RECONNECTING (step 22)
@@ -440,7 +459,7 @@ function readCode(v) {
 
 /* ---- Health ---- */
 function setHealth(p, value, attackerId, headshot) {
-    p.health = Math.max(0, Math.min(MAX_HEALTH, value));
+    p.health = Math.max(0, Math.min(maxHealthOf(p), value));
     io.to(p.room).emit("player-health", {
         id: p.id,
         health: p.health,
@@ -482,7 +501,7 @@ function respawnPlayer(p) {
     p.x = s[0]; p.y = 1.72; p.z = s[1];
     p.yaw = Math.random() * Math.PI * 2;
     p.pitch = 0;
-    p.health = MAX_HEALTH;
+    p.health = maxHealthOf(p);
     p.alive = true;
     p.downed = false;
     p.revive = null;
@@ -701,7 +720,7 @@ function placeInRoom(socket, p, code) {
     const s = pickSpawn(rooms[code]);
     p.x = s[0]; p.y = 1.72; p.z = s[1];
     p.yaw = 0; p.pitch = 0;
-    p.health = MAX_HEALTH;
+    p.health = maxHealthOf(p);               // step 32: the room's, which a latecomer shares
     p.alive = true;
     p.downed = false;
     p.revive = null;
@@ -715,7 +734,8 @@ function placeInRoom(socket, p, code) {
         banditHp: waves.difficultyFor(rooms[code]).health,
         scores: scoreRows(code),
         mission: missions.publicState(rooms[code], Date.now()),
-        won: rooms[code].won || null
+        won: rooms[code].won || null,
+        maxHealth: maxHealthOf(p)
     });
     socket.to(code).emit("player-joined", publicPlayer(p));
 
@@ -750,6 +770,7 @@ io.on("connection", (socket) => {
             scores: scoreRows(back.room),
             mission: missions.publicState(room, Date.now()),
             won: room.won || null,
+            maxHealth: maxHealthOf(back),
             resumed: true
         });
         socket.to(back.room).emit("player-back", publicPlayer(back));
@@ -1104,8 +1125,9 @@ function registerHandlers(socket) {
                 headshot: head > 0,
                 nextIn: boss.BOSS.nextBossMs
             });
+            raiseRoomHealth(room);                 // step 32: +25 most health for everybody in the room
             console.log("Boss down:", res.boss.type.name, "in", room.code,
-                "by", shooter.id.slice(0, 6));
+                "by", shooter.id.slice(0, 6), "- most health now", room.maxHealth);
         }
     });
 
@@ -1126,7 +1148,7 @@ function registerHandlers(socket) {
         if (now - p.lastDeltaAt < 200) return;
         p.lastDeltaAt = now;
 
-        const d = Math.max(-MAX_HEALTH, Math.min(20, m.d));
+        const d = Math.max(-maxHealthOf(p), Math.min(20, m.d));
         if (d === 0) return;
         setHealth(p, p.health + d, null, false);
     });
@@ -1180,7 +1202,8 @@ function registerHandlers(socket) {
             wave: room.wave || 1,
             cap: waves.capFor(room),
             banditHp: waves.difficultyFor(room).health,
-            scores: scoreRows(code)
+            scores: scoreRows(code),
+            maxHealth: room.maxHealth                 // step 32: 100 again
         });
         // then everybody on their feet, at a spawn point, full health
         for (const id in players) {

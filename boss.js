@@ -16,7 +16,9 @@
                instead of the old triple-burst gunman), and HIGH NOON: it marks a
                player, counts three seconds down and fires one shot of 80 - unless
                the player is in cover, or somebody shoots it in the skull first
-               (step 30b - see SKELETON). Its other abilities come in 30c-30d.
+               (step 30b - see SKELETON). At half health, once, it falls apart and
+               comes back together behind somebody (step 30c - BONE SCATTER). The
+               last ability comes in 30d.
      charge   closes the distance at a run and hits you with his shoulder
      robot     spins up a gatling, plants its feet and hoses where it faces
                (step 27 - see ROBOT)
@@ -142,8 +144,24 @@ const DRAGON = {
 const SKELETON = {
     duelFirstMs: 6000, duelEveryMs: 15000, duelRange: 32,
     countdownMs: 3000, duelDamage: 80, missBeyond: 45,
-    staggerMs: 2000
+    staggerMs: 2000,
+    // step 30c - BONE SCATTER, once, the first time its health reaches scatterAt
+    scatterAt: 0.5, collapseMs: 1000, goneMs: 2000, riseMs: 1250,
+    meleeMs: 833, meleeHitMs: 375, meleeRange: 3.2, meleeDamage: 30,
+    behindDist: 2.4, afterScatterMs: 5000
 };
+
+/* ---- The skeleton's BONE SCATTER (step 30c) ----------------------------------
+   Once only, the first time it is down to half its health: it collapses into a
+   heap (collapseMs - it can still be shot), is gone for goneMs - no body, no hits,
+   its bones flying through the air to where it will stand again - and comes back
+   together (riseMs) behind one player picked at random, behindDist behind where
+   they are looking. Then a two-handed blow (Melee - lands meleeHitMs in) of
+   meleeDamage on everybody within meleeRange in front of it. The warning is the
+   rattle of the bones, from where it is going to be: turn round and shoot it while
+   it rises, or be somewhere else when it swings. A duel it was counting is called
+   off, and it does not start another for afterScatterMs. b.scatter = { e, until,
+   target } - e is collapse / gone / rise / strike, in the snapshot too. */
 
 /* ---- Phase two (step 21) ---------------------------------------------------
    Below 30% health every boss changes. All of them fire a third faster, move a
@@ -534,9 +552,99 @@ function duelTarget(room, players, b) {
     return seen.length ? seen[Math.floor(Math.random() * seen.length)] : null;
 }
 
+/* BONE SCATTER (step 30c): who it comes back behind - anybody standing, at random,
+   however far away, so hanging back is no answer. */
+function scatterTarget(room, players) {
+    const up = [];
+    for (const id in players) {
+        const p = players[id];
+        if (p.room === room.code && p.alive) up.push(p);
+    }
+    return up.length ? up[Math.floor(Math.random() * up.length)] : null;
+}
+
+/* behindDist behind where they are looking (a player looks along -sin/-cos of
+   their yaw), swung sideways and nearer or further until the body fits there and
+   can walk straight to them - never through a wall into the next room. Only with
+   their back to a wall and nothing at either side does it come round in front. */
+function spotBehind(p, radius) {
+    const yaw = typeof p.yaw === "number" ? p.yaw : 0;
+    const back = Math.atan2(Math.sin(yaw), Math.cos(yaw));   // the direction behind them, as a heading
+    const swings = [[0, 0.4, -0.4, 0.8, -0.8, 1.2, -1.2, 1.5, -1.5], [2.2, -2.2, Math.PI]];
+    const dists = [SKELETON.behindDist, SKELETON.behindDist + 0.7, SKELETON.behindDist - 0.5];
+    for (const group of swings) {
+        for (const r of dists) {
+            for (const s of group) {
+                const a = back + s;
+                const x = p.x + Math.sin(a) * r, z = p.z + Math.cos(a) * r;
+                if (nav.collidesAt(x, z, radius) || !nav.lineClear(p.x, p.z, x, z)) continue;
+                return { x, z };
+            }
+        }
+    }
+    return null;
+}
+
+function startScatter(b, now, sink) {
+    b.scattered = true;                                          // once only
+    b.duel = null;                                               // a count it was running is off
+    b.staggerUntil = 0;
+    b.scatter = { e: "collapse", until: now + SKELETON.collapseMs, target: "" };
+    sink.scatters.push({ e: "collapse", p: [round2(b.x), round2(b.z)], ms: SKELETON.collapseMs });
+}
+
+/* collapse -> gone -> rise -> strike -> back to the fight */
+function tickScatter(room, b, players, now, sink) {
+    const s = b.scatter;
+    if (s.e === "strike" && !s.struck && now >= s.hitAt) {
+        s.struck = true;
+        const fx = Math.sin(b.yaw), fz = Math.cos(b.yaw), hit = [];
+        for (const id in players) {
+            const p = players[id];
+            if (p.room !== room.code || !p.alive) continue;
+            const dx = p.x - b.x, dz = p.z - b.z, d = Math.hypot(dx, dz);
+            // the swing is in front of it, not all round
+            if (d > SKELETON.meleeRange || (d > 0.8 && (dx * fx + dz * fz) / d < 0.3)) continue;
+            hit.push(p.id);
+            sink.hits.push({ playerId: p.id, damage: SKELETON.meleeDamage, from: "boss" });
+        }
+        sink.scatters.push({ e: "blow", p: [round2(b.x), round2(b.z)], hit: hit });
+    }
+    if (now < s.until) return;
+    if (s.e === "collapse") {
+        // gone: its bones on their way to whoever it picked. Where exactly is
+        // decided when they arrive - behind the way that player is looking then.
+        const t = scatterTarget(room, players);
+        s.e = "gone"; s.until = now + SKELETON.goneMs; s.target = t ? t.id : "";
+        sink.scatters.push({ e: "gone", p: [round2(b.x), round2(b.z)], tgt: s.target, ms: SKELETON.goneMs });
+    } else if (s.e === "gone") {
+        const t = s.target && players[s.target];
+        const spot = t && t.room === room.code && t.alive ? spotBehind(t, b.radius || BOSS.radius) : null;
+        if (spot) {
+            b.x = spot.x; b.z = spot.z;
+            b.yaw = Math.atan2(t.x - b.x, t.z - b.z);
+            b.path = null; b.repathAt = 0;
+            b.lastX = b.x; b.lastZ = b.z;
+        }
+        // nobody to come back behind (they went down, or left): it rises where it fell
+        s.e = "rise"; s.until = now + SKELETON.riseMs;
+        sink.scatters.push({ e: "rise", p: [round2(b.x), round2(b.z)], y: round2(b.yaw), tgt: spot ? s.target : "", ms: SKELETON.riseMs });
+    } else if (s.e === "rise") {
+        s.e = "strike"; s.until = now + SKELETON.meleeMs; s.hitAt = now + SKELETON.meleeHitMs; s.struck = false;
+        sink.scatters.push({ e: "strike", ms: SKELETON.meleeMs });
+    } else {
+        b.scatter = null;
+        b.abilityAt = Math.max(b.abilityAt, now + SKELETON.afterScatterMs);
+        b.lastShot = now + 400;                                  // a breath before the revolver
+        sink.scatters.push({ e: "done" });
+    }
+}
+
 /* mark -> count down -> one shot. b.duel = { target, until }; b.staggerUntil after
    a skull shot broke it (duelHeadshot). Both are in the snapshot for latecomers. */
 function tickSkeleton(room, b, players, near, now, dt, sink) {
+    if (b.scatter) { tickScatter(room, b, players, now, sink); return; }
+    if (!b.scattered && b.health <= b.maxHealth * SKELETON.scatterAt) { startScatter(b, now, sink); return; }
     if (b.staggerUntil && now < b.staggerUntil) return;         // down on one knee
     if (b.duel) {
         const p = players[b.duel.target];
@@ -762,8 +870,9 @@ function stepBoss(room, b, players, now, dt, sink) {
     /* --- walking --- */
     const charging = b.chargeUntil && now < b.chargeUntil;
     // the robot plants its feet while the barrels spin and fire (step 27), and the
-    // skeleton while it counts a duel down or is down on one knee (step 30b)
-    const dueling = !!b.duel || (b.staggerUntil && now < b.staggerUntil);
+    // skeleton while it counts a duel down or is down on one knee (step 30b), and
+    // all through BONE SCATTER (step 30c) - no steps and no revolver
+    const dueling = !!b.duel || (b.staggerUntil && now < b.staggerUntil) || !!b.scatter;
     const planted = b.gState === "spin" || b.gState === "fire" || dueling;
     const baseSpeed = b.type.speed * (b.phase === 2 ? PHASE2.speedScale : 1);
     const speed = b.state === "chase" ? baseSpeed : baseSpeed * 0.55;
@@ -857,7 +966,10 @@ function stepBoss(room, b, players, now, dt, sink) {
     /* --- facing --- */
     let faceX, faceZ;
     const marked = b.duel && players[b.duel.target];
+    const behind = b.scatter && (b.scatter.e === "rise" || b.scatter.e === "strike") && players[b.scatter.target];
     if (marked) { faceX = marked.x; faceZ = marked.z; }                  // eyes on whoever it marked
+    else if (behind) { faceX = behind.x; faceZ = behind.z; }             // and on whoever it came back behind
+    else if (b.scatter) { /* a heap of bones, or nothing at all: it does not turn */ }
     else if (b.staggerUntil && now < b.staggerUntil) { /* on its knee: it does not turn */ }
     else if (b.state === "chase" && near) { faceX = near.player.x; faceZ = near.player.z; }
     else if (b.path && b.path[b.pathIndex]) { faceX = b.path[b.pathIndex].x; faceZ = b.path[b.pathIndex].z; }
@@ -904,6 +1016,7 @@ function emptySink() {
     return {
         shots: [], hits: [], bossShots: [], hazards: [],
         booms: [], slams: [], blinks: [], roars: [], duels: [],     // duels: step 30b
+        scatters: [],                                               // step 30c: BONE SCATTER
         bossSpawn: null, bossDied: null, bossPhase: null, wave: null,
         missionHits: [], missionEnd: null, missionState: null      // step 24, see missions.js
     };
@@ -911,6 +1024,7 @@ function emptySink() {
 
 /* What the clients draw: position, facing, health, and whether it is currently
    see-through. Sent at the same rate as the bandit snapshot. */
+const SCATTER_CODE = { collapse: 3, gone: 4, rise: 5, strike: 6 };
 function snapshot(room, now) {
     const b = room.boss;
     if (!b || !b.alive) return null;
@@ -931,6 +1045,9 @@ function snapshot(room, now) {
        latecomer sees the skull, and older clients simply ignore the extra fields */
     if (b.duel) snap.push(1, b.duel.target, Math.max(0, Math.round(b.duel.until - t)));
     else if (b.staggerUntil && b.staggerUntil > t) snap.push(2, "", Math.round(b.staggerUntil - t));
+    /* step 30c: BONE SCATTER - 3 collapsing, 4 gone, 5 rising, 6 striking (who it
+       came for, ms left in that part) */
+    else if (b.scatter) snap.push(SCATTER_CODE[b.scatter.e], b.scatter.target || "", Math.max(0, Math.round(b.scatter.until - t)));
     return snap;
 }
 
@@ -938,6 +1055,7 @@ function hurt(room, amount, now) {
     const b = room.boss;
     if (!b || !b.alive) return null;
     const t = now === undefined ? Date.now() : now;
+    if (b.scatter && b.scatter.e === "gone") return null;       // step 30c: there is nothing there to hit
     b.health -= amount;
     if (b.health <= 0) {
         b.health = 0;

@@ -1807,6 +1807,7 @@ function initNetwork() {
     });
 
     NET.socket.on('boss-duel', onBossDuel);             // step 30b: HIGH NOON
+    NET.socket.on('boss-scatter', onBossScatter);       // step 30c: BONE SCATTER
 
     NET.socket.on('boss-died', function (m) {
         if (!m) return;
@@ -3798,11 +3799,16 @@ const BOSS_DRAGON = {
 };
 
 /* The skeleton's duel, HIGH NOON (step 30b) - SKELETON in boss.js; online those are
-   the ones that count. Single player has no duel (its skeleton only draws and fires). */
+   the ones that count. Single player has no duel and no scatter (its skeleton only
+   draws and fires). */
 const BOSS_SKELETON = {
     duelFirstMs: 6000, duelEveryMs: 15000, duelRange: 32,
     countdownMs: 3000, duelDamage: 80, missBeyond: 45,
-    staggerMs: 2000
+    staggerMs: 2000,
+    // step 30c - BONE SCATTER, once, the first time its health reaches scatterAt
+    scatterAt: 0.5, collapseMs: 1000, goneMs: 2000, riseMs: 1250,
+    meleeMs: 833, meleeHitMs: 375, meleeRange: 3.2, meleeDamage: 30,
+    behindDist: 2.4, afterScatterMs: 5000
 };
 
 function enrageRig(parts) {
@@ -5774,6 +5780,7 @@ function createNetBoss(typeIndex, hp, x, z) {
 
 function destroyNetBoss() {
     if (DUEL.on || DUEL.standAt) duelEnd('clear');          // step 30b
+    if (SCATTER.e || SCATTER.standAt || SCATTER.bones.length) scatterStep({ e: 'clear' });   // step 30c
     if (netBoss.mesh) {
         banditGroup.remove(netBoss.mesh);
         // a model rig lets go of its own materials once it is out of the scene
@@ -5815,6 +5822,7 @@ function onBossState(m) {
         netBoss.gState = gs;
         rigGatling(netBoss.rig && netBoss.rig.model, gs);
         duelFromSnapshot(r);                 // step 30b: the skeleton's duel (older servers send nothing)
+        scatterFromSnapshot(r);              // step 30c: its BONE SCATTER
         netBoss.buf.push({ t: performance.now(), x: r[0], z: r[1], yaw: r[2] });
         if (netBoss.buf.length > 14) netBoss.buf.shift();
         netBoss.countdown = -1;
@@ -6019,8 +6027,218 @@ function updateDuel(delta) {
     if (left === 0 && now > DUEL.until + 2500) duelEnd('lost');     // the ending never arrived
 }
 
+/* ---- BONE SCATTER - the skeleton at half health (step 30c) --------------------
+   The server says when (boss-scatter): "collapse" - Collapse, a heap of bones for a
+   second (it can still be shot); "gone" - no body at all, its bones flying through
+   the air to the player it picked, and the rattle of them coming from behind that
+   player - behind US if it is us; "rise" - at the exact spot, Reassemble; "strike" -
+   Melee; "blow" - who it hit; "done" - back on its feet. Here it is only seen and
+   heard; while it is gone there is nothing to shoot (it is off the target list). */
+const SCATTER = { e: null, target: '', until: 0, hidden: false, from: null, bones: [], nextRattle: 0, standAt: 0 };
+let _boneGeo = null, _boneKnobGeo = null, _boneMat = null;
+
+function scatterRig() { return duelRig(); }
+function makeFlyingBone() {
+    if (!_boneGeo) {
+        _boneGeo = new THREE.CylinderGeometry(0.035, 0.035, 0.36, 6);
+        _boneKnobGeo = new THREE.SphereGeometry(0.055, 6, 5);
+        _boneMat = new THREE.MeshLambertMaterial({ color: 0xe6dcc2, emissive: 0x1a2a10 });
+    }
+    const g = new THREE.Group();
+    g.add(new THREE.Mesh(_boneGeo, _boneMat));
+    const a = new THREE.Mesh(_boneKnobGeo, _boneMat); a.position.y = 0.19; g.add(a);
+    const b = new THREE.Mesh(_boneKnobGeo, _boneMat); b.position.y = -0.19; g.add(b);
+    g.children.forEach(function (m) { m.raycast = function () { }; });
+    const k = 0.7 + Math.random() * 0.8;
+    g.scale.set(k, k, k);
+    return g;
+}
+/* Where it is going to stand: behind the way the one it picked is looking, now
+   (the server decides the same way when the bones arrive) */
+function scatterDest(out) {
+    const t = SCATTER.target;
+    let x, z, yw;
+    if (t && t === NET.id) { x = camera.position.x; z = camera.position.z; yw = yaw; }
+    else if (t && remoteBodies[t] && remoteBodies[t].mesh) {
+        x = remoteBodies[t].mesh.position.x; z = remoteBodies[t].mesh.position.z;
+        yw = PLAYERS[t] && typeof PLAYERS[t].yaw === 'number' ? PLAYERS[t].yaw : 0;
+    }
+    if (x === undefined) return out.copy(SCATTER.from);
+    return out.set(x + Math.sin(yw) * BOSS_SKELETON.behindDist, 0, z + Math.cos(yw) * BOSS_SKELETON.behindDist);
+}
+/* Dry bone on bone. Stereo cannot say "behind", so a source behind the camera is
+   muffled - the ear reads that as behind. `k` 0..1 - louder and busier as it comes. */
+function sfxBoneRattle(pos, k) {
+    const d = chain(pos, 0.35 + 0.45 * k, 60); if (!d) return;
+    const toSrc = new THREE.Vector3().subVectors(pos, camera.position).setY(0).normalize();
+    const fwd = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion).setY(0).normalize();
+    const behind = toSrc.dot(fwd) < -0.2;
+    const n = 3 + Math.round(4 * k);
+    for (let i = 0; i < n; i++) {
+        noiseBurst(d, { type: 'bandpass', freq: (behind ? 1500 : 2600) + Math.random() * (behind ? 900 : 2200), q: 5, dur: 0.018 + Math.random() * 0.025, vol: 0.5, delay: Math.random() * 0.13 });
+        if (Math.random() < 0.5) tone(d, { type: 'triangle', f0: 520 + Math.random() * 500, f1: 300, dur: 0.035, vol: 0.12, delay: Math.random() * 0.13 });
+    }
+}
+function sfxBoneClatter(pos, long) {
+    const d = chain(pos, 0.8, 60); if (!d) return;
+    const n = long ? 22 : 12;
+    for (let i = 0; i < n; i++) {
+        const t = Math.pow(i / n, long ? 1.4 : 0.8) * (long ? 0.7 : 0.45);
+        noiseBurst(d, { type: 'bandpass', freq: 1800 + Math.random() * 2400, q: 4, dur: 0.03, vol: 0.55, delay: t });
+    }
+    tone(d, { type: 'triangle', f0: 150, f1: 55, dur: 0.3, vol: 0.35, delay: long ? 0.12 : 0.3 });
+}
+function sfxBoneSwing(pos, landed) {
+    const d = chain(pos, 0.9, 50); if (!d) return;
+    noiseBurst(d, { type: 'bandpass', freq: 500, sweepTo: 2200, q: 0.8, dur: 0.28, vol: 0.5 });
+    if (landed) {
+        noiseBurst(d, { type: 'lowpass', freq: 500, dur: 0.22, vol: 0.9, delay: 0.1 });
+        tone(d, { type: 'sine', f0: 120, f1: 45, dur: 0.25, vol: 0.6, delay: 0.1 });
+    }
+}
+
+function scatterHide(on) {
+    SCATTER.hidden = on;
+    if (netBoss.mesh) netBoss.mesh.visible = !on && netBoss.alive;
+}
+function scatterFlyBones() {
+    scatterClearBones();
+    const now = performance.now();
+    for (let i = 0; i < 26; i++) {
+        const m = makeFlyingBone();
+        const a = Math.random() * Math.PI * 2, r = Math.random() * 0.7;
+        m.position.set(SCATTER.from.x + Math.cos(a) * r, 0.15 + Math.random() * 0.5, SCATTER.from.z + Math.sin(a) * r);
+        m.rotation.set(Math.random() * 6, Math.random() * 6, Math.random() * 6);
+        scene.add(m);
+        SCATTER.bones.push({
+            m: m, s: m.position.clone(), t0: now + Math.random() * 350,
+            off: new THREE.Vector3((Math.random() - 0.5) * 1.1, 0.3 + Math.random() * 1.9, (Math.random() - 0.5) * 1.1),
+            spin: new THREE.Vector3((Math.random() - 0.5) * 14, (Math.random() - 0.5) * 14, (Math.random() - 0.5) * 14),
+            h: 2.2 + Math.random() * 2.5
+        });
+    }
+}
+function scatterClearBones() {
+    SCATTER.bones.forEach(function (b) { scene.remove(b.m); });
+    SCATTER.bones.length = 0;
+}
+
+/* kind: collapse / gone / rise / strike / blow / done, or clear (the boss is gone) */
+function scatterStep(m, late) {
+    const now = performance.now();
+    const rig = scatterRig();
+    const e = m.e;
+    if (e === 'clear' || e === 'done') {
+        scatterClearBones();
+        const was = SCATTER.e;
+        SCATTER.e = null; SCATTER.target = ''; SCATTER.until = 0;
+        scatterHide(false);
+        if (e === 'done' && was && rig && netBoss.alive) SCATTER.standAt = now + 60;
+        else SCATTER.standAt = 0;
+        return;
+    }
+    const at = m.p ? new THREE.Vector3(m.p[0], 0, m.p[1]) : (netBoss.mesh ? netBoss.mesh.position.clone() : new THREE.Vector3());
+    if (e === 'collapse') {
+        if (DUEL.on || DUEL.standAt) duelEnd('clear');                 // a count it was running is off
+        SCATTER.e = e; SCATTER.until = now + (m.ms || BOSS_SKELETON.collapseMs); SCATTER.standAt = 0;
+        scatterHide(false);
+        if (rig) rigFull(rig, 'Collapse', { fade: 0.08, instant: !!late });
+        if (!late) {
+            sfxBoneClatter(at, true);
+            spawnDust(at.clone().setY(0.1), 10);
+            pushFeed('BONE SCATTER — ' + (netBoss.type ? netBoss.type.name : 'THE BOSS') + ' FALLS TO PIECES');
+        }
+    } else if (e === 'gone') {
+        if (DUEL.on || DUEL.standAt) duelEnd('clear');
+        SCATTER.e = e; SCATTER.target = m.tgt || ''; SCATTER.until = now + (m.ms || BOSS_SKELETON.goneMs);
+        SCATTER.from = at; SCATTER.nextRattle = now + 150;
+        scatterHide(true);
+        if (!late) {
+            spawnParticles(at.clone().setY(0.5), 0xe8dcc0, 26, 5);
+            sfxBoneClatter(at, false);
+            scatterFlyBones();
+            if (SCATTER.target === NET.id) pushFeed('THE BONES ARE COMING FOR YOU — LISTEN');
+            else if (SCATTER.target) pushFeed('THE BONES FLY TO ' + duelName(SCATTER.target));
+        }
+    } else if (e === 'rise') {
+        SCATTER.e = e; SCATTER.until = now + (m.ms || BOSS_SKELETON.riseMs);
+        scatterClearBones();
+        if (netBoss.mesh) {
+            // straight there: nothing to slide from, it was not anywhere
+            netBoss.mesh.position.copy(at);
+            if (typeof m.y === 'number') netBoss.mesh.rotation.y = m.y;
+            netBoss.buf = [{ t: performance.now() - INTERP_DELAY, x: at.x, z: at.z, yaw: typeof m.y === 'number' ? m.y : netBoss.mesh.rotation.y }];
+            netBoss.hasPrev = false; netBoss.speed = 0;
+        }
+        scatterHide(false);
+        if (rig) rigFull(rig, 'Reassemble', { fade: 0.02, instant: false });
+        if (!late) {
+            spawnParticles(at.clone().setY(0.8), 0xe8dcc0, 30, 3);
+            spawnDust(at.clone().setY(0.1), 14);
+            sfxBoneClatter(at, true);
+            if (m.tgt === NET.id) camShake = Math.min(0.5, camShake + 0.2);
+        }
+    } else if (e === 'strike') {
+        SCATTER.e = e; SCATTER.until = now + (m.ms || BOSS_SKELETON.meleeMs);
+        scatterHide(false);
+        if (rig) rigFull(rig, 'Melee', { fade: 0.05 });
+    } else if (e === 'blow') {
+        const mine = Array.isArray(m.hit) && m.hit.indexOf(NET.id) >= 0;
+        sfxBoneSwing(at, Array.isArray(m.hit) && m.hit.length > 0);
+        if (mine) { camShake = Math.min(0.9, camShake + 0.55); pushFeed('BONE SCATTER — HE CAUGHT YOU FROM BEHIND'); }
+        else if (Array.isArray(m.hit) && m.hit.length) pushFeed('BONE SCATTER — HE CAUGHT ' + m.hit.map(duelName).join(', '));
+    }
+}
+
+function onBossScatter(m) {
+    if (!m || typeof m.e !== 'string' || !netBoss.active || !netBoss.alive) return;
+    scatterStep(m, false);
+}
+
+/* The snapshot's fields 8-10 with 3-6 in 8 (a latecomer, or a missed event) */
+const SCATTER_FROM_CODE = { 3: 'collapse', 4: 'gone', 5: 'rise', 6: 'strike' };
+function scatterFromSnapshot(r) {
+    const e = SCATTER_FROM_CODE[r[8]];
+    if (e && SCATTER.e !== e) {
+        const m = { e: e, tgt: r[9] || '', ms: r[10] || 0, p: [r[0], r[1]], y: r[2] };
+        if (e === 'gone') m.p = null;
+        scatterStep(m, true);
+    } else if (!e && SCATTER.e && performance.now() > SCATTER.until + 1500) scatterStep({ e: 'done' });   // the ending never arrived
+}
+
+function updateScatter(delta) {
+    const now = performance.now();
+    if (SCATTER.standAt && now >= SCATTER.standAt) {
+        SCATTER.standAt = 0;
+        const rig = scatterRig();
+        if (rig && netBoss.alive && !SCATTER.e) rigStand(rig, 0.3);
+    }
+    if (!SCATTER.e) return;
+    // a rebuilt body (the model arriving late) is visible by default
+    if (netBoss.mesh && netBoss.mesh.visible === SCATTER.hidden) netBoss.mesh.visible = !SCATTER.hidden;
+    if (SCATTER.e !== 'gone') return;
+    const dest = scatterDest(new THREE.Vector3());
+    const total = BOSS_SKELETON.goneMs;
+    const k = Math.max(0, Math.min(1, 1 - (SCATTER.until - now) / total));
+    for (let i = 0; i < SCATTER.bones.length; i++) {
+        const b = SCATTER.bones[i];
+        const u = Math.max(0, Math.min(1, (now - b.t0) / (SCATTER.until - b.t0)));
+        const ease = u * u * (3 - 2 * u);
+        b.m.position.set(
+            b.s.x + (dest.x + b.off.x * (1 - ease * 0.6) - b.s.x) * ease,
+            b.s.y + (b.off.y - b.s.y) * ease + Math.sin(Math.PI * ease) * b.h,
+            b.s.z + (dest.z + b.off.z * (1 - ease * 0.6) - b.s.z) * ease);
+        b.m.rotation.x += b.spin.x * delta; b.m.rotation.y += b.spin.y * delta; b.m.rotation.z += b.spin.z * delta;
+    }
+    if (now >= SCATTER.nextRattle) {
+        SCATTER.nextRattle = now + 260 - 170 * k;                     // faster as it comes
+        sfxBoneRattle(dest.clone().setY(1.2), k);
+    }
+}
+
 function startNetBossDeath() {
     if (!netBoss.active) return;
+    if (SCATTER.e || SCATTER.standAt || SCATTER.bones.length) scatterStep({ e: 'clear' });   // step 30c
     if (DUEL.on || DUEL.standAt) duelEnd('clear');
     netBoss.alive = false;
     netBoss.deathT = 0;
@@ -8014,7 +8232,8 @@ function fireOneRay(spread, dmgBody, dmgHead, range) {
             const sb = serverBandits[bIds[i]];
             if (sb.alive) targets.push(sb.mesh);
         }
-        if (netBoss.active && netBoss.alive && netBoss.mesh) targets.push(netBoss.mesh);
+        // step 30c: while its bones are in the air there is nothing there to hit
+        if (netBoss.active && netBoss.alive && netBoss.mesh && !SCATTER.hidden) targets.push(netBoss.mesh);
     } else {
         for (let i = 0; i < bots.length; i++) if (bots[i].alive) targets.push(bots[i].mesh);
     }
@@ -8407,7 +8626,7 @@ function drawMinimap() {
             if (!sb.alive) continue;
             plotBandit(sb.mesh.position.x, sb.mesh.position.z, false);
         }
-        if (netBoss.active && netBoss.alive && netBoss.mesh) {
+        if (netBoss.active && netBoss.alive && netBoss.mesh && !SCATTER.hidden) {
             plotBandit(netBoss.mesh.position.x, netBoss.mesh.position.z, true);
         }
     } else {
@@ -8759,6 +8978,7 @@ function animate() {
     updateServerBandits(delta);
     updateNetBoss(delta);
     updateDuel(delta);
+    updateScatter(delta);
     updateNetHazards(delta);
     updateBanditBullets(delta);
     updateModelRigs(delta);

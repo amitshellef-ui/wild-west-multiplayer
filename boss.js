@@ -148,7 +148,8 @@ const SKELETON = {
     // step 30c - BONE SCATTER, once, the first time its health reaches scatterAt
     scatterAt: 0.5, collapseMs: 1000, goneMs: 2000, riseMs: 1250,
     meleeMs: 833, meleeHitMs: 375, meleeRange: 3.2, meleeDamage: 30,
-    behindDist: 2.4, afterScatterMs: 5000
+    behindDist: 2.4, afterScatterMs: 5000,
+    lungeSpeed: 16, lungeStop: 1.2          // the leap at whoever it came for, until the blow lands
 };
 
 /* ---- The skeleton's BONE SCATTER (step 30c) ----------------------------------
@@ -157,7 +158,9 @@ const SKELETON = {
    its bones flying through the air to where it will stand again - and comes back
    together (riseMs) behind one player picked at random, behindDist behind where
    they are looking. Then a two-handed blow (Melee - lands meleeHitMs in) of
-   meleeDamage on everybody within meleeRange in front of it. The warning is the
+   meleeDamage on everybody within meleeRange in front of it - and between the
+   start of the swing and the blow it leaps at that player (lungeSpeed, stopping
+   lungeStop short of them), so walking off is not enough; running is. The warning is the
    rattle of the bones, from where it is going to be: turn round and shoot it while
    it rises, or be somewhere else when it swings. A duel it was counting is called
    off, and it does not start another for afterScatterMs. b.scatter = { e, until,
@@ -594,8 +597,17 @@ function startScatter(b, now, sink) {
 }
 
 /* collapse -> gone -> rise -> strike -> back to the fight */
-function tickScatter(room, b, players, now, sink) {
+function tickScatter(room, b, players, now, dt, sink) {
     const s = b.scatter;
+    if (s.e === "strike" && !s.struck) {
+        // the leap: straight at them, never through a wall, never into them
+        const t = s.target && players[s.target];
+        if (t && t.room === room.code && t.alive) {
+            const dx = t.x - b.x, dz = t.z - b.z, d = Math.hypot(dx, dz);
+            const step = Math.min(SKELETON.lungeSpeed * dt, d - SKELETON.lungeStop);
+            if (step > 0 && d > 0) moveAxis(b, (dx / d) * step, (dz / d) * step);
+        }
+    }
     if (s.e === "strike" && !s.struck && now >= s.hitAt) {
         s.struck = true;
         const fx = Math.sin(b.yaw), fz = Math.cos(b.yaw), hit = [];
@@ -643,7 +655,7 @@ function tickScatter(room, b, players, now, sink) {
 /* mark -> count down -> one shot. b.duel = { target, until }; b.staggerUntil after
    a skull shot broke it (duelHeadshot). Both are in the snapshot for latecomers. */
 function tickSkeleton(room, b, players, near, now, dt, sink) {
-    if (b.scatter) { tickScatter(room, b, players, now, sink); return; }
+    if (b.scatter) { tickScatter(room, b, players, now, dt, sink); return; }
     if (!b.scattered && b.health <= b.maxHealth * SKELETON.scatterAt) { startScatter(b, now, sink); return; }
     if (b.staggerUntil && now < b.staggerUntil) return;         // down on one knee
     if (b.duel) {
@@ -871,7 +883,7 @@ function stepBoss(room, b, players, now, dt, sink) {
     const charging = b.chargeUntil && now < b.chargeUntil;
     // the robot plants its feet while the barrels spin and fire (step 27), and the
     // skeleton while it counts a duel down or is down on one knee (step 30b), and
-    // all through BONE SCATTER (step 30c) - no steps and no revolver
+    // all through BONE SCATTER (step 30c) - no walking (only its leap, tickScatter) and no revolver
     const dueling = !!b.duel || (b.staggerUntil && now < b.staggerUntil) || !!b.scatter;
     const planted = b.gState === "spin" || b.gState === "fire" || dueling;
     const baseSpeed = b.type.speed * (b.phase === 2 ? PHASE2.speedScale : 1);

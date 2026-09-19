@@ -3808,7 +3808,8 @@ const BOSS_SKELETON = {
     // step 30c - BONE SCATTER, once, the first time its health reaches scatterAt
     scatterAt: 0.5, collapseMs: 1000, goneMs: 2000, riseMs: 1250,
     meleeMs: 833, meleeHitMs: 375, meleeRange: 3.2, meleeDamage: 30,
-    behindDist: 2.4, afterScatterMs: 5000
+    behindDist: 2.4, afterScatterMs: 5000,
+    lungeSpeed: 16, lungeStop: 1.2          // the leap at whoever it came for, until the blow lands
 };
 
 function enrageRig(parts) {
@@ -6032,7 +6033,8 @@ function updateDuel(delta) {
    second (it can still be shot); "gone" - no body at all, its bones flying through
    the air to the player it picked, and the rattle of them coming from behind that
    player - behind US if it is us; "rise" - at the exact spot, Reassemble; "strike" -
-   Melee; "blow" - who it hit; "done" - back on its feet. Here it is only seen and
+   Melee, leaping at them (the server moves it; the snapshot carries it here);
+   "blow" - who it hit; "done" - back on its feet. Here it is only seen and
    heard; while it is gone there is nothing to shoot (it is off the target list). */
 const SCATTER = { e: null, target: '', until: 0, hidden: false, from: null, bones: [], nextRattle: 0, standAt: 0 };
 let _boneGeo = null, _boneKnobGeo = null, _boneMat = null;

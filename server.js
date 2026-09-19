@@ -1333,6 +1333,8 @@ setInterval(() => {
         for (let i = 0; i < sink.harvests.length; i++) io.to(code).emit("boss-harvest", sink.harvests[i]);
         // step 31b: the ghost's SPECTRAL SHOT - aim (the flash), done (the round itself is a boss-shot)
         for (let i = 0; i < sink.spectrals.length; i++) io.to(code).emit("boss-spectral", sink.spectrals[i]);
+        // step 31c: its GRAVE BURST - raise, cast (the circle), burst, judge (who it got), done
+        for (let i = 0; i < sink.graves.length; i++) io.to(code).emit("boss-grave", sink.graves[i]);
 
         /* A bullet reached a player. This is where the last piece of trust
            goes away: the server no longer has to believe a client that says it

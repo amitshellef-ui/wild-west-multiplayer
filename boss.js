@@ -28,7 +28,8 @@
      dynamite  lobs a stick that lands where you were
      ghost     disappears and reappears somewhere else - and every few seconds
                raises its gun in both hands for a SPECTRAL SHOT: a fast round that
-               goes through walls (step 31b - see GHOST)
+               goes through walls (step 31b - see GHOST); and raises a hand for a
+               GRAVE BURST: hands out of the ground under you (step 31c)
      slam      hits the ground and hurts everyone standing near it
      poison    throws a bottle that leaves a cloud sitting on the ground
      dragon    breathes fire that burns on the ground, swoops - and is the last
@@ -172,11 +173,31 @@ const SKELETON = {
    bandits.js stepBullets) and which is gone after spectralReach metres. Then it
    lowers the gun (lowerMs). All through it: planted, the ordinary gun silent, and
    no VANISH - that waits until the gun is down. Killing it before the round leaves
-   is the other answer. b.spectral = { e: aim / lock / lower, target, lockAt, fireAt }. */
+   is the other answer. b.spectral = { e: aim / lock / lower, target, lockAt, fireAt }.
+
+   GRAVE BURST (step 31c). Every graveEveryMs (the first graveFirstMs after it
+   arrives) it picks a living player at random within graveRange - no line needed,
+   it comes out of the ground. It stops and raises its left hand (graveRaiseMs), and
+   a dark circle of graveRadius opens on the ground right where that player is
+   standing at that moment. It fills for graveFillMs - and then the hands burst out
+   of it: graveDamage to everybody inside it and on the ground, not only whoever it
+   was for. The answers are the ones the skeleton's low ring has - be out of it, or
+   in the air - and it is judged the same way, with the same numbers (SKELETON
+   dodgeFromMs / dodgeToMs / lowClear): any sample between those two moments after
+   the burst with the feet out of the circle or above lowClear, and it missed. Then
+   the hand comes down (graveLowerMs). All through it: planted, the ordinary gun
+   silent, no VANISH. The SPECTRAL SHOT and it never run together; whichever comes
+   second waits gapMs after the other is over. Killing it before the burst is the
+   other answer - the circle goes with it.
+   b.grave = { e: raise / fill / burst, target, until, i, x, z, T, inside, judged }. */
 const GHOST = {
     spectralFirstMs: 5000, spectralEveryMs: 7000, spectralRange: 45,
     raiseMs: 250, flashMs: 600, lockMs: 250, lowerMs: 500,
     spectralDamage: 60, spectralSpeed: 60, spectralReach: 50,
+    // step 31c - GRAVE BURST
+    graveFirstMs: 10000, graveEveryMs: 13000, graveRange: 30,
+    graveRaiseMs: 500, graveFillMs: 1100, graveLowerMs: 350,
+    graveRadius: 2.5, graveDamage: 40, gapMs: 2500,
     p2: { spectralEveryMs: 5000 }
 };
 
@@ -329,6 +350,7 @@ function spawnBoss(room, players, now) {
         abilityAt: now + (type.id === "skeleton" ? SKELETON.duelFirstMs : 2000),
         harvestAt: now + SKELETON.harvestFirstMs,       // step 30d - read by the skeleton only
         spectralAt: now + GHOST.spectralFirstMs,        // step 31b - read by the ghost only
+        graveAt: now + GHOST.graveFirstMs,              // step 31c - read by the ghost only
         ghostUntil: 0,
         chargeUntil: 0
     };
@@ -866,6 +888,7 @@ function tickSpectral(room, b, players, now, sink) {
             if (!p) {                                            // nobody left to aim at - the gun comes down
                 b.spectral = null;
                 b.lastShot = now + 400;
+                b.graveAt = Math.max(b.graveAt || 0, now + GHOST.gapMs);   // step 31c: never back to back
                 sink.spectrals.push({ e: "done", off: 1 });
                 return;
             }
@@ -895,7 +918,100 @@ function tickSpectral(room, b, players, now, sink) {
     if (now < s.until) return;
     b.spectral = null;
     b.lastShot = now + 400;                                      // a breath before the ordinary gun
+    b.graveAt = Math.max(b.graveAt || 0, now + GHOST.gapMs);    // step 31c: never back to back
     sink.spectrals.push({ e: "done" });
+}
+
+/* GRAVE BURST (step 31c): a living player at random within graveRange - a line to
+   them is not needed, it comes up out of the ground. */
+function graveTarget(room, players, b) {
+    const near = [];
+    for (const id in players) {
+        const p = players[id];
+        if (p.room !== room.code || !p.alive) continue;
+        if (Math.hypot(p.x - b.x, p.z - b.z) <= GHOST.graveRange) near.push(p);
+    }
+    return near.length ? near[Math.floor(Math.random() * near.length)] : null;
+}
+
+function startGrave(b, p, now, sink) {
+    const id = (b.graveSeq = (b.graveSeq || 0) + 1);
+    b.grave = { e: "raise", target: p.id, until: now + GHOST.graveRaiseMs, i: id };
+    sink.graves.push({ e: "raise", i: id, p: p.id, ms: GHOST.graveRaiseMs });
+}
+
+/* Where every player in the room was, and how high their feet were, for the last
+   second and a half - kept only while a circle is open or waiting for its verdict. */
+function recordGraveFeet(room, b, players, now) {
+    if (!b.graveFeet) b.graveFeet = {};
+    for (const id in players) {
+        const p = players[id];
+        if (p.room !== room.code) continue;
+        const hist = b.graveFeet[id] || (b.graveFeet[id] = []);
+        hist.push([now, (typeof p.y === "number" ? p.y : 1.72) - 1.72, p.x, p.z]);
+        while (hist.length && hist[0][0] < now - 1500) hist.shift();
+    }
+}
+
+/* raise (the hand comes up) -> fill (the circle is open where they stood) -> burst
+   (the hands; the verdict dodgeToMs later) -> back to the fight */
+function tickGrave(room, b, players, now, sink) {
+    const g = b.grave;
+    if (g.e === "raise") {
+        let p = players[g.target];
+        if (!p || p.room !== room.code || !p.alive) {           // went down, died or left: somebody else
+            p = graveTarget(room, players, b);
+            if (!p) { endGrave(b, now, sink, true); return; }   // nobody left - the hand comes down
+            g.target = p.id;
+        }
+        if (now < g.until) return;
+        g.e = "fill";
+        g.x = p.x; g.z = p.z;                                    // where they are now - and it stays there
+        g.until = now + GHOST.graveFillMs;
+        b.graveFeet = null;
+        recordGraveFeet(room, b, players, now);
+        sink.graves.push({ e: "cast", i: g.i, p: [round2(g.x), round2(g.z)], r: GHOST.graveRadius, ms: GHOST.graveFillMs });
+        return;
+    }
+    recordGraveFeet(room, b, players, now);
+    if (g.e === "fill") {
+        if (now < g.until) return;
+        g.e = "burst";
+        g.T = now;
+        g.until = now + Math.max(GHOST.graveLowerMs, SKELETON.dodgeToMs);
+        g.inside = [];
+        for (const id in players) {
+            const p = players[id];
+            if (p.room !== room.code || !p.alive) continue;
+            if (Math.hypot(p.x - g.x, p.z - g.z) <= GHOST.graveRadius) g.inside.push(id);
+        }
+        sink.graves.push({ e: "burst", i: g.i, p: [round2(g.x), round2(g.z)] });
+        return;
+    }
+    // burst: the verdict, a moment after - what the player saw arrived late, and so does their answer
+    if (!g.judged && now >= g.T + SKELETON.dodgeToMs) {
+        g.judged = true;
+        const hit = [], safe = [];
+        for (const id of g.inside) {
+            const p = players[id];
+            if (!p || p.room !== room.code || !p.alive) continue;
+            const hist = (b.graveFeet[id] || []).filter((s) => s[0] >= g.T + SKELETON.dodgeFromMs && s[0] <= g.T + SKELETON.dodgeToMs);
+            if (!hist.length) hist.push([now, (typeof p.y === "number" ? p.y : 1.72) - 1.72, p.x, p.z]);
+            const dodged = hist.some((s) => s[1] > SKELETON.lowClear || Math.hypot(s[2] - g.x, s[3] - g.z) > GHOST.graveRadius);
+            if (dodged) safe.push(id);
+            else { hit.push(id); sink.hits.push({ playerId: id, damage: GHOST.graveDamage, from: "boss" }); }
+        }
+        sink.graves.push({ e: "judge", i: g.i, hit: hit, safe: safe });
+    }
+    if (now >= g.until && g.judged) endGrave(b, now, sink, false);
+}
+
+function endGrave(b, now, sink, off) {
+    b.grave = null;
+    b.graveFeet = null;
+    b.lastShot = now + 400;                                      // a breath before the ordinary gun
+    b.spectralAt = Math.max(b.spectralAt || 0, now + GHOST.gapMs);   // never back to back
+    sink.graves.push(off ? { e: "done", off: 1 } : { e: "done" });
 }
 
 /* ---- Abilities ---------------------------------------------------------- */
@@ -929,6 +1045,7 @@ function tickAbility(room, b, players, near, now, dt, sink) {
     if (id === "ghost") {
         // step 31b: the SPECTRAL SHOT has a clock of its own; VANISH waits while the gun is up
         if (b.spectral) { tickSpectral(room, b, players, now, sink); return; }
+        if (b.grave) { tickGrave(room, b, players, now, sink); return; }       // step 31c: and while the hand is up
         if (now >= b.spectralAt) {
             const p = spectralTarget(room, players, b);
             if (p) {
@@ -937,6 +1054,15 @@ function tickAbility(room, b, players, near, now, dt, sink) {
                 return;
             }
             b.spectralAt = now + 1000;                          // nobody near enough - look again in a second
+        }
+        if (now >= b.graveAt) {
+            const p = graveTarget(room, players, b);
+            if (p) {
+                b.graveAt = now + GHOST.graveEveryMs;
+                startGrave(b, p, now, sink);
+                return;
+            }
+            b.graveAt = now + 1000;                             // nobody near enough - look again in a second
         }
         if (now >= b.abilityAt) {
             b.abilityAt = now + (b.phase === 2 ? PHASE2.ghostEveryMs : BOSS.ghostEveryMs);
@@ -1094,8 +1220,8 @@ function stepBoss(room, b, players, now, dt, sink) {
     // skeleton while it counts a duel down or is down on one knee (step 30b), and
     // all through BONE SCATTER (step 30c) - no walking (only its leap, tickScatter) and no revolver -
     // and all through BONE HARVEST (step 30d); the ghost from the moment it raises
-    // its gun for a SPECTRAL SHOT until it is down again (step 31b)
-    const dueling = !!b.duel || (b.staggerUntil && now < b.staggerUntil) || !!b.scatter || !!b.harvest || !!b.spectral;
+    // its gun for a SPECTRAL SHOT until it is down again (step 31b), and its hand for a GRAVE BURST (step 31c)
+    const dueling = !!b.duel || (b.staggerUntil && now < b.staggerUntil) || !!b.scatter || !!b.harvest || !!b.spectral || !!b.grave;
     const planted = b.gState === "spin" || b.gState === "fire" || dueling;
     const baseSpeed = b.type.speed * (b.phase === 2 ? PHASE2.speedScale : 1);
     const speed = b.state === "chase" ? baseSpeed : baseSpeed * 0.55;
@@ -1200,6 +1326,12 @@ function stepBoss(room, b, players, now, dt, sink) {
         const aimed = b.spectral.e === "aim" && players[b.spectral.target];
         if (aimed) { faceX = aimed.x; faceZ = aimed.z; }
     }
+    else if (b.grave) {
+        // step 31c: at whoever it is for while the hand comes up, then at the circle
+        const who = b.grave.e === "raise" && players[b.grave.target];
+        if (who) { faceX = who.x; faceZ = who.z; }
+        else if (b.grave.x !== undefined) { faceX = b.grave.x; faceZ = b.grave.z; }
+    }
     else if (b.state === "chase" && near) { faceX = near.player.x; faceZ = near.player.z; }
     else if (b.path && b.path[b.pathIndex]) { faceX = b.path[b.pathIndex].x; faceZ = b.path[b.pathIndex].z; }
     if (faceX !== undefined) {
@@ -1248,6 +1380,7 @@ function emptySink() {
         scatters: [],                                               // step 30c: BONE SCATTER
         harvests: [],                                               // step 30d: BONE HARVEST
         spectrals: [],                                              // step 31b: the ghost's SPECTRAL SHOT
+        graves: [],                                                 // step 31c: its GRAVE BURST
         bossSpawn: null, bossDied: null, bossPhase: null, wave: null,
         missionHits: [], missionEnd: null, missionState: null      // step 24, see missions.js
     };
@@ -1285,6 +1418,11 @@ function snapshot(room, now) {
     /* step 31b: the ghost's SPECTRAL SHOT - 11 while the gun is up (who it is for, ms
        until the round leaves). The ghost's codes are 11-19; 1-9 are the skeleton's. */
     else if (b.spectral && b.spectral.e !== "lower") snap.push(11, b.spectral.target, Math.max(0, Math.round(b.spectral.fireAt - t)));
+    /* step 31c: GRAVE BURST - 12 while the hand comes up (who it is for, ms until the
+       circle opens), 13 while the circle fills (who, ms until the burst, and where the
+       circle is: fields 11-12) */
+    else if (b.grave && b.grave.e === "raise") snap.push(12, b.grave.target, Math.max(0, Math.round(b.grave.until - t)));
+    else if (b.grave && b.grave.e === "fill") snap.push(13, b.grave.target, Math.max(0, Math.round(b.grave.until - t)), round2(b.grave.x), round2(b.grave.z));
     return snap;
 }
 

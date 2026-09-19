@@ -1815,6 +1815,7 @@ function initNetwork() {
     NET.socket.on('boss-scatter', onBossScatter);       // step 30c: BONE SCATTER
     NET.socket.on('boss-harvest', onBossHarvest);       // step 30d: BONE HARVEST
     NET.socket.on('boss-spectral', onBossSpectral);     // step 31b: the ghost's SPECTRAL SHOT
+    NET.socket.on('boss-grave', onBossGrave);           // step 31c: its GRAVE BURST
 
     NET.socket.on('boss-died', function (m) {
         if (!m) return;
@@ -3831,12 +3832,17 @@ const BOSS_SKELETON = {
     dodgeFromMs: 50, dodgeToMs: 250, tiredMs: 3000, gapMs: 3000
 };
 
-/* The ghost's SPECTRAL SHOT (step 31b) - GHOST in boss.js; online those are the ones
-   that count. Single player has none (its ghost only vanishes and fires). */
+/* The ghost's SPECTRAL SHOT (step 31b) and GRAVE BURST (step 31c) - GHOST in boss.js;
+   online those are the ones that count. Single player has neither (its ghost only
+   vanishes and fires). */
 const BOSS_GHOST = {
     spectralFirstMs: 5000, spectralEveryMs: 7000, spectralRange: 45,
     raiseMs: 250, flashMs: 600, lockMs: 250, lowerMs: 500,
     spectralDamage: 60, spectralSpeed: 60, spectralReach: 50,
+    // step 31c - GRAVE BURST
+    graveFirstMs: 10000, graveEveryMs: 13000, graveRange: 30,
+    graveRaiseMs: 500, graveFillMs: 1100, graveLowerMs: 350,
+    graveRadius: 2.5, graveDamage: 40, gapMs: 2500,
     p2: { spectralEveryMs: 5000 }
 };
 
@@ -5860,6 +5866,7 @@ function destroyNetBoss() {
     if (DUEL.on || DUEL.standAt) duelEnd('clear');          // step 30b
     harvestClear();                                          // step 30d
     spectralClear();                                         // step 31b
+    graveClear();                                            // step 31c
     if (SCATTER.e || SCATTER.standAt || SCATTER.bones.length) scatterStep({ e: 'clear' });   // step 30c
     if (netBoss.mesh) {
         banditGroup.remove(netBoss.mesh);
@@ -5905,6 +5912,7 @@ function onBossState(m) {
         scatterFromSnapshot(r);              // step 30c: its BONE SCATTER
         harvestFromSnapshot(r);              // step 30d: its BONE HARVEST
         spectralFromSnapshot(r);             // step 31b: the ghost's SPECTRAL SHOT
+        graveFromSnapshot(r);                // step 31c: its GRAVE BURST
         netBoss.buf.push({ t: performance.now(), x: r[0], z: r[1], yaw: r[2] });
         if (netBoss.buf.length > 14) netBoss.buf.shift();
         netBoss.countdown = -1;
@@ -6494,6 +6502,7 @@ function startNetBossDeath() {
     if (SCATTER.e || SCATTER.standAt || SCATTER.bones.length) scatterStep({ e: 'clear' });   // step 30c
     harvestClear();                                                                          // step 30d
     spectralClear();                                                                         // step 31b
+    graveClear();                                                                            // step 31c
     if (DUEL.on || DUEL.standAt) duelEnd('clear');
     netBoss.alive = false;
     netBoss.deathT = 0;
@@ -6807,6 +6816,287 @@ function updateSpectral(delta) {
         let done = R.gone >= R.reach - 1e-6 || near < 0.62;
         if (p.y <= 0.03) { spawnParticles(new THREE.Vector3(p.x, 0.05, p.z), SPECTRAL_HEX, 10, 2.5); done = true; }
         if (done) { dropSpectralRound(R); SPECTRAL.rounds.splice(i, 1); }
+    }
+}
+
+/* ---- GRAVE BURST - hands out of the ground (step 31c) --------------------------
+   The server picks who it is for and where (boss-grave): "raise" - GraveCast, the
+   left hand coming up (who, ms until the circle); "cast" - the circle opens where
+   they stood (p, r, ms until the burst); "burst" - the hands come out; "judge" - who
+   it got and who got away (the server's verdict, a moment after the burst, from
+   where their feet were); "done" - the hand is down ("off": nobody left to open it
+   under). Here it is seen and heard: a dark circle that darkens as it fills, with a
+   violet ring closing in from its edge to the middle - when it gets there, the hands
+   come up - mist and a rumble under the ground while it fills, and "MOVE" in the
+   middle of the screen for whoever is standing in it. */
+const GRAVE = { e: null, target: '', until: 0, standAt: 0, told: false, circle: null, hud: null };
+const GRAVE_HEX = 0x9a7dff;
+const GRAVE_HANDS = 10;
+let _graveDiscGeo = null, _graveEdgeGeo = null, _graveHandGeo = null;
+let _graveDiscMat = null, _graveEdgeMat = null, _graveInnerMat = null, _graveHandMat = null;
+
+function graveRig() { return spectralRig(); }
+/* One geometry out of several (positions and normals, no index) - the arm, the palm and the fingers are one draw. */
+function mergeGraveGeos(list) {
+    const pos = [], nor = [];
+    list.forEach(function (g) {
+        const n = g.index ? g.toNonIndexed() : g;
+        pos.push.apply(pos, n.attributes.position.array);
+        nor.push.apply(nor, n.attributes.normal.array);
+    });
+    const out = new THREE.BufferGeometry();
+    out.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    out.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+    return out;
+}
+/* A bony forearm out of the ground, a palm, four clawed fingers spread and a thumb. */
+function graveHandGeo() {
+    const parts = [];
+    const arm = new THREE.CylinderGeometry(0.032, 0.065, 1.0, 6);
+    arm.translate(0, 0.5, 0);                                    // from the ground up, thin at the wrist
+    parts.push(arm);
+    const palm = new THREE.BoxGeometry(0.2, 0.2, 0.06);
+    palm.translate(0, 1.08, 0);
+    parts.push(palm);
+    [-0.6, -0.2, 0.2, 0.6].forEach(function (a, i) {
+        const f = new THREE.CylinderGeometry(0.026, 0.008, 0.34, 4);
+        f.translate(0, 0.17, 0);
+        f.rotateX(0.55);                                         // curled forward, like a claw
+        f.rotateZ(a);
+        f.translate(-0.075 + i * 0.05, 1.17, 0);
+        parts.push(f);
+    });
+    const th = new THREE.CylinderGeometry(0.026, 0.01, 0.24, 4);
+    th.translate(0, 0.12, 0);
+    th.rotateX(0.4);
+    th.rotateZ(-1.1);
+    th.translate(0.1, 1.04, 0.02);
+    parts.push(th);
+    return mergeGraveGeos(parts);
+}
+function graveMaterials() {
+    if (_graveDiscGeo) return;
+    _graveDiscGeo = new THREE.CircleGeometry(1, 48);
+    _graveDiscGeo.rotateX(-Math.PI / 2);
+    _graveEdgeGeo = new THREE.RingGeometry(0.93, 1, 64);
+    _graveEdgeGeo.rotateX(-Math.PI / 2);
+    _graveHandGeo = graveHandGeo();
+    const flat = { transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 };
+    _graveDiscMat = new THREE.MeshBasicMaterial(Object.assign({ color: 0x14081f, opacity: 0 }, flat));
+    _graveEdgeMat = new THREE.MeshBasicMaterial(Object.assign({ color: GRAVE_HEX, opacity: 0.8, side: THREE.DoubleSide }, flat));
+    _graveInnerMat = new THREE.MeshBasicMaterial(Object.assign({ color: 0xd4c6ff, opacity: 0.9, side: THREE.DoubleSide }, flat));
+    _graveHandMat = new THREE.MeshLambertMaterial({ color: 0x9a92b8, emissive: 0x2c1470, side: THREE.DoubleSide });
+}
+function makeGraveCircle(p, r, ms) {        // not makeRing / makeHarvestRing - a name of its own
+    graveMaterials();
+    const g = new THREE.Group();
+    const disc = new THREE.Mesh(_graveDiscGeo, _graveDiscMat);
+    const edge = new THREE.Mesh(_graveEdgeGeo, _graveEdgeMat);
+    const inner = new THREE.Mesh(_graveEdgeGeo, _graveInnerMat);
+    disc.position.y = 0.035; edge.position.y = 0.04; inner.position.y = 0.045;
+    disc.renderOrder = 2; edge.renderOrder = 3; inner.renderOrder = 3;
+    [disc, edge, inner].forEach(function (o) { o.raycast = function () { }; });
+    g.add(disc); g.add(edge); g.add(inner);
+    g.position.set(p[0], 0, p[1]);
+    edge.scale.set(r, 1, r);
+    scene.add(g);
+    return { g: g, disc: disc, edge: edge, inner: inner, x: p[0], z: p[1], r: r, t0: performance.now(), ms: Math.max(1, ms), burstT: 0, hands: null, mistAt: 0 };
+}
+/* The hands: GRAVE_HANDS of them in one draw call, all under the ground until updateGrave lifts them. */
+function graveHands(C) {
+    graveMaterials();
+    const arms = new THREE.InstancedMesh(_graveHandGeo, _graveHandMat, GRAVE_HANDS);
+    arms.raycast = function () { };
+    arms.frustumCulled = false;
+    const hidden = new THREE.Matrix4().makeScale(1, 0.001, 1).setPosition(0, -2, 0);
+    for (let k = 0; k < GRAVE_HANDS; k++) arms.setMatrixAt(k, hidden);
+    C.g.add(arms);
+    const each = [];
+    for (let k = 0; k < GRAVE_HANDS; k++) {
+        const a = Math.random() * Math.PI * 2, d = Math.sqrt(Math.random()) * C.r * 0.85;
+        each.push({ x: Math.cos(a) * d, z: Math.sin(a) * d, delay: Math.random() * 0.08, h: 1.05 + Math.random() * 0.35,
+            tx: (Math.random() - 0.5) * 0.7, tz: (Math.random() - 0.5) * 0.7, yaw: Math.random() * 6.3, ph: Math.random() * 6 });
+    }
+    C.hands = { arms: arms, each: each };
+}
+function dropGraveCircle(C) {
+    if (!C) return;
+    scene.remove(C.g);
+    if (C.hands && C.hands.arms.dispose) C.hands.arms.dispose();
+}
+function graveHud() {
+    if (GRAVE.hud) return GRAVE.hud;
+    const d = document.createElement('div');
+    d.id = 'grave-hud';
+    d.style.cssText = 'position:fixed;top:40%;left:50%;transform:translate(-50%,-50%);z-index:40;pointer-events:none;display:none;' +
+        'text-align:center;font:bold 44px Georgia,serif;letter-spacing:4px;color:#e0b8ff;text-shadow:0 0 12px #4a0a6a,0 0 4px #000;white-space:nowrap';
+    document.body.appendChild(d);
+    return (GRAVE.hud = d);
+}
+/* Under the ground: a low rumble for as long as the circle fills, with scratching in it. */
+function sfxGraveRumble(pos, ms) {
+    const d = chain(pos, 0.9, 50); if (!d) return;
+    const dur = Math.max(0.2, ms / 1000);
+    noiseBurst(d, { type: 'lowpass', freq: 140, sweepTo: 320, dur: dur, vol: 0.75 });
+    tone(d, { type: 'sawtooth', f0: 38, f1: 62, dur: dur, vol: 0.16 });
+    for (let i = 0; i < 10; i++) noiseBurst(d, { type: 'bandpass', freq: 1200 + Math.random() * 1800, q: 5, dur: 0.04, vol: 0.3, delay: Math.random() * dur });
+}
+/* The burst: a thump, earth breaking, a moan going up. */
+function sfxGraveBurst(pos) {
+    const d = chain(pos, 1.0, 60); if (!d) return;
+    tone(d, { type: 'sine', f0: 90, f1: 32, dur: 0.4, vol: 0.55 });
+    noiseBurst(d, { type: 'lowpass', freq: 900, sweepTo: 120, dur: 0.5, vol: 0.8 });
+    for (let i = 0; i < 12; i++) noiseBurst(d, { type: 'bandpass', freq: 1500 + Math.random() * 2500, q: 4, dur: 0.03, vol: 0.4, delay: Math.random() * 0.2 });
+    tone(d, { type: 'sine', f0: 260, f1: 520, dur: 0.6, vol: 0.1, delay: 0.05 });
+}
+
+function graveClear() {
+    const rig = graveRig();
+    // a whole-body clip would keep Death from playing (rigDie) - let go of it
+    if (rig && rig.full === 'GraveCast') rig.full = null;
+    dropGraveCircle(GRAVE.circle);
+    GRAVE.circle = null;
+    GRAVE.e = null; GRAVE.target = ''; GRAVE.until = 0; GRAVE.standAt = 0;
+    if (GRAVE.hud) GRAVE.hud.style.display = 'none';
+}
+
+/* Into GraveCast, `skip` seconds in (a latecomer joins it part way through). */
+function graveCast(rig, skip) {
+    if (!rig) return;
+    if (rig.full === 'GraveCast') return;
+    if (rigFull(rig, 'GraveCast', { fade: 0.12 }) && skip > 0.02) { rig.lower.time = skip; rig.upper.time = skip; }
+}
+
+function graveStep(m, late) {
+    const now = performance.now();
+    const rig = graveRig();
+    if (m.e === 'raise') {
+        const ms = typeof m.ms === 'number' ? m.ms : BOSS_GHOST.graveRaiseMs;
+        GRAVE.e = 'raise'; GRAVE.target = m.p || ''; GRAVE.until = now + ms; GRAVE.standAt = 0;
+        graveCast(rig, Math.max(0, (BOSS_GHOST.graveRaiseMs - ms) / 1000));
+        if (netBoss.mesh) sfxGhostWhisper(netBoss.mesh.position);
+        if (!late && !GRAVE.told) {
+            GRAVE.told = true;
+            pushFeed('GRAVE BURST — WHEN THE CIRCLE OPENS UNDER YOU, GET OUT OR JUMP');
+        }
+    } else if (m.e === 'cast') {
+        if (!Array.isArray(m.p)) return;
+        const ms = typeof m.ms === 'number' ? m.ms : BOSS_GHOST.graveFillMs;
+        GRAVE.e = 'fill'; GRAVE.until = now + ms; GRAVE.standAt = 0;
+        if (m.who) GRAVE.target = m.who;
+        dropGraveCircle(GRAVE.circle);
+        GRAVE.circle = makeGraveCircle(m.p, typeof m.r === 'number' ? m.r : BOSS_GHOST.graveRadius, ms);
+        GRAVE.circle.t0 = now - (BOSS_GHOST.graveFillMs - ms);              // a latecomer sees it as dark as it is
+        GRAVE.circle.ms = BOSS_GHOST.graveFillMs;
+        graveCast(rig, (BOSS_GHOST.graveRaiseMs + BOSS_GHOST.graveFillMs - ms) / 1000);
+        const at = new THREE.Vector3(m.p[0], 0.2, m.p[1]);
+        if (ms > 200) sfxGraveRumble(at, ms);
+        spawnGhostMist(at, 10);
+    } else if (m.e === 'burst') {
+        if (!Array.isArray(m.p)) return;
+        GRAVE.e = 'burst';
+        if (!GRAVE.circle) { GRAVE.circle = makeGraveCircle(m.p, BOSS_GHOST.graveRadius, 1); GRAVE.circle.t0 = now - 1; }
+        const C = GRAVE.circle;
+        C.burstT = now;
+        graveHands(C);
+        const at = new THREE.Vector3(C.x, 0.1, C.z);
+        sfxGraveBurst(at);
+        spawnDust(at, 22);
+        spawnGhostMist(at, 30);
+        const me = camera.position, d = Math.hypot(me.x - C.x, me.z - C.z);
+        if (d < C.r + 4 && playerHealth > 0) camShake = Math.min(0.7, camShake + 0.35 * (1 - Math.max(0, d - C.r) / 4));
+        if (GRAVE.hud) GRAVE.hud.style.display = 'none';
+    } else if (m.e === 'judge') {
+        if (Array.isArray(m.hit) && m.hit.indexOf(NET.id) >= 0) {
+            camShake = Math.min(0.9, camShake + 0.5);
+            pushFeed('THE GRAVE CAUGHT YOU — GET OUT OF THE CIRCLE, OR JUMP');
+        } else if (Array.isArray(m.safe) && m.safe.indexOf(NET.id) >= 0) pushFeed('OUT OF THE GRAVE');
+    } else if (m.e === 'done') {
+        const was = GRAVE.e || (rig && rig.full === 'GraveCast');
+        GRAVE.e = null; GRAVE.target = ''; GRAVE.until = 0;
+        if (GRAVE.hud) GRAVE.hud.style.display = 'none';
+        // a circle that never burst (it should not happen, but a latecomer can miss the burst): let it fade
+        if (GRAVE.circle && !GRAVE.circle.burstT) GRAVE.circle.burstT = now;
+        if (was && rig && netBoss.alive) GRAVE.standAt = now + 60;
+    }
+}
+
+function onBossGrave(m) {
+    if (!m || typeof m.e !== 'string' || !netBoss.active || !netBoss.alive) return;
+    graveStep(m, false);
+}
+
+/* The snapshot's fields 8-12 with 12 or 13 in 8 (a latecomer, or a missed event) */
+function graveFromSnapshot(r) {
+    const code = r[8];
+    if (code === 12) {
+        if (!GRAVE.e && typeof r[10] === 'number') graveStep({ e: 'raise', p: r[9], ms: r[10] }, true);
+    } else if (code === 13) {
+        if (GRAVE.e !== 'fill' && typeof r[10] === 'number' && r[10] > 100 && typeof r[11] === 'number' && typeof r[12] === 'number')
+            graveStep({ e: 'cast', p: [r[11], r[12]], r: BOSS_GHOST.graveRadius, ms: r[10], who: r[9] }, true);
+    } else if ((GRAVE.e === 'raise' || GRAVE.e === 'fill') && performance.now() > GRAVE.until + 1500) {
+        graveStep({ e: 'done' });                                    // neither the burst nor the ending arrived
+    }
+}
+
+function updateGrave(delta) {
+    const now = performance.now();
+    if (GRAVE.standAt && now >= GRAVE.standAt) {
+        GRAVE.standAt = 0;
+        const rig = graveRig();
+        if (rig && netBoss.alive && !GRAVE.e && rig.full === 'GraveCast') rigStand(rig, 0.3);
+    }
+    const C = GRAVE.circle;
+    let say = false;
+    if (C) {
+        if (!C.burstT) {
+            // filling: darker, and the inner ring closing in from the edge to the middle
+            const k = Math.min(1, Math.max(0, (now - C.t0) / C.ms));
+            C.disc.scale.set(C.r, 1, C.r);
+            C.disc.material.opacity = 0.2 + 0.55 * k;
+            const s = Math.max(0.04, C.r * (1 - k));
+            C.inner.scale.set(s, 1, s);
+            C.inner.material.opacity = 0.55 + 0.4 * k;
+            C.edge.material.opacity = 0.6 + 0.3 * Math.sin(now * 0.02);
+            if (now >= C.mistAt) {
+                C.mistAt = now + 220;
+                const a = Math.random() * Math.PI * 2, d = Math.sqrt(Math.random()) * C.r * 0.8;
+                spawnGhostMist(new THREE.Vector3(C.x + Math.cos(a) * d, 0.1, C.z + Math.sin(a) * d), 3);
+            }
+            const me = camera.position;
+            if (GRAVE.e === 'fill' && playerHealth > 0 && Math.hypot(me.x - C.x, me.z - C.z) <= C.r + 0.2) say = true;
+        } else {
+            // burst: the hands up in 0.15s, held, down in 0.6s; the circle fades
+            const t = (now - C.burstT) / 1000;
+            const fade = Math.max(0, 1 - t / 0.9);
+            C.disc.material.opacity = 0.75 * fade;
+            C.edge.material.opacity = 0.8 * fade;
+            C.inner.visible = false;
+            if (C.hands) {
+                const H = C.hands, dummy = updateGrave._m || (updateGrave._m = new THREE.Object3D());
+                for (let i = 0; i < GRAVE_HANDS; i++) {
+                    const h = H.each[i], e = t - h.delay;
+                    let up = 0;
+                    if (e > 0 && e < 0.15) up = e / 0.15;
+                    else if (e >= 0.15 && e < 0.4) up = 1;
+                    else if (e >= 0.4 && e < 1.0) up = 1 - (e - 0.4) / 0.6;
+                    up = up * (2 - up);                                     // quick out, easing in at the top
+                    dummy.position.set(h.x, -1.5 * h.h * (1 - up), h.z);
+                    const wig = up > 0 ? 0.12 * Math.sin(now * 0.02 + h.ph) : 0;
+                    dummy.rotation.set(h.tx + wig, h.yaw, h.tz);
+                    dummy.scale.set(1, e > 0 && up > 0 ? h.h : 0.001, 1);
+                    dummy.updateMatrix();
+                    H.arms.setMatrixAt(i, dummy.matrix);
+                }
+                H.arms.instanceMatrix.needsUpdate = true;
+            }
+            if (t > 1.2) { dropGraveCircle(C); GRAVE.circle = null; }
+        }
+    }
+    const hud = say ? graveHud() : GRAVE.hud;
+    if (hud) {
+        if (say) { hud.style.display = 'block'; hud.textContent = '⚠ MOVE ⚠'; }
+        else hud.style.display = 'none';
     }
 }
 
@@ -9557,6 +9847,7 @@ function animate() {
     updateScatter(delta);
     updateHarvest(delta);
     updateSpectral(delta);
+    updateGrave(delta);
     updateNetHazards(delta);
     updateBanditBullets(delta);
     updateModelRigs(delta);

@@ -1306,6 +1306,8 @@ setInterval(() => {
         for (let i = 0; i < sink.duels.length; i++) io.to(code).emit("boss-duel", sink.duels[i]);
         // step 30c: its BONE SCATTER - collapse, gone, rise, strike, the blow, done
         for (let i = 0; i < sink.scatters.length; i++) io.to(code).emit("boss-scatter", sink.scatters[i]);
+        // step 30d: its BONE HARVEST - summon, spin (a ring each), cut (who it reached), tired, done
+        for (let i = 0; i < sink.harvests.length; i++) io.to(code).emit("boss-harvest", sink.harvests[i]);
 
         /* A bullet reached a player. This is where the last piece of trust
            goes away: the server no longer has to believe a client that says it

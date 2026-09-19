@@ -1808,6 +1808,7 @@ function initNetwork() {
 
     NET.socket.on('boss-duel', onBossDuel);             // step 30b: HIGH NOON
     NET.socket.on('boss-scatter', onBossScatter);       // step 30c: BONE SCATTER
+    NET.socket.on('boss-harvest', onBossHarvest);       // step 30d: BONE HARVEST
 
     NET.socket.on('boss-died', function (m) {
         if (!m) return;
@@ -3799,8 +3800,8 @@ const BOSS_DRAGON = {
 };
 
 /* The skeleton's duel, HIGH NOON (step 30b) - SKELETON in boss.js; online those are
-   the ones that count. Single player has no duel and no scatter (its skeleton only
-   draws and fires). */
+   the ones that count. Single player has no duel, no scatter and no harvest (its
+   skeleton only draws and fires). */
 const BOSS_SKELETON = {
     duelFirstMs: 6000, duelEveryMs: 15000, duelRange: 32,
     countdownMs: 3000, duelDamage: 80, missBeyond: 45,
@@ -3809,7 +3810,12 @@ const BOSS_SKELETON = {
     scatterAt: 0.5, collapseMs: 1000, goneMs: 2000, riseMs: 1250,
     meleeMs: 833, meleeHitMs: 375, meleeRange: 3.2, meleeDamage: 30,
     behindDist: 2.4, afterScatterMs: 5000,
-    lungeSpeed: 16, lungeStop: 1.2          // the leap at whoever it came for, until the blow lands
+    lungeSpeed: 16, lungeStop: 1.2,         // the leap at whoever it came for, until the blow lands
+    // step 30d - BONE HARVEST
+    harvestFirstMs: 14000, harvestEveryMs: 22000, harvestRange: 22,
+    summonMs: 1500, spinMs: 1000, ringAtMs: 300, waves: ["low", "high", "low"],
+    ringSpeed: 9, ringStart: 1.0, ringMax: 24, ringDamage: 25, lowClear: 0.3, groundFeet: 0.12,
+    dodgeFromMs: 50, dodgeToMs: 250, tiredMs: 3000, gapMs: 3000
 };
 
 function enrageRig(parts) {
@@ -5781,6 +5787,7 @@ function createNetBoss(typeIndex, hp, x, z) {
 
 function destroyNetBoss() {
     if (DUEL.on || DUEL.standAt) duelEnd('clear');          // step 30b
+    harvestClear();                                          // step 30d
     if (SCATTER.e || SCATTER.standAt || SCATTER.bones.length) scatterStep({ e: 'clear' });   // step 30c
     if (netBoss.mesh) {
         banditGroup.remove(netBoss.mesh);
@@ -5824,6 +5831,7 @@ function onBossState(m) {
         rigGatling(netBoss.rig && netBoss.rig.model, gs);
         duelFromSnapshot(r);                 // step 30b: the skeleton's duel (older servers send nothing)
         scatterFromSnapshot(r);              // step 30c: its BONE SCATTER
+        harvestFromSnapshot(r);              // step 30d: its BONE HARVEST
         netBoss.buf.push({ t: performance.now(), x: r[0], z: r[1], yaw: r[2] });
         if (netBoss.buf.length > 14) netBoss.buf.shift();
         netBoss.countdown = -1;
@@ -6142,6 +6150,7 @@ function scatterStep(m, late) {
     const at = m.p ? new THREE.Vector3(m.p[0], 0, m.p[1]) : (netBoss.mesh ? netBoss.mesh.position.clone() : new THREE.Vector3());
     if (e === 'collapse') {
         if (DUEL.on || DUEL.standAt) duelEnd('clear');                 // a count it was running is off
+        HARVEST.e = null; HARVEST.until = 0; HARVEST.standAt = 0;      // and a harvest (step 30d) - its rings fly on
         SCATTER.e = e; SCATTER.until = now + (m.ms || BOSS_SKELETON.collapseMs); SCATTER.standAt = 0;
         scatterHide(false);
         if (rig) rigFull(rig, 'Collapse', { fade: 0.08, instant: !!late });
@@ -6238,9 +6247,179 @@ function updateScatter(delta) {
     }
 }
 
+/* ---- BONE HARVEST - the skeleton's rings (step 30d) ---------------------------
+   The server says when (boss-harvest): "summon" - Summon, bones out of the ground;
+   "spin" (k: low / high) - SpinLow / SpinHigh; "ring" - a ring of bones leaves it,
+   growing at `v` from `r0` to `max`, and here it is drawn: a band at shin height
+   (low - jump it) or just over a standing head (high - stay on the ground), with
+   bones whirling round it; "cut" - who it reached and whether it got them; "tired"
+   - Exhausted, the window to hurt it; "done". The cut is the server's: it judges
+   where your feet were a moment after the ring reached you. The ring is drawn
+   RING_LEAD_MS ahead of the clock it arrived on, so it reaches you on screen about
+   when it reaches you on the server. When one is about to reach us, the screen
+   says what to do. */
+const HARVEST = { e: null, until: 0, standAt: 0, rings: [], hud: null, lastSaid: '' };
+const RING_LEAD_MS = 100;
+let _ringBandGeo = null, _ringBoneGeo = null, _ringBandMat = null, _ringBoneMat = null;
+
+function harvestRig() { return duelRig(); }
+function ringMaterials() {
+    if (_ringBandGeo) return;
+    _ringBandGeo = new THREE.CylinderGeometry(1, 1, 0.3, 72, 1, true);
+    _ringBoneGeo = new THREE.CylinderGeometry(0.045, 0.045, 0.5, 5);
+    _ringBoneGeo.rotateZ(Math.PI / 2);                              // lying along the ring
+    _ringBandMat = new THREE.MeshBasicMaterial({ color: 0xcfe8b0, transparent: true, opacity: 0.32, side: THREE.DoubleSide, depthWrite: false });
+    _ringBoneMat = new THREE.MeshLambertMaterial({ color: 0xe6dcc2, emissive: 0x1f3a12 });
+}
+const RING_BONES = 44;
+function makeRing(m) {
+    ringMaterials();
+    const g = new THREE.Group();
+    const y = m.k === 'high' ? 2.15 : 0.22;
+    const band = new THREE.Mesh(_ringBandGeo, _ringBandMat);
+    band.position.y = y; band.raycast = function () { };
+    g.add(band);
+    const bones = new THREE.InstancedMesh(_ringBoneGeo, _ringBoneMat, RING_BONES);
+    bones.raycast = function () { };
+    bones.frustumCulled = false;
+    g.add(bones);
+    g.position.set(m.p[0], 0, m.p[1]);
+    scene.add(g);
+    return { id: m.i, k: m.k, g: g, band: band, bones: bones, y: y, t0: performance.now() - RING_LEAD_MS, v: m.v || BOSS_SKELETON.ringSpeed,
+        r0: m.r0 || BOSS_SKELETON.ringStart, max: m.max || BOSS_SKELETON.ringMax, swept: false, spin: Math.random() * 6 };
+}
+function dropRing(r) {
+    scene.remove(r.g);
+    r.bones.dispose && r.bones.dispose();
+}
+function harvestHud() {
+    if (HARVEST.hud) return HARVEST.hud;
+    const d = document.createElement('div');
+    d.id = 'harvest-hud';
+    d.style.cssText = 'position:fixed;top:40%;left:50%;transform:translate(-50%,-50%);z-index:40;pointer-events:none;display:none;' +
+        'text-align:center;font:bold 44px Georgia,serif;letter-spacing:4px;text-shadow:0 0 10px #000,0 0 4px #000;white-space:nowrap';
+    document.body.appendChild(d);
+    return (HARVEST.hud = d);
+}
+function sfxBoneSummon(pos) {
+    const d = chain(pos, 0.9, 60); if (!d) return;
+    noiseBurst(d, { type: 'lowpass', freq: 220, dur: 1.2, vol: 0.7 });
+    tone(d, { type: 'sawtooth', f0: 55, f1: 38, dur: 1.3, vol: 0.18 });
+    for (let i = 0; i < 16; i++) noiseBurst(d, { type: 'bandpass', freq: 1600 + Math.random() * 2400, q: 4, dur: 0.03, vol: 0.4, delay: 0.3 + Math.random() * 1.0 });
+}
+function sfxRingWhirr(pos, high) {
+    const d = chain(pos, 0.8, 60); if (!d) return;
+    noiseBurst(d, { type: 'bandpass', freq: high ? 900 : 400, sweepTo: high ? 2600 : 1400, q: 1.2, dur: 0.45, vol: 0.6 });
+    for (let i = 0; i < 8; i++) noiseBurst(d, { type: 'bandpass', freq: 2000 + Math.random() * 2000, q: 5, dur: 0.02, vol: 0.35, delay: Math.random() * 0.4 });
+}
+
+function harvestClear() {
+    HARVEST.rings.forEach(dropRing);
+    HARVEST.rings.length = 0;
+    HARVEST.e = null; HARVEST.until = 0; HARVEST.standAt = 0;
+    if (HARVEST.hud) HARVEST.hud.style.display = 'none';
+}
+
+function harvestStep(m, late) {
+    const now = performance.now();
+    const rig = harvestRig();
+    const at = netBoss.mesh ? netBoss.mesh.position.clone() : new THREE.Vector3();
+    if (m.e === 'summon') {
+        HARVEST.e = 'summon'; HARVEST.until = now + (m.ms || BOSS_SKELETON.summonMs); HARVEST.standAt = 0;
+        if (rig) rigFull(rig, 'Summon', { fade: 0.15 });
+        if (!late) {
+            sfxBoneSummon(at);
+            spawnDust(at.clone().setY(0.1), 16);
+            pushFeed('BONE HARVEST — JUMP THE LOW RINGS, STAY DOWN FOR THE HIGH ONE');
+        }
+    } else if (m.e === 'spin') {
+        HARVEST.e = 'spin'; HARVEST.until = now + (m.ms || BOSS_SKELETON.spinMs);
+        if (rig) {
+            const clip = m.k === 'high' ? 'SpinHigh' : 'SpinLow';
+            if (rig.full === clip) rig.full = null;                   // the same spin again: from the top
+            rigFull(rig, clip, { fade: 0.08 });
+        }
+    } else if (m.e === 'ring') {
+        if (!Array.isArray(m.p)) return;
+        HARVEST.rings.push(makeRing(m));
+        sfxRingWhirr(new THREE.Vector3(m.p[0], 1, m.p[1]), m.k === 'high');
+    } else if (m.e === 'cut') {
+        if (m.p !== NET.id) return;
+        if (m.hit) { camShake = Math.min(0.8, camShake + 0.45); pushFeed(m.k === 'high' ? 'THE HIGH RING CAUGHT YOUR HEAD — STAY DOWN FOR IT' : 'THE LOW RING CUT YOUR LEGS — JUMP IT'); }
+        else pushFeed(m.k === 'high' ? 'STAYED UNDER IT' : 'CLEARED IT');
+    } else if (m.e === 'tired') {
+        HARVEST.e = 'tired'; HARVEST.until = now + (m.ms || BOSS_SKELETON.tiredMs);
+        if (rig) rigFull(rig, 'Exhausted', { loop: true, fade: 0.25 });
+        if (!late) pushFeed((netBoss.type ? netBoss.type.name : 'THE BOSS') + ' IS SPENT — NOW!');
+    } else if (m.e === 'done') {
+        const was = HARVEST.e;
+        HARVEST.e = null; HARVEST.until = 0;
+        if (was && rig && netBoss.alive) HARVEST.standAt = now + 60;
+    }
+}
+
+function onBossHarvest(m) {
+    if (!m || typeof m.e !== 'string' || !netBoss.active || !netBoss.alive) return;
+    harvestStep(m, false);
+}
+
+/* The snapshot's fields 8-10 with 7-9 in 8 (a latecomer, or a missed event) */
+function harvestFromSnapshot(r) {
+    const code = r[8];
+    const e = code === 7 ? 'summon' : code === 8 ? 'spin' : code === 9 ? 'tired' : null;
+    if (e && (HARVEST.e !== e || (e === 'spin' && r[9] && HARVEST.k !== r[9]))) {
+        harvestStep({ e: e, k: r[9], ms: r[10] || 0 }, true);
+        HARVEST.k = r[9];
+    } else if (!e && HARVEST.e && performance.now() > HARVEST.until + 1500) harvestStep({ e: 'done' });   // the ending never arrived
+}
+
+function updateHarvest(delta) {
+    const now = performance.now();
+    if (HARVEST.standAt && now >= HARVEST.standAt) {
+        HARVEST.standAt = 0;
+        const rig = harvestRig();
+        if (rig && netBoss.alive && !HARVEST.e && !SCATTER.e) rigStand(rig, 0.3);
+    }
+    const hud = HARVEST.rings.length ? harvestHud() : HARVEST.hud;
+    let say = '', sayHigh = false;
+    const me = camera.position, dummy = updateHarvest._m || (updateHarvest._m = new THREE.Object3D());
+    for (let i = HARVEST.rings.length - 1; i >= 0; i--) {
+        const R = HARVEST.rings[i];
+        const r = R.r0 + R.v * (now - R.t0) / 1000;
+        if (r >= R.max + 0.5) { dropRing(R); HARVEST.rings.splice(i, 1); continue; }
+        R.band.scale.set(r, 1, r);
+        R.band.material.opacity = 0.32 * Math.min(1, (R.max + 0.5 - r) / 3);
+        R.spin += delta * 3.2;
+        for (let k = 0; k < RING_BONES; k++) {
+            const a = (k / RING_BONES) * Math.PI * 2 + R.spin / Math.max(1, r * 0.35);
+            dummy.position.set(Math.cos(a) * r, R.y + Math.sin(k * 1.7 + R.spin * 3) * 0.06, Math.sin(a) * r);
+            dummy.rotation.set(R.spin * 4 + k, -a, 0);
+            dummy.updateMatrix();
+            R.bones.setMatrixAt(k, dummy.matrix);
+        }
+        R.bones.instanceMatrix.needsUpdate = true;
+        // about to reach us? (online players only; the server judges it, this only warns)
+        const d = Math.hypot(me.x - R.g.position.x, me.z - R.g.position.z);
+        const ahead = (d - r) / R.v;
+        if (d <= R.max && ahead > -0.15 && ahead < 0.75 && playerHealth > 0) { say = R.k; sayHigh = R.k === 'high'; }
+        if (!R.swept && ahead <= 0.05 && d <= R.max) {
+            R.swept = true;
+            sfxRingWhirr(new THREE.Vector3(me.x, R.y, me.z), R.k === 'high');
+        }
+    }
+    if (hud) {
+        if (say) {
+            hud.style.display = 'block';
+            hud.style.color = sayHigh ? '#ffd27a' : '#9dff7a';
+            hud.textContent = sayHigh ? '⬇ STAY DOWN ⬇' : '⬆ JUMP ⬆';
+        } else hud.style.display = 'none';
+    }
+}
+
 function startNetBossDeath() {
     if (!netBoss.active) return;
     if (SCATTER.e || SCATTER.standAt || SCATTER.bones.length) scatterStep({ e: 'clear' });   // step 30c
+    harvestClear();                                                                          // step 30d
     if (DUEL.on || DUEL.standAt) duelEnd('clear');
     netBoss.alive = false;
     netBoss.deathT = 0;
@@ -8981,6 +9160,7 @@ function animate() {
     updateNetBoss(delta);
     updateDuel(delta);
     updateScatter(delta);
+    updateHarvest(delta);
     updateNetHazards(delta);
     updateBanditBullets(delta);
     updateModelRigs(delta);

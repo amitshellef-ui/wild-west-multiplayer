@@ -18,7 +18,8 @@
                the player is in cover, or somebody shoots it in the skull first
                (step 30b - see SKELETON). At half health, once, it falls apart and
                comes back together behind somebody (step 30c - BONE SCATTER). The
-               last ability comes in 30d.
+               last: BONE HARVEST, three rings of bones along the ground - jump the
+               low ones, stay down for the high one (step 30d).
      charge   closes the distance at a run and hits you with his shoulder
      robot     spins up a gatling, plants its feet and hoses where it faces
                (step 27 - see ROBOT)
@@ -149,8 +150,32 @@ const SKELETON = {
     scatterAt: 0.5, collapseMs: 1000, goneMs: 2000, riseMs: 1250,
     meleeMs: 833, meleeHitMs: 375, meleeRange: 3.2, meleeDamage: 30,
     behindDist: 2.4, afterScatterMs: 5000,
-    lungeSpeed: 16, lungeStop: 1.2          // the leap at whoever it came for, until the blow lands
+    lungeSpeed: 16, lungeStop: 1.2,         // the leap at whoever it came for, until the blow lands
+    // step 30d - BONE HARVEST, see below
+    harvestFirstMs: 14000, harvestEveryMs: 22000, harvestRange: 22,
+    summonMs: 1500, spinMs: 1000, ringAtMs: 300, waves: ["low", "high", "low"],
+    ringSpeed: 9, ringStart: 1.0, ringMax: 24, ringDamage: 25, lowClear: 0.3, groundFeet: 0.12,
+    dodgeFromMs: 50, dodgeToMs: 250, tiredMs: 3000, gapMs: 3000
 };
+
+/* ---- The skeleton's BONE HARVEST (step 30d) ----------------------------------
+   Every harvestEveryMs (the first harvestFirstMs after it arrives), when somebody it
+   can see is within harvestRange: it pulls bones out of the ground (Summon,
+   summonMs), then spins three times (SpinLow / SpinHigh, spinMs each), and every
+   spin sends a ring of bones out along the ground, ringAtMs into it - low, high,
+   low (`waves`). A ring grows at ringSpeed from ringStart to ringMax, and cuts
+   everybody it reaches with a line to it (walls stop it) for ringDamage - unless:
+     low   at shin height - jump it (feet above lowClear)
+     high  just over a standing head - stay on the ground (feet under groundFeet: any
+           jump at all puts the head in it, so hopping non-stop is no answer)
+   There is no crouch in the game, so jumping is the whole answer (decided with
+   the player). The ring is judged a moment after it reaches you - any sample of
+   where your feet were between dodgeFromMs and dodgeToMs after it crossed you that
+   was on the safe side counts - because what you saw arrived late and your jump
+   reaches the server late too. Then it is exhausted (Exhausted, tiredMs): planted,
+   not shooting - the window to hurt it. It never runs with a duel: whichever comes
+   second waits gapMs after the other ends. A scatter calls it off; rings already
+   out keep going. b.harvest = { e: summon / spin / tired, until, wave }, b.rings. */
 
 /* ---- The skeleton's BONE SCATTER (step 30c) ----------------------------------
    Once only, the first time it is down to half its health: it collapses into a
@@ -280,6 +305,7 @@ function spawnBoss(room, players, now) {
         strafeDir: Math.random() > 0.5 ? 1 : -1,
         lastShot: now + 900,        // a breath before the first round
         abilityAt: now + (type.id === "skeleton" ? SKELETON.duelFirstMs : 2000),
+        harvestAt: now + SKELETON.harvestFirstMs,       // step 30d - read by the skeleton only
         ghostUntil: 0,
         chargeUntil: 0
     };
@@ -592,6 +618,7 @@ function startScatter(b, now, sink) {
     b.scattered = true;                                          // once only
     b.duel = null;                                               // a count it was running is off
     b.staggerUntil = 0;
+    b.harvest = null;                                            // and so is a harvest (its rings fly on)
     b.scatter = { e: "collapse", until: now + SKELETON.collapseMs, target: "" };
     sink.scatters.push({ e: "collapse", p: [round2(b.x), round2(b.z)], ms: SKELETON.collapseMs });
 }
@@ -652,11 +679,97 @@ function tickScatter(room, b, players, now, dt, sink) {
     }
 }
 
+/* BONE HARVEST (step 30d): somebody it can see within harvestRange */
+function harvestInReach(room, players, b) {
+    for (const id in players) {
+        const p = players[id];
+        if (p.room !== room.code || !p.alive) continue;
+        if (Math.hypot(p.x - b.x, p.z - b.z) <= SKELETON.harvestRange && nav.losClear(b.x, b.z, p.x, p.z)) return true;
+    }
+    return false;
+}
+
+function startHarvest(b, now, sink) {
+    b.harvest = { e: "summon", until: now + SKELETON.summonMs, wave: -1, ringAt: 0 };
+    sink.harvests.push({ e: "summon", ms: SKELETON.summonMs });
+}
+
+/* summon -> spin, spin, spin (a ring each) -> tired -> back to the fight */
+function tickHarvest(b, now, sink) {
+    const h = b.harvest, W = SKELETON.waves;
+    if (h.e === "spin" && h.ringAt && now >= h.ringAt) { h.ringAt = 0; launchRing(b, W[h.wave], now, sink); }
+    if (now < h.until) return;
+    if (h.e === "summon" || h.e === "spin") {
+        h.wave++;
+        if (h.wave < W.length) {
+            h.e = "spin"; h.until = now + SKELETON.spinMs; h.ringAt = now + SKELETON.ringAtMs;
+            sink.harvests.push({ e: "spin", i: h.wave, k: W[h.wave], ms: SKELETON.spinMs });
+        } else {
+            h.e = "tired"; h.until = now + SKELETON.tiredMs;
+            sink.harvests.push({ e: "tired", ms: SKELETON.tiredMs });
+        }
+        return;
+    }
+    b.harvest = null;                                            // tired is over
+    b.harvestAt = now + SKELETON.harvestEveryMs;
+    b.abilityAt = Math.max(b.abilityAt, now + SKELETON.gapMs);
+    b.lastShot = now + 400;
+    sink.harvests.push({ e: "done" });
+}
+
+function launchRing(b, kind, now, sink) {
+    if (!b.rings) b.rings = [];
+    const id = (b.ringSeq = (b.ringSeq || 0) + 1);
+    b.rings.push({ id: id, k: kind, x: b.x, z: b.z, t0: now, r: SKELETON.ringStart, crossed: {}, pending: [] });
+    sink.harvests.push({ e: "ring", i: id, k: kind, p: [round2(b.x), round2(b.z)], v: SKELETON.ringSpeed, r0: SKELETON.ringStart, max: SKELETON.ringMax });
+}
+
+/* The rings: where they have got to, whom they reached this tick (with a line to
+   them from where the ring started), and the verdicts that are due. Where every
+   player's feet were is kept for the last second and a half while rings are out. */
+function stepRings(room, b, players, now, sink) {
+    if (!b.rings || !b.rings.length) { b.feet = null; return; }
+    if (!b.feet) b.feet = {};
+    for (const id in players) {
+        const p = players[id];
+        if (p.room !== room.code) continue;
+        const hist = b.feet[id] || (b.feet[id] = []);
+        hist.push([now, (typeof p.y === "number" ? p.y : 1.72) - 1.72]);
+        while (hist.length && hist[0][0] < now - 1500) hist.shift();
+    }
+    for (let i = b.rings.length - 1; i >= 0; i--) {
+        const g = b.rings[i];
+        const r0 = g.r, r1 = Math.min(SKELETON.ringMax, SKELETON.ringStart + SKELETON.ringSpeed * (now - g.t0) / 1000);
+        g.r = r1;
+        for (const id in players) {
+            const p = players[id];
+            if (p.room !== room.code || !p.alive || g.crossed[id]) continue;
+            const d = Math.hypot(p.x - g.x, p.z - g.z);
+            if (d > r0 && d <= r1 && nav.losClear(g.x, g.z, p.x, p.z)) { g.crossed[id] = 1; g.pending.push({ id: id, T: now }); }
+        }
+        for (let j = g.pending.length - 1; j >= 0; j--) {
+            const c = g.pending[j];
+            if (now < c.T + SKELETON.dodgeToMs) continue;
+            g.pending.splice(j, 1);
+            const p = players[c.id];
+            if (!p || p.room !== room.code || !p.alive) continue;
+            const hist = (b.feet[c.id] || []).filter((s) => s[0] >= c.T + SKELETON.dodgeFromMs && s[0] <= c.T + SKELETON.dodgeToMs);
+            if (!hist.length) hist.push([now, (typeof p.y === "number" ? p.y : 1.72) - 1.72]);
+            const dodged = g.k === "low" ? hist.some((s) => s[1] > SKELETON.lowClear) : hist.some((s) => s[1] < SKELETON.groundFeet);
+            if (!dodged) sink.hits.push({ playerId: p.id, damage: SKELETON.ringDamage, from: "boss" });
+            sink.harvests.push({ e: "cut", i: g.id, k: g.k, p: p.id, hit: !dodged });
+        }
+        if (r1 >= SKELETON.ringMax && !g.pending.length) b.rings.splice(i, 1);
+    }
+}
+
 /* mark -> count down -> one shot. b.duel = { target, until }; b.staggerUntil after
    a skull shot broke it (duelHeadshot). Both are in the snapshot for latecomers. */
 function tickSkeleton(room, b, players, near, now, dt, sink) {
+    stepRings(room, b, players, now, sink);                     // step 30d: rings out fly on, whatever it does next
     if (b.scatter) { tickScatter(room, b, players, now, dt, sink); return; }
     if (!b.scattered && b.health <= b.maxHealth * SKELETON.scatterAt) { startScatter(b, now, sink); return; }
+    if (b.harvest) { tickHarvest(b, now, sink); return; }
     if (b.staggerUntil && now < b.staggerUntil) return;         // down on one knee
     if (b.duel) {
         const p = players[b.duel.target];
@@ -664,6 +777,7 @@ function tickSkeleton(room, b, players, near, now, dt, sink) {
             sink.duels.push({ e: "lost", p: b.duel.target });
             b.duel = null;
             b.abilityAt = now + 4000;
+            b.harvestAt = Math.max(b.harvestAt || 0, now + SKELETON.gapMs);
             return;
         }
         if (now < b.duel.until) return;
@@ -677,8 +791,13 @@ function tickSkeleton(room, b, players, near, now, dt, sink) {
         });
         b.duel = null;
         b.abilityAt = now + SKELETON.duelEveryMs;
+        b.harvestAt = Math.max(b.harvestAt || 0, now + SKELETON.gapMs);
         b.lastShot = now + 400;                                  // a breath before the revolver again
         return;
+    }
+    if (now >= b.harvestAt) {
+        if (harvestInReach(room, players, b)) { startHarvest(b, now, sink); return; }
+        b.harvestAt = now + 1000;                               // nobody near enough - look again in a second
     }
     if (now >= b.abilityAt) {
         const p = duelTarget(room, players, b);
@@ -696,6 +815,7 @@ function duelHeadshot(room, now) {
     b.duel = null;
     b.staggerUntil = now + SKELETON.staggerMs;
     b.abilityAt = now + SKELETON.duelEveryMs;
+    b.harvestAt = Math.max(b.harvestAt || 0, now + SKELETON.staggerMs + SKELETON.gapMs);
     b.lastShot = now + SKELETON.staggerMs;
     return true;
 }
@@ -883,8 +1003,9 @@ function stepBoss(room, b, players, now, dt, sink) {
     const charging = b.chargeUntil && now < b.chargeUntil;
     // the robot plants its feet while the barrels spin and fire (step 27), and the
     // skeleton while it counts a duel down or is down on one knee (step 30b), and
-    // all through BONE SCATTER (step 30c) - no walking (only its leap, tickScatter) and no revolver
-    const dueling = !!b.duel || (b.staggerUntil && now < b.staggerUntil) || !!b.scatter;
+    // all through BONE SCATTER (step 30c) - no walking (only its leap, tickScatter) and no revolver -
+    // and all through BONE HARVEST (step 30d)
+    const dueling = !!b.duel || (b.staggerUntil && now < b.staggerUntil) || !!b.scatter || !!b.harvest;
     const planted = b.gState === "spin" || b.gState === "fire" || dueling;
     const baseSpeed = b.type.speed * (b.phase === 2 ? PHASE2.speedScale : 1);
     const speed = b.state === "chase" ? baseSpeed : baseSpeed * 0.55;
@@ -982,6 +1103,7 @@ function stepBoss(room, b, players, now, dt, sink) {
     if (marked) { faceX = marked.x; faceZ = marked.z; }                  // eyes on whoever it marked
     else if (behind) { faceX = behind.x; faceZ = behind.z; }             // and on whoever it came back behind
     else if (b.scatter) { /* a heap of bones, or nothing at all: it does not turn */ }
+    else if (b.harvest) { /* spinning on the spot (the clip turns it), or bent double: it does not turn */ }
     else if (b.staggerUntil && now < b.staggerUntil) { /* on its knee: it does not turn */ }
     else if (b.state === "chase" && near) { faceX = near.player.x; faceZ = near.player.z; }
     else if (b.path && b.path[b.pathIndex]) { faceX = b.path[b.pathIndex].x; faceZ = b.path[b.pathIndex].z; }
@@ -1029,6 +1151,7 @@ function emptySink() {
         shots: [], hits: [], bossShots: [], hazards: [],
         booms: [], slams: [], blinks: [], roars: [], duels: [],     // duels: step 30b
         scatters: [],                                               // step 30c: BONE SCATTER
+        harvests: [],                                               // step 30d: BONE HARVEST
         bossSpawn: null, bossDied: null, bossPhase: null, wave: null,
         missionHits: [], missionEnd: null, missionState: null      // step 24, see missions.js
     };
@@ -1037,6 +1160,7 @@ function emptySink() {
 /* What the clients draw: position, facing, health, and whether it is currently
    see-through. Sent at the same rate as the bandit snapshot. */
 const SCATTER_CODE = { collapse: 3, gone: 4, rise: 5, strike: 6 };
+const HARVEST_CODE = { summon: 7, spin: 8, tired: 9 };
 function snapshot(room, now) {
     const b = room.boss;
     if (!b || !b.alive) return null;
@@ -1060,6 +1184,8 @@ function snapshot(room, now) {
     /* step 30c: BONE SCATTER - 3 collapsing, 4 gone, 5 rising, 6 striking (who it
        came for, ms left in that part) */
     else if (b.scatter) snap.push(SCATTER_CODE[b.scatter.e], b.scatter.target || "", Math.max(0, Math.round(b.scatter.until - t)));
+    /* step 30d: BONE HARVEST - 7 summoning, 8 spinning (low / high), 9 exhausted (ms left) */
+    else if (b.harvest) snap.push(HARVEST_CODE[b.harvest.e], b.harvest.e === "spin" ? SKELETON.waves[b.harvest.wave] : "", Math.max(0, Math.round(b.harvest.until - t)));
     return snap;
 }
 

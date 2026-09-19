@@ -1741,6 +1741,7 @@ function initNetwork() {
 
     NET.socket.on('boss-shot', function (m) {
         if (!m || !m.o || !m.d) return;
+        if (m.k === 'spectral') { onSpectralRound(m); return; }     // step 31b: not an ordinary round
         const flashAt = new THREE.Vector3(m.o[0], m.o[1], m.o[2]);
         if (netBoss.rig && netBoss.rig.parts.muzzle) {
             // it is drawn slightly in the past, so the flash belongs on its gun
@@ -1813,6 +1814,7 @@ function initNetwork() {
     NET.socket.on('boss-duel', onBossDuel);             // step 30b: HIGH NOON
     NET.socket.on('boss-scatter', onBossScatter);       // step 30c: BONE SCATTER
     NET.socket.on('boss-harvest', onBossHarvest);       // step 30d: BONE HARVEST
+    NET.socket.on('boss-spectral', onBossSpectral);     // step 31b: the ghost's SPECTRAL SHOT
 
     NET.socket.on('boss-died', function (m) {
         if (!m) return;
@@ -3829,6 +3831,15 @@ const BOSS_SKELETON = {
     dodgeFromMs: 50, dodgeToMs: 250, tiredMs: 3000, gapMs: 3000
 };
 
+/* The ghost's SPECTRAL SHOT (step 31b) - GHOST in boss.js; online those are the ones
+   that count. Single player has none (its ghost only vanishes and fires). */
+const BOSS_GHOST = {
+    spectralFirstMs: 5000, spectralEveryMs: 7000, spectralRange: 45,
+    raiseMs: 250, flashMs: 600, lockMs: 250, lowerMs: 500,
+    spectralDamage: 60, spectralSpeed: 60, spectralReach: 50,
+    p2: { spectralEveryMs: 5000 }
+};
+
 function enrageRig(parts) {
     parts.materials.forEach(function (m) {
         if (!m.emissive) return;
@@ -5696,6 +5707,7 @@ function updateBanditBullets(delta) {
 function clearBanditBullets() {
     for (let i = 0; i < banditBullets.length; i++) scene.remove(banditBullets[i].mesh);
     banditBullets.length = 0;
+    clearSpectralRounds();                 // step 31b
 }
 
 function showBanditHealth(body) {
@@ -5847,6 +5859,7 @@ function createNetBoss(typeIndex, hp, x, z) {
 function destroyNetBoss() {
     if (DUEL.on || DUEL.standAt) duelEnd('clear');          // step 30b
     harvestClear();                                          // step 30d
+    spectralClear();                                         // step 31b
     if (SCATTER.e || SCATTER.standAt || SCATTER.bones.length) scatterStep({ e: 'clear' });   // step 30c
     if (netBoss.mesh) {
         banditGroup.remove(netBoss.mesh);
@@ -5891,6 +5904,7 @@ function onBossState(m) {
         duelFromSnapshot(r);                 // step 30b: the skeleton's duel (older servers send nothing)
         scatterFromSnapshot(r);              // step 30c: its BONE SCATTER
         harvestFromSnapshot(r);              // step 30d: its BONE HARVEST
+        spectralFromSnapshot(r);             // step 31b: the ghost's SPECTRAL SHOT
         netBoss.buf.push({ t: performance.now(), x: r[0], z: r[1], yaw: r[2] });
         if (netBoss.buf.length > 14) netBoss.buf.shift();
         netBoss.countdown = -1;
@@ -6479,6 +6493,7 @@ function startNetBossDeath() {
     if (!netBoss.active) return;
     if (SCATTER.e || SCATTER.standAt || SCATTER.bones.length) scatterStep({ e: 'clear' });   // step 30c
     harvestClear();                                                                          // step 30d
+    spectralClear();                                                                         // step 31b
     if (DUEL.on || DUEL.standAt) duelEnd('clear');
     netBoss.alive = false;
     netBoss.deathT = 0;
@@ -6546,6 +6561,253 @@ function ghostDeathFade(parts, rig, t) {
     if (!isGhostModel(rig)) return;
     const k = Math.min(1, Math.max(0, (t - GHOST_LOOK.deathFadeFrom) / GHOST_LOOK.deathFadeFor));
     ghostFade(parts, 1 - k);
+}
+
+/* ---- SPECTRAL SHOT - the ghost's round through walls (step 31b) ---------------
+   The server picks who it is for and when (boss-spectral "aim": who, ms until the
+   round, how much of that is the flash), follows them until 0.25s before the round
+   and then fires along a line that no longer moves; the round is a boss-shot with
+   k "spectral". Here it is seen and heard: SpectralShot (both hands, the round on
+   its frame 20), a violet glow on the gun that grows through the flash and turns
+   white when the aim locks - drawn without a depth test, so it shows through the
+   wall somebody is hiding behind, which is the whole warning - a rising whine from
+   where it stands, and the round itself: drawn through walls too, never stopped by
+   one (an ordinary round is - updateBanditBullets), a flicker on every wall it
+   crosses. Whoever it is for is told so in the middle of the screen. */
+const SPECTRAL = { on: false, target: '', until: 0, flashAt: 0, flashMs: 600, fadeAt: 0, standAt: 0, told: false, glow: null, hud: null, rounds: [] };
+const SPECTRAL_HEX = 0x9a7dff;
+const spectralAt = new THREE.Vector3();
+
+function spectralRig() { return netBoss.rig && netBoss.rig.model && netBoss.rig.model.kind === 'model' ? netBoss.rig.model : null; }
+function spectralGlowMap() {
+    if (spectralGlowMap.tex) return spectralGlowMap.tex;
+    const c = document.createElement('canvas');
+    c.width = c.height = 128;
+    const x = c.getContext('2d');
+    const g = x.createRadialGradient(64, 64, 2, 64, 64, 63);
+    g.addColorStop(0, 'rgba(255,255,255,1)');
+    g.addColorStop(0.16, 'rgba(225,210,255,0.98)');
+    g.addColorStop(0.42, 'rgba(125,85,255,0.8)');
+    g.addColorStop(0.75, 'rgba(90,50,230,0.3)');
+    g.addColorStop(1, 'rgba(60,40,200,0)');
+    x.fillStyle = g; x.fillRect(0, 0, 128, 128);
+    return (spectralGlowMap.tex = new THREE.CanvasTexture(c));
+}
+function spectralSprite(size) {
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: spectralGlowMap(), color: 0xffffff, transparent: true, depthTest: false, depthWrite: false }));   // not additive: that washes out to white over sand in daylight
+    sp.scale.set(size, size, 1);
+    sp.renderOrder = 12;
+    sp.raycast = function () { };
+    return sp;
+}
+function spectralGlow() {
+    if (SPECTRAL.glow) return SPECTRAL.glow;
+    const sp = spectralSprite(1);
+    sp.visible = false;
+    scene.add(sp);
+    return (SPECTRAL.glow = sp);
+}
+function spectralHud() {
+    if (SPECTRAL.hud) return SPECTRAL.hud;
+    const d = document.createElement('div');
+    d.id = 'spectral-hud';
+    d.style.cssText = 'position:fixed;top:40%;left:50%;transform:translate(-50%,-50%);z-index:40;pointer-events:none;display:none;' +
+        'text-align:center;font:bold 40px Georgia,serif;letter-spacing:4px;color:#c9b8ff;text-shadow:0 0 12px #3a1a9a,0 0 4px #000;white-space:nowrap';
+    document.body.appendChild(d);
+    return (SPECTRAL.hud = d);
+}
+/* Where its gun is: the muzzle bone, or chest-high in front of a cube rig. */
+function spectralMuzzle(out) {
+    if (netBoss.rig && netBoss.rig.parts.muzzle) return netBoss.rig.parts.muzzle.getWorldPosition(out);
+    if (netBoss.mesh) return out.copy(netBoss.mesh.position).setY(2.6);
+    return out.set(0, 2.6, 0);
+}
+/* The gun charging: a whine that climbs for as long as the flash lasts. */
+function sfxSpectralCharge(pos, ms) {
+    const d = chain(pos, 0.8, 70); if (!d) return;
+    const c = AUD.ctx, t = c.currentTime, dur = Math.max(0.15, ms / 1000);
+    [[170, 1250, 'sawtooth', 0.10], [340, 2500, 'sine', 0.14]].forEach(function (v) {
+        const osc = c.createOscillator(), g = c.createGain();
+        osc.type = v[2];
+        osc.frequency.setValueAtTime(v[0], t);
+        osc.frequency.exponentialRampToValueAtTime(v[1], t + dur);
+        g.gain.setValueAtTime(0.0008, t);
+        g.gain.exponentialRampToValueAtTime(v[3], t + dur * 0.85);
+        g.gain.exponentialRampToValueAtTime(0.0008, t + dur + 0.05);
+        osc.connect(g); g.connect(d);
+        osc.start(t); osc.stop(t + dur + 0.08);
+    });
+    noiseBurst(d, { type: 'bandpass', freq: 500, sweepTo: 3200, q: 2.5, dur: dur, vol: 0.22 });
+}
+function sfxSpectralShot(pos) {
+    const d = chain(pos, 1.0, 85); if (!d) return;
+    tone(d, { type: 'sine', f0: 1900, f1: 120, dur: 0.5, vol: 0.4 });
+    tone(d, { type: 'square', f0: 95, f1: 38, dur: 0.35, vol: 0.3 });
+    noiseBurst(d, { type: 'bandpass', freq: 2400, sweepTo: 300, q: 0.8, dur: 0.4, vol: 0.55 });
+}
+function sfxSpectralPass(pos) {
+    const d = chain(pos, 0.8, 25); if (!d) return;
+    noiseBurst(d, { type: 'bandpass', freq: 3000, sweepTo: 500, q: 2, dur: 0.22, vol: 0.5 });
+    tone(d, { type: 'sine', f0: 1500, f1: 420, dur: 0.22, vol: 0.16 });
+}
+
+function spectralClear() {
+    const rig = spectralRig();
+    // a whole-body clip would keep Death from playing (rigDie) - let go of it
+    if (rig && rig.full === 'SpectralShot') rig.full = null;
+    SPECTRAL.on = false; SPECTRAL.target = ''; SPECTRAL.until = 0; SPECTRAL.flashAt = 0; SPECTRAL.fadeAt = 0; SPECTRAL.standAt = 0; SPECTRAL.told = false;
+    if (SPECTRAL.glow) SPECTRAL.glow.visible = false;
+    if (SPECTRAL.hud) SPECTRAL.hud.style.display = 'none';
+}
+
+function spectralStep(m, late) {
+    const now = performance.now();
+    const rig = spectralRig();
+    if (m.e === 'aim') {
+        const ms = typeof m.ms === 'number' ? m.ms : BOSS_GHOST.raiseMs + BOSS_GHOST.flashMs;
+        const fl = typeof m.fl === 'number' ? Math.min(m.fl, ms) : Math.min(BOSS_GHOST.flashMs, ms);
+        if (SPECTRAL.on) { SPECTRAL.target = m.p || ''; return; }   // its first target fell: the same shot, for somebody else
+        SPECTRAL.on = true; SPECTRAL.target = m.p || '';
+        SPECTRAL.until = now + ms; SPECTRAL.flashAt = now + ms - fl; SPECTRAL.flashMs = Math.max(1, fl);
+        SPECTRAL.fadeAt = 0; SPECTRAL.standAt = 0;
+        if (rig && rigFull(rig, 'SpectralShot', { fade: 0.08 })) {
+            // the round leaves on its frame 20 (0.833s): a latecomer joins it part way through
+            const skip = Math.max(0, (BOSS_GHOST.raiseMs + BOSS_GHOST.flashMs - ms) / 1000);
+            if (skip > 0.02) { rig.lower.time = skip; rig.upper.time = skip; }
+        }
+        sfxSpectralCharge(spectralMuzzle(spectralAt), fl);
+        if (!late && !SPECTRAL.told) {
+            SPECTRAL.told = true;
+            pushFeed('SPECTRAL SHOT — IT GOES THROUGH WALLS. MOVE WHEN THE GUN GLOWS');
+        }
+    } else if (m.e === 'done') {
+        const was = SPECTRAL.on || (rig && rig.full === 'SpectralShot');
+        if (SPECTRAL.on && !SPECTRAL.fadeAt) SPECTRAL.fadeAt = now;       // called off with the gun still glowing
+        SPECTRAL.on = false; SPECTRAL.target = ''; SPECTRAL.until = 0;
+        if (SPECTRAL.hud) SPECTRAL.hud.style.display = 'none';
+        if (was && rig && netBoss.alive) SPECTRAL.standAt = now + 60;
+    }
+}
+
+function onBossSpectral(m) {
+    if (!m || typeof m.e !== 'string' || !netBoss.active || !netBoss.alive) return;
+    spectralStep(m, false);
+}
+
+/* The snapshot's fields 8-10 with 11 in 8 (a latecomer, or a missed event) */
+function spectralFromSnapshot(r) {
+    if (r[8] === 11) {
+        if (!SPECTRAL.on && typeof r[10] === 'number' && r[10] > 150) spectralStep({ e: 'aim', p: r[9], ms: r[10], fl: Math.min(r[10], BOSS_GHOST.flashMs) }, true);
+    } else if (SPECTRAL.on && performance.now() > SPECTRAL.until + 1500) spectralStep({ e: 'done' });   // neither the round nor the ending arrived
+}
+
+/* The round left (boss-shot, k "spectral"): from the gun, along the server's line. */
+function onSpectralRound(m) {
+    const from = spectralMuzzle(new THREE.Vector3());
+    if (!netBoss.active || !netBoss.mesh) from.set(m.o[0], m.o[1], m.o[2]);
+    netBoss.recoil = 0.5;
+    muzzleFlashAt(from, 4.5);
+    spawnParticles(from, SPECTRAL_HEX, 18, 4);
+    sfxSpectralShot(from);
+    makeSpectralRound(from, m.d, typeof m.r === 'number' ? m.r : BOSS_GHOST.spectralReach);
+    SPECTRAL.on = false; SPECTRAL.target = '';
+    SPECTRAL.fadeAt = performance.now();
+    if (SPECTRAL.hud) SPECTRAL.hud.style.display = 'none';
+}
+
+const spectralCoreGeo = new THREE.SphereGeometry(0.11, 8, 6);
+const spectralCoreMat = new THREE.MeshBasicMaterial({ color: 0xe6dcff, transparent: true, depthTest: false, depthWrite: false });
+const spectralTrailGeo = (function () {
+    const g = new THREE.CylinderGeometry(0.075, 0.004, 1, 6, 1, true);
+    g.translate(0, -0.5, 0);                 // the wide end at the round, the point a metre behind it
+    g.rotateX(Math.PI / 2);                  // ... along -z: the group looks where the round is going (+z)
+    return g;
+})();
+const spectralTrailMat = new THREE.MeshBasicMaterial({ color: SPECTRAL_HEX, transparent: true, opacity: 0.6, depthTest: false, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide });
+
+function makeSpectralRound(from, d, reach) {
+    const g = new THREE.Group();
+    const core = new THREE.Mesh(spectralCoreGeo, spectralCoreMat);
+    const trail = new THREE.Mesh(spectralTrailGeo, spectralTrailMat);
+    core.renderOrder = 12; trail.renderOrder = 11;
+    core.raycast = function () { }; trail.raycast = function () { };
+    trail.scale.set(1, 1, 0.01);
+    g.add(trail); g.add(core); g.add(spectralSprite(0.9));
+    g.position.copy(from);
+    const dir = new THREE.Vector3(d[0], d[1], d[2]).normalize();
+    g.lookAt(from.clone().add(dir));
+    scene.add(g);
+    SPECTRAL.rounds.push({ g: g, trail: trail, dir: dir, gone: 0, reach: reach, inWall: collidesAt(from.x, from.z, 0.08), passed: false });
+    if (SPECTRAL.rounds.length > 8) dropSpectralRound(SPECTRAL.rounds.shift());
+}
+function dropSpectralRound(R) {
+    scene.remove(R.g);
+    R.g.children.forEach(function (o) { if (o.isSprite) o.material.dispose(); });    // the geometry, the map and the other two materials are shared
+}
+function clearSpectralRounds() {
+    SPECTRAL.rounds.forEach(dropSpectralRound);
+    SPECTRAL.rounds.length = 0;
+}
+
+function updateSpectral(delta) {
+    const now = performance.now();
+    if (SPECTRAL.standAt && now >= SPECTRAL.standAt) {
+        SPECTRAL.standAt = 0;
+        const rig = spectralRig();
+        if (rig && netBoss.alive && !SPECTRAL.on && rig.full === 'SpectralShot') rigStand(rig, 0.3);
+    }
+    /* the glow on the gun: grows through the flash, white and hard once the aim is locked */
+    const glow = SPECTRAL.glow || (SPECTRAL.on ? spectralGlow() : null);
+    if (glow) {
+        let k = 0, locked = false;
+        if (SPECTRAL.on && now >= SPECTRAL.flashAt) {
+            k = Math.min(1, (now - SPECTRAL.flashAt) / SPECTRAL.flashMs);
+            locked = SPECTRAL.until - now <= BOSS_GHOST.lockMs;
+        } else if (SPECTRAL.fadeAt) {
+            k = 1 - (now - SPECTRAL.fadeAt) / 180;
+            if (k <= 0) { k = 0; SPECTRAL.fadeAt = 0; }
+        }
+        glow.visible = k > 0 && netBoss.active;
+        if (glow.visible) {
+            spectralMuzzle(glow.position);
+            const flick = locked ? 1.0 + 0.2 * Math.sin(now * 0.09) : 0.9 + 0.1 * Math.sin(now * 0.03);
+            // from far off it would be a speck: past 8 m it keeps the size it has on the screen
+            const far = Math.max(1, glow.position.distanceTo(camera.position) / 8);
+            const size = (0.7 + 2.6 * k) * flick * far * (SPECTRAL.fadeAt ? 1.15 : 1);
+            glow.scale.set(size, size, 1);
+            glow.material.opacity = SPECTRAL.fadeAt ? k : 0.35 + 0.65 * k;
+            glow.material.color.setHex(locked || SPECTRAL.fadeAt ? 0xffffff : 0xb9a2ff);
+        }
+    }
+    const hud = SPECTRAL.on && SPECTRAL.target === NET.id && playerHealth > 0 ? spectralHud() : SPECTRAL.hud;
+    if (hud) {
+        if (SPECTRAL.on && SPECTRAL.target === NET.id && playerHealth > 0) {
+            hud.style.display = 'block';
+            hud.textContent = '\u2620 SPECTRAL SHOT \u2014 MOVE \u2620';
+        } else hud.style.display = 'none';
+    }
+    /* the rounds: no wall stops them, the ground and the reach do */
+    const me = camera.position;
+    for (let i = SPECTRAL.rounds.length - 1; i >= 0; i--) {
+        const R = SPECTRAL.rounds[i], p = R.g.position;
+        const travel = Math.min(BOSS_GHOST.spectralSpeed * delta, R.reach - R.gone);
+        // walls crossed on the way: a flicker going in and coming out
+        for (let s = 0.5; s <= travel; s += 0.5) {
+            const x = p.x + R.dir.x * s, z = p.z + R.dir.z * s;
+            const w = collidesAt(x, z, 0.08);
+            if (w !== R.inWall) { R.inWall = w; spawnParticles(new THREE.Vector3(x, p.y + R.dir.y * s, z), SPECTRAL_HEX, 7, 2.2); }
+        }
+        // how near it came to us on this stretch (it is fast: a frame is metres)
+        const t = Math.max(0, Math.min(travel, (me.x - p.x) * R.dir.x + (me.y - p.y) * R.dir.y + (me.z - p.z) * R.dir.z));
+        const near = Math.hypot(p.x + R.dir.x * t - me.x, p.y + R.dir.y * t - me.y, p.z + R.dir.z * t - me.z);
+        if (!R.passed && near < 3) { R.passed = true; sfxSpectralPass(new THREE.Vector3(p.x + R.dir.x * t, p.y + R.dir.y * t, p.z + R.dir.z * t)); }
+        p.addScaledVector(R.dir, travel);
+        R.gone += travel;
+        R.trail.scale.z = Math.max(0.01, Math.min(7, R.gone));
+        let done = R.gone >= R.reach - 1e-6 || near < 0.62;
+        if (p.y <= 0.03) { spawnParticles(new THREE.Vector3(p.x, 0.05, p.z), SPECTRAL_HEX, 10, 2.5); done = true; }
+        if (done) { dropSpectralRound(R); SPECTRAL.rounds.splice(i, 1); }
+    }
 }
 
 function updateNetBoss(delta) {
@@ -9294,6 +9556,7 @@ function animate() {
     updateDuel(delta);
     updateScatter(delta);
     updateHarvest(delta);
+    updateSpectral(delta);
     updateNetHazards(delta);
     updateBanditBullets(delta);
     updateModelRigs(delta);

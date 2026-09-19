@@ -217,7 +217,10 @@ function stepBullets(room, players, dt, sink) {
 
         if (ny <= 0.03) { room.bullets.splice(i, 1); continue; }
         const m = room.mission;
-        const wallAt = blockedAt(bl.x, bl.z, nx, nz);
+        /* step 31b: the ghost's SPECTRAL SHOT (`thru`) goes through the town - no wall
+           stops it, so it never hits the bank's wall either - and is gone after
+           `maxLife` seconds instead of the usual road. */
+        const wallAt = bl.thru ? -1 : blockedAt(bl.x, bl.z, nx, nz);
         if (wallAt >= 0) {
             if (m && m.box && sink.missionHits) {
                 const hx = bl.x + (nx - bl.x) * wallAt, hy = bl.y + (ny - bl.y) * wallAt, hz = bl.z + (nz - bl.z) * wallAt;
@@ -253,7 +256,7 @@ function stepBullets(room, players, dt, sink) {
         }
         bl.x = nx; bl.y = ny; bl.z = nz;
         bl.life += dt;
-        if (struck || bl.life > BANDIT.bulletLife) room.bullets.splice(i, 1);
+        if (struck || bl.life > (bl.maxLife || BANDIT.bulletLife)) room.bullets.splice(i, 1);
     }
 }
 

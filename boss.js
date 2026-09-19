@@ -26,7 +26,9 @@
      snipe     one accurate round from further than you can answer
      spray     a wall of lead, cheap per bullet
      dynamite  lobs a stick that lands where you were
-     ghost     disappears and reappears somewhere else
+     ghost     disappears and reappears somewhere else - and every few seconds
+               raises its gun in both hands for a SPECTRAL SHOT: a fast round that
+               goes through walls (step 31b - see GHOST)
      slam      hits the ground and hurts everyone standing near it
      poison    throws a bottle that leaves a cloud sitting on the ground
      dragon    breathes fire that burns on the ground, swoops - and is the last
@@ -158,6 +160,26 @@ const SKELETON = {
     dodgeFromMs: 50, dodgeToMs: 250, tiredMs: 3000, gapMs: 3000
 };
 
+/* ---- The ghost's SPECTRAL SHOT (step 31b) -------------------------------------
+   Next to its ordinary gun. Every spectralEveryMs (the first spectralFirstMs after
+   it arrives; p2 in phase two) it picks the nearest player within spectralRange -
+   with or without a line to them: whoever is sitting behind a wall is exactly who
+   it is for. It stops, raises the gun in both hands (raiseMs), and the gun glows
+   for flashMs - the warning, which the clients draw through walls. It follows its
+   target until lockMs before the round leaves, and from then on the aim does not
+   move: a player who keeps moving through the flash is missed, one who stands is
+   hit. One round of spectralDamage at spectralSpeed, which no wall stops (`thru` -
+   bandits.js stepBullets) and which is gone after spectralReach metres. Then it
+   lowers the gun (lowerMs). All through it: planted, the ordinary gun silent, and
+   no VANISH - that waits until the gun is down. Killing it before the round leaves
+   is the other answer. b.spectral = { e: aim / lock / lower, target, lockAt, fireAt }. */
+const GHOST = {
+    spectralFirstMs: 5000, spectralEveryMs: 7000, spectralRange: 45,
+    raiseMs: 250, flashMs: 600, lockMs: 250, lowerMs: 500,
+    spectralDamage: 60, spectralSpeed: 60, spectralReach: 50,
+    p2: { spectralEveryMs: 5000 }
+};
+
 /* ---- The skeleton's BONE HARVEST (step 30d) ----------------------------------
    Every harvestEveryMs (the first harvestFirstMs after it arrives), when somebody it
    can see is within harvestRange: it pulls bones out of the ground (Summon,
@@ -201,7 +223,7 @@ const SKELETON = {
      snipe     calls three bandits to her and backs off to 18 metres
      spray     every 3 seconds, a ring of 12 rounds in every direction
      dynamite  three sticks in a fan
-     ghost     vanishes twice as often
+     ghost     vanishes twice as often, and a SPECTRAL SHOT every 5 seconds (GHOST.p2)
      slam      a wider, more frequent quake
      poison    two bottles a throw, and the cloud lingers for 8 seconds
      robot     OVERDRIVE: spins up in 0.3s, fires for 4s, and vents steam (ROBOT.p2)
@@ -306,6 +328,7 @@ function spawnBoss(room, players, now) {
         lastShot: now + 900,        // a breath before the first round
         abilityAt: now + (type.id === "skeleton" ? SKELETON.duelFirstMs : 2000),
         harvestAt: now + SKELETON.harvestFirstMs,       // step 30d - read by the skeleton only
+        spectralAt: now + GHOST.spectralFirstMs,        // step 31b - read by the ghost only
         ghostUntil: 0,
         chargeUntil: 0
     };
@@ -820,6 +843,61 @@ function duelHeadshot(room, now) {
     return true;
 }
 
+/* SPECTRAL SHOT (step 31b): the nearest player standing within spectralRange - a
+   line to them is not needed, the round does not need one either. */
+function spectralTarget(room, players, b) {
+    const near = nearestPlayer(room, players, b.x, b.z);
+    return near && near.dist <= GHOST.spectralRange ? near.player : null;
+}
+
+function startSpectral(b, p, now, sink) {
+    const ms = GHOST.raiseMs + GHOST.flashMs;
+    b.spectral = { e: "aim", target: p.id, lockAt: now + ms - GHOST.lockMs, fireAt: now + ms };
+    sink.spectrals.push({ e: "aim", p: p.id, ms: ms, fl: GHOST.flashMs });
+}
+
+/* aim (it follows them) -> lock (it does not) -> the round -> lower -> back to the fight */
+function tickSpectral(room, b, players, now, sink) {
+    const s = b.spectral;
+    if (s.e === "aim") {
+        let p = players[s.target];
+        if (!p || p.room !== room.code || !p.alive) {           // went down, died or left: the next nearest
+            p = spectralTarget(room, players, b);
+            if (!p) {                                            // nobody left to aim at - the gun comes down
+                b.spectral = null;
+                b.lastShot = now + 400;
+                sink.spectrals.push({ e: "done", off: 1 });
+                return;
+            }
+            s.target = p.id;
+            const left = Math.max(0, s.fireAt - now);
+            sink.spectrals.push({ e: "aim", p: p.id, ms: left, fl: Math.min(GHOST.flashMs, left) });
+        }
+        if (now < s.lockAt) return;
+        s.e = "lock";
+        s.at = [p.x, typeof p.y === "number" ? p.y : 1.72, p.z];   // where they are now - not where they will be
+    }
+    if (s.e === "lock") {
+        if (now < s.fireAt) return;
+        const ox = b.x, oy = BOSS.eyeHeight, oz = b.z;
+        let dx = s.at[0] - ox, dy = s.at[1] - oy, dz = s.at[2] - oz;
+        const n = Math.hypot(dx, dy, dz) || 1;
+        dx /= n; dy /= n; dz /= n;
+        room.bullets.push({
+            x: ox, y: oy, z: oz, dx: dx, dy: dy, dz: dz, life: 0, from: -1,
+            dmg: GHOST.spectralDamage, spd: GHOST.spectralSpeed,
+            thru: 1, maxLife: GHOST.spectralReach / GHOST.spectralSpeed
+        });
+        sink.bossShots.push({ k: "spectral", o: [round2(ox), round2(oy), round2(oz)], d: [round3(dx), round3(dy), round3(dz)], r: GHOST.spectralReach });
+        s.e = "lower"; s.until = now + GHOST.lowerMs;
+        return;
+    }
+    if (now < s.until) return;
+    b.spectral = null;
+    b.lastShot = now + 400;                                      // a breath before the ordinary gun
+    sink.spectrals.push({ e: "done" });
+}
+
 /* ---- Abilities ---------------------------------------------------------- */
 function tickAbility(room, b, players, near, now, dt, sink) {
     const id = b.type.id;
@@ -849,6 +927,17 @@ function tickAbility(room, b, players, near, now, dt, sink) {
     }
 
     if (id === "ghost") {
+        // step 31b: the SPECTRAL SHOT has a clock of its own; VANISH waits while the gun is up
+        if (b.spectral) { tickSpectral(room, b, players, now, sink); return; }
+        if (now >= b.spectralAt) {
+            const p = spectralTarget(room, players, b);
+            if (p) {
+                b.spectralAt = now + (b.phase === 2 ? GHOST.p2.spectralEveryMs : GHOST.spectralEveryMs);
+                startSpectral(b, p, now, sink);
+                return;
+            }
+            b.spectralAt = now + 1000;                          // nobody near enough - look again in a second
+        }
         if (now >= b.abilityAt) {
             b.abilityAt = now + (b.phase === 2 ? PHASE2.ghostEveryMs : BOSS.ghostEveryMs);
             b.ghostUntil = now + BOSS.ghostForMs;
@@ -1004,8 +1093,9 @@ function stepBoss(room, b, players, now, dt, sink) {
     // the robot plants its feet while the barrels spin and fire (step 27), and the
     // skeleton while it counts a duel down or is down on one knee (step 30b), and
     // all through BONE SCATTER (step 30c) - no walking (only its leap, tickScatter) and no revolver -
-    // and all through BONE HARVEST (step 30d)
-    const dueling = !!b.duel || (b.staggerUntil && now < b.staggerUntil) || !!b.scatter || !!b.harvest;
+    // and all through BONE HARVEST (step 30d); the ghost from the moment it raises
+    // its gun for a SPECTRAL SHOT until it is down again (step 31b)
+    const dueling = !!b.duel || (b.staggerUntil && now < b.staggerUntil) || !!b.scatter || !!b.harvest || !!b.spectral;
     const planted = b.gState === "spin" || b.gState === "fire" || dueling;
     const baseSpeed = b.type.speed * (b.phase === 2 ? PHASE2.speedScale : 1);
     const speed = b.state === "chase" ? baseSpeed : baseSpeed * 0.55;
@@ -1105,6 +1195,11 @@ function stepBoss(room, b, players, now, dt, sink) {
     else if (b.scatter) { /* a heap of bones, or nothing at all: it does not turn */ }
     else if (b.harvest) { /* spinning on the spot (the clip turns it), or bent double: it does not turn */ }
     else if (b.staggerUntil && now < b.staggerUntil) { /* on its knee: it does not turn */ }
+    else if (b.spectral) {
+        // step 31b: it follows whoever the round is for until the aim locks, and not after
+        const aimed = b.spectral.e === "aim" && players[b.spectral.target];
+        if (aimed) { faceX = aimed.x; faceZ = aimed.z; }
+    }
     else if (b.state === "chase" && near) { faceX = near.player.x; faceZ = near.player.z; }
     else if (b.path && b.path[b.pathIndex]) { faceX = b.path[b.pathIndex].x; faceZ = b.path[b.pathIndex].z; }
     if (faceX !== undefined) {
@@ -1152,6 +1247,7 @@ function emptySink() {
         booms: [], slams: [], blinks: [], roars: [], duels: [],     // duels: step 30b
         scatters: [],                                               // step 30c: BONE SCATTER
         harvests: [],                                               // step 30d: BONE HARVEST
+        spectrals: [],                                              // step 31b: the ghost's SPECTRAL SHOT
         bossSpawn: null, bossDied: null, bossPhase: null, wave: null,
         missionHits: [], missionEnd: null, missionState: null      // step 24, see missions.js
     };
@@ -1186,6 +1282,9 @@ function snapshot(room, now) {
     else if (b.scatter) snap.push(SCATTER_CODE[b.scatter.e], b.scatter.target || "", Math.max(0, Math.round(b.scatter.until - t)));
     /* step 30d: BONE HARVEST - 7 summoning, 8 spinning (low / high), 9 exhausted (ms left) */
     else if (b.harvest) snap.push(HARVEST_CODE[b.harvest.e], b.harvest.e === "spin" ? SKELETON.waves[b.harvest.wave] : "", Math.max(0, Math.round(b.harvest.until - t)));
+    /* step 31b: the ghost's SPECTRAL SHOT - 11 while the gun is up (who it is for, ms
+       until the round leaves). The ghost's codes are 11-19; 1-9 are the skeleton's. */
+    else if (b.spectral && b.spectral.e !== "lower") snap.push(11, b.spectral.target, Math.max(0, Math.round(b.spectral.fireAt - t)));
     return snap;
 }
 
@@ -1219,6 +1318,6 @@ function clearBoss(room) {
 }
 
 module.exports = {
-    BOSS, BOSS_TYPES, PHASE2, ROBOT, DRAGON, SKELETON, GUN, initRoom, stepRoom, snapshot, hurt,
+    BOSS, BOSS_TYPES, PHASE2, ROBOT, DRAGON, SKELETON, GHOST, GUN, initRoom, stepRoom, snapshot, hurt,
     secondsToBoss, clearBoss, emptySink, duelHeadshot
 };

@@ -6272,7 +6272,7 @@ function ringMaterials() {
     _ringBoneMat = new THREE.MeshLambertMaterial({ color: 0xe6dcc2, emissive: 0x1f3a12 });
 }
 const RING_BONES = 44;
-function makeRing(m) {
+function makeHarvestRing(m) {        // not makeRing - that one is the missions' (step 24)
     ringMaterials();
     const g = new THREE.Group();
     const y = m.k === 'high' ? 2.15 : 0.22;
@@ -6341,7 +6341,7 @@ function harvestStep(m, late) {
         }
     } else if (m.e === 'ring') {
         if (!Array.isArray(m.p)) return;
-        HARVEST.rings.push(makeRing(m));
+        HARVEST.rings.push(makeHarvestRing(m));
         sfxRingWhirr(new THREE.Vector3(m.p[0], 1, m.p[1]), m.k === 'high');
     } else if (m.e === 'cut') {
         if (m.p !== NET.id) return;

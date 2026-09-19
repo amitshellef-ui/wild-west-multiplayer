@@ -139,8 +139,10 @@ commit `7e1fe32`, `tests/live-step30d.js` 8/8 מול Render — גם קפיצה 
 (לא עולה). **31-0 (בלנדר) ✅:** `models/ghost.glb` — 3.80MB, 50,000 משולשים, 25 עצמות בלי רגליים (מרחפת 0.20 מ' — אפוי
 בקליפים), אקדח משלו תמיד ביד ימין (`gun` / `muzzle`), מעיל וזנב עשן עם תנועה משנית (`wisp*`, `coat*`), 12 קליפים —
 Idle, Walk, Run, Shoot, Hit, Death, Vanish, Appear ועוד ארבעה ליכולות (SpectralShot, GraveCast, Dash, Recover). מדידות
-ותזמונים ב-`models/README.md` סעיף ghost. **31א (המודל על בוס 7 — רק ה-HTML + `models/`, השרת לא השתנה) — נכתב ונבדק
-מקומית (2026-09-19), טרם עלה:** `MODEL_SPECS.ghost` + `BOSS_LOOKS.ghost` (×1.45, הראש ב-~2.8 מ'), `MODEL_LOWER` כולל את
+ותזמונים ב-`models/README.md` סעיף ghost. **31א (המודל על בוס 7 — רק ה-HTML + `models/`, השרת לא השתנה) — עלה
+(2026-09-19):** `models/ghost.glb` + `models/README.md` ב-commit `d8a7d5e` (jsDelivr — כל 6 המודלים זהים בבייטים),
+ה-HTML + המסמך הזה ב-`b94ce14` — עוד לפני שהכתובת ננעלה, אז `ghost.glb` הגיע מ-Render (`/models/`, הגיבוי); **הנעילה של
+`MODEL_BASE_CDN` ל-`d8a7d5e` עלתה אחר כך** (ה-HTML + המסמך הזה). פירוט: `MODEL_SPECS.ghost` + `BOSS_LOOKS.ghost` (×1.45, הראש ב-~2.8 מ'), `MODEL_LOWER` כולל את
 עצמות המעיל והזנב (אחרת כל ירייה מקפיאה אותם), בלי צל (`noShadow`). הזוהר של הטקסטורה (עיניים, ידיים, זנב) נשאר בצבעים
 שלו — `glowMap` חדש ב-`BOSS_LOOKS`; בלעדיו צבע העיניים היה מעמעם אותו ל-8% וצובע את האקדח סגול; בשלב 2 הוא בוער באדום
 (`emissiveRest`, גם בהבהוב הפגיעה אופליין). VANISH: אותה שקיפות 22% כמו היום (הוחלט לפי תמונות), **והיא חוזרת לאטומה**
@@ -149,8 +151,7 @@ Idle, Walk, Run, Shoot, Hit, Death, Vanish, Appear ועוד ארבעה ליכו�
 פגיעות 63/63 דרך התיבות (45 רגיל, 18 בזמן שקיפות), ריצה, ירייה, VANISH, שלב 2, מוות, `?cubes`, בלי שגיאות. FPS אצלך ב-Chrome
 (`tests/bench-ghost.html`): תנועה 22.0, VANISH 23.2, עמידה 19.1, מוות 21.6 — **אבל בפעם הראשונה שהרוח על המסך ~5 שנ' של
 קפיצות** (בניית ה-shader והטקסטורות; הכי ארוך 2.9 שנ'). הוצע "חימום" בטעינה — **הוחלט להשאיר.** גיבוי: `backup-step31a/`
-(= המצב החי). **העלאה בשני סבבים:** (1) `models/ghost.glb` + `models/README.md` → אימות ב-jsDelivr ונעילת `MODEL_BASE_CDN`
-ל-commit החדש; (2) `wild-west-fps-arsenal.html` + `HANDOFF.md`. הבאים: 31ב Spectral Shot, 31ג Grave Burst, 31ד Ghost Dash.
+(= המצב החי של 30ד). הבאים: 31ב Spectral Shot, 31ג Grave Burst, 31ד Ghost Dash.
 
 ---
 

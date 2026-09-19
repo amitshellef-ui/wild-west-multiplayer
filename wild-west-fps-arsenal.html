@@ -363,8 +363,8 @@
     <div class="sb-foot" id="sb-foot"></div>
 </div>
 <div id="boss-bar" class="panel">
-    <div id="boss-name">&#9760; BLACK-JACK McCREADY &#9760;</div>
-    <div id="boss-ability">TRIPLE BURST</div>
+    <div id="boss-name">&#9760; BONES McCREADY &#9760;</div>
+    <div id="boss-ability">HIGH NOON</div>
     <div id="boss-bg"><div id="boss-fill"></div></div>
 </div>
 
@@ -1805,6 +1805,8 @@ function initNetwork() {
         sfxBossRoar(p);
         spawnDust(p.clone().setY(0.1), 12);
     });
+
+    NET.socket.on('boss-duel', onBossDuel);             // step 30b: HIGH NOON
 
     NET.socket.on('boss-died', function (m) {
         if (!m) return;
@@ -3731,7 +3733,7 @@ function createRevolverMesh(s) {
 
 const BOSS_TYPES = [
     // step 30a: the skeleton cowboy, a model of its own (BOSS_LOOKS); these colours are for the cube rig if it cannot load
-    { id: 'skeleton', name: 'BONES McCREADY', ability: 'QUICK DRAW', hp: 900, fireDelay: 1100, speed: 3.0, shirt: 0xd8ccb0, pants: 0x3a2616, hat: 0x4a2e18, coat: 0x4a3020, eye: 0x7dff5a },
+    { id: 'skeleton', name: 'BONES McCREADY', ability: 'HIGH NOON', hp: 900, fireDelay: 1100, speed: 3.0, shirt: 0xd8ccb0, pants: 0x3a2616, hat: 0x4a2e18, coat: 0x4a3020, eye: 0x7dff5a },
     { id: 'charge', name: 'IRON-LUNG HANK', ability: 'BULL CHARGE', hp: 1100, fireDelay: 1100, speed: 3.6, shirt: 0x4a2a18, pants: 0x2a2018, hat: 0x3a2410, coat: 0x5a3018, eye: 0xffcc44 },
     // step 27: a model of its own (BOSS_LOOKS); these colours are for the cube rig if it cannot load
     { id: 'robot', name: 'TIN-STAR MARSHAL', ability: 'GATLING ARM', hp: 1400, fireDelay: 90, speed: 2.4, radius: 0.95, shirt: 0x5a5e66, pants: 0x3a3d44, hat: 0x2a2c30, coat: 0x6a6e78, eye: 0x33ffee },
@@ -3793,6 +3795,14 @@ const BOSS_DRAGON = {
     swoopTrigger: 22, swoopEveryMs: 6000, swoopForMs: 1400, swoopSpeed: 16,
     swoopHitRange: 2.9, swoopDamage: 30,
     p2: { summon: 4, breaths: 2, fanSpread: 0.35, swoopEveryMs: 3500 }
+};
+
+/* The skeleton's duel, HIGH NOON (step 30b) - SKELETON in boss.js; online those are
+   the ones that count. Single player has no duel (its skeleton only draws and fires). */
+const BOSS_SKELETON = {
+    duelFirstMs: 6000, duelEveryMs: 15000, duelRange: 32,
+    countdownMs: 3000, duelDamage: 80, missBeyond: 45,
+    staggerMs: 2000
 };
 
 function enrageRig(parts) {
@@ -5763,6 +5773,7 @@ function createNetBoss(typeIndex, hp, x, z) {
 }
 
 function destroyNetBoss() {
+    if (DUEL.on || DUEL.standAt) duelEnd('clear');          // step 30b
     if (netBoss.mesh) {
         banditGroup.remove(netBoss.mesh);
         // a model rig lets go of its own materials once it is out of the scene
@@ -5803,6 +5814,7 @@ function onBossState(m) {
         if (gs === 1 && netBoss.gState !== 1 && netBoss.mesh) sfxGatlingSpin(netBoss.mesh.position, netBoss.phase2 ? 300 : 800);
         netBoss.gState = gs;
         rigGatling(netBoss.rig && netBoss.rig.model, gs);
+        duelFromSnapshot(r);                 // step 30b: the skeleton's duel (older servers send nothing)
         netBoss.buf.push({ t: performance.now(), x: r[0], z: r[1], yaw: r[2] });
         if (netBoss.buf.length > 14) netBoss.buf.shift();
         netBoss.countdown = -1;
@@ -5826,8 +5838,190 @@ function showNetBossHealth() {
     P.barFillMat.color.setHex(pct > 0.5 ? 0x5ec24a : (pct > 0.25 ? 0xe0a83c : 0xd94a2b));
 }
 
+/* ---- HIGH NOON - the skeleton's duel (step 30b) ------------------------------
+   The server marks one player (boss-duel "mark"), counts three seconds down and
+   fires one shot of 80 ("shot" - `hit` is false if they got out of its line), or
+   the duel is broken by a round through its skull ("break") and it goes down on
+   one knee, or the marked player went down ("lost"). All of it is the server's;
+   here it is only seen and heard: a skull over the marked player's head, the
+   count on everybody's screen, the light going out of the sky, a clock ticking,
+   and the clips - Mark (it points), DuelReady (hand over the holster), Draw (the
+   round leaves on its frame 6, so it starts 0.25s before the count ends), Stagger. */
+const DUEL = { on: false, target: null, until: 0, readyAt: 0, drawn: false, lastTick: -1, standAt: 0, dark: 0, skull: null, hud: null };
+const DUEL_FOG = new THREE.Color(0x5a2418);
+
+function duelRig() { return netBoss.rig && netBoss.rig.model && netBoss.rig.model.kind === 'model' ? netBoss.rig.model : null; }
+function duelName(id) {
+    if (id === NET.id) return 'YOU';
+    const q = PLAYERS[id];
+    return (q && q.name) || String(id || '').slice(0, 6);
+}
+function duelSkull() {
+    if (DUEL.skull) return DUEL.skull;
+    const c = document.createElement('canvas');
+    c.width = c.height = 128;
+    const x = c.getContext('2d');
+    const g = x.createRadialGradient(64, 64, 8, 64, 64, 62);
+    g.addColorStop(0, 'rgba(255,60,30,0.85)');
+    g.addColorStop(0.55, 'rgba(160,20,10,0.45)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    x.fillStyle = g; x.fillRect(0, 0, 128, 128);
+    x.fillStyle = '#f4ecd8';
+    x.font = 'bold 92px "Segoe UI Symbol", "Segoe UI", sans-serif';
+    x.textAlign = 'center'; x.textBaseline = 'middle';
+    x.fillText('☠', 64, 70);
+    const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false, transparent: true }));
+    s.scale.set(0.95, 0.95, 1);
+    s.position.y = 3.15;
+    s.renderOrder = 11;
+    s.raycast = function () { };
+    return (DUEL.skull = s);
+}
+function duelHud() {
+    if (DUEL.hud) return DUEL.hud;
+    const d = document.createElement('div');
+    d.id = 'duel-hud';
+    d.style.cssText = 'position:fixed;top:78px;left:50%;transform:translateX(-50%);z-index:40;pointer-events:none;display:none;' +
+        'text-align:center;font:bold 20px Georgia,serif;letter-spacing:3px;color:#ffd9a0;text-shadow:0 0 8px #000,0 0 3px #000;white-space:nowrap';
+    document.body.appendChild(d);
+    return (DUEL.hud = d);
+}
+function sfxDuelTick(last) {
+    const d = chain(null, 0.7, 1); if (!d) return;
+    noiseBurst(d, { type: 'highpass', freq: 4200, dur: 0.03, vol: 0.28 });
+    tone(d, { type: 'square', f0: last ? 1320 : 1900, f1: last ? 1300 : 1850, dur: 0.05, vol: 0.18 });
+    if (last) tone(d, { type: 'triangle', f0: 660, f1: 640, dur: 0.9, vol: 0.26, delay: 0.02 });
+}
+function sfxDuelBell() {
+    const d = chain(null, 0.8, 1); if (!d) return;
+    tone(d, { type: 'triangle', f0: 523, f1: 515, dur: 1.4, vol: 0.3 });
+    tone(d, { type: 'triangle', f0: 784, f1: 772, dur: 1.1, vol: 0.18, delay: 0.01 });
+}
+/* The light going out of the sky: on top of whatever the mine's lighting is doing */
+function applyDuelSky(k) {
+    const t = caveBlend;
+    ambientLight.intensity = THREE.MathUtils.lerp(LIGHT_SURFACE.amb, LIGHT_CAVE.amb, t) * (1 - 0.45 * k);
+    hemiLight.intensity = THREE.MathUtils.lerp(LIGHT_SURFACE.hemi, LIGHT_CAVE.hemi, t) * (1 - 0.5 * k);
+    sun.intensity = THREE.MathUtils.lerp(LIGHT_SURFACE.sun, LIGHT_CAVE.sun, t) * (1 - 0.6 * k);
+    bounceLight.intensity = THREE.MathUtils.lerp(LIGHT_SURFACE.bounce, LIGHT_CAVE.bounce, t) * (1 - 0.4 * k);
+    scene.fog.color.copy(FOG_SURFACE).lerp(FOG_CAVE, t).lerp(DUEL_FOG, 0.55 * k);
+}
+
+function duelStart(target, ms, late) {
+    const now = performance.now();
+    DUEL.on = true; DUEL.target = target; DUEL.until = now + ms;
+    DUEL.drawn = false; DUEL.lastTick = -1; DUEL.standAt = 0; DUEL.readyAt = 0;
+    const rig = duelRig();
+    if (rig) {
+        if (late || ms < 1600) rigFull(rig, 'DuelReady', { loop: true, fade: 0.2 });
+        else { rigFull(rig, 'Mark', { fade: 0.2 }); DUEL.readyAt = now + 1250; }   // Mark ends in the DuelReady pose
+    }
+    duelHud().style.display = 'block';
+    if (!late) {
+        sfxDuelBell();
+        pushFeed('HIGH NOON — ' + (netBoss.type ? netBoss.type.name : 'THE BOSS') + ' CALLS OUT ' + duelName(target));
+    }
+}
+
+/* kind: shot / break / lost / clear (the boss is gone) */
+function duelEnd(kind, m) {
+    const now = performance.now();
+    const was = DUEL.target;
+    DUEL.on = false; DUEL.target = null; DUEL.readyAt = 0;
+    if (DUEL.hud) DUEL.hud.style.display = 'none';
+    if (DUEL.skull && DUEL.skull.parent) DUEL.skull.parent.remove(DUEL.skull);
+    const rig = duelRig();
+    if (kind === 'clear') { DUEL.standAt = 0; return; }
+    if (kind === 'shot') {
+        if (rig && !DUEL.drawn) rigFull(rig, 'Draw', { fade: 0.05 });
+        DUEL.drawn = true;
+        const from = new THREE.Vector3();
+        if (netBoss.rig && netBoss.rig.parts.muzzle) netBoss.rig.parts.muzzle.getWorldPosition(from);
+        else if (m.o) from.set(m.o[0], m.o[1], m.o[2]);
+        muzzleFlashAt(from, 4.5);
+        sfxRevolver(from); sfxSniper(from);
+        if (m.at) {
+            const to = new THREE.Vector3(m.at[0], m.at[1], m.at[2]);
+            if (!m.hit) to.y += 1.2;                         // over the cover it hid behind
+            const dir = to.sub(from).normalize();
+            spawnBanditBullet([from.x, from.y, from.z], [dir.x, dir.y, dir.z], 90);
+        }
+        if (m.p === NET.id) {
+            if (m.hit) { camShake = Math.min(0.9, camShake + 0.6); pushFeed('HIGH NOON — HE GOT YOU'); }
+            else pushFeed('HIGH NOON — MISSED YOU');
+        } else pushFeed('HIGH NOON — ' + (m.hit ? 'HE SHOT ' : 'HE MISSED ') + duelName(m.p));
+        DUEL.standAt = now + 650;                            // Draw holds the aim, then back on its feet
+    } else if (kind === 'break') {
+        if (rig) rigFull(rig, 'Stagger', { fade: 0.06 });
+        DUEL.standAt = now + BOSS_SKELETON.staggerMs;
+        if (netBoss.mesh) {
+            const head = netBoss.mesh.position.clone().setY(2.6);
+            spawnParticles(head, 0xe8dcc0, 22, 4);           // chips of bone
+            sfxWoodHit(head);
+        }
+        pushFeed((m && m.by ? duelName(m.by) : 'SOMEBODY') + ' SHOT HIS SKULL — THE DUEL IS BROKEN');
+    } else {                                                 // lost: the one it marked went down
+        DUEL.standAt = now + 100;
+    }
+    if (was === NET.id && kind !== 'shot') camShake = Math.min(0.5, camShake + 0.15);
+}
+
+function onBossDuel(m) {
+    if (!m || typeof m.e !== 'string') return;
+    if (m.e === 'mark' && typeof m.ms === 'number') duelStart(m.p, m.ms, false);
+    else if (m.e === 'shot' || m.e === 'break' || m.e === 'lost') duelEnd(m.e, m);
+}
+
+/* The snapshot's fields 8-10 (a latecomer, or a missed event) */
+function duelFromSnapshot(r) {
+    const s = r[8] || 0;
+    if (s === 1 && !DUEL.on && typeof r[10] === 'number' && r[10] > 150) duelStart(r[9], r[10], true);
+    else if (s === 2 && !DUEL.on) {
+        const rig = duelRig();
+        if (rig && rig.full !== 'Stagger' && !DUEL.standAt) { rigFull(rig, 'Stagger', { fade: 0.1 }); DUEL.standAt = performance.now() + (r[10] || 500); }
+    } else if (s === 0 && DUEL.on && performance.now() > DUEL.until + 1500) duelEnd('lost');
+}
+
+function updateDuel(delta) {
+    const now = performance.now();
+    const want = DUEL.on ? 1 : 0;
+    if (DUEL.dark !== want) {
+        DUEL.dark += (want - DUEL.dark) * Math.min(1, (want ? 2.2 : 1.6) * delta);
+        if (Math.abs(want - DUEL.dark) < 0.01) DUEL.dark = want;
+        applyDuelSky(DUEL.dark);
+    } else if (DUEL.dark > 0) applyDuelSky(DUEL.dark);      // the mine's lighting may have moved under it
+    if (DUEL.standAt && now >= DUEL.standAt) {
+        DUEL.standAt = 0;
+        const rig = duelRig();
+        if (rig && netBoss.alive && !DUEL.on) rigStand(rig, 0.35);
+    }
+    if (!DUEL.on) return;
+    const rig = duelRig();
+    const left = Math.max(0, DUEL.until - now);
+    if (DUEL.readyAt && now >= DUEL.readyAt) { DUEL.readyAt = 0; if (rig) rigFull(rig, 'DuelReady', { loop: true, fade: 0.12 }); }
+    // the round leaves on Draw's frame 6 (0.25s in) - start it so they land together
+    if (!DUEL.drawn && left <= 250) { DUEL.drawn = true; if (rig) rigFull(rig, 'Draw', { fade: 0.06 }); }
+    const sec = Math.ceil(left / 1000);
+    if (sec !== DUEL.lastTick) { DUEL.lastTick = sec; if (sec > 0) sfxDuelTick(sec === 1); }
+    const me = DUEL.target === NET.id;
+    const hud = duelHud();
+    hud.style.color = me ? '#ff5a3c' : '#ffd9a0';
+    hud.style.fontSize = me ? '26px' : '20px';
+    hud.textContent = '☠ HIGH NOON ☠  ' + (me ? 'YOU ARE MARKED — TAKE COVER OR SHOOT HIS SKULL' : duelName(DUEL.target) + ' IS MARKED') + '  ' + (left / 1000).toFixed(1);
+    // the skull rides on the marked player's body (rebuilt bodies too); none over our own head
+    const body = !me && remoteBodies[DUEL.target];
+    const skull = duelSkull();
+    if (body && body.mesh) {
+        if (skull.parent !== body.mesh) body.mesh.add(skull);
+        const k = 0.95 * (1 + 0.12 * Math.sin(now / 90));
+        skull.scale.set(k, k, 1);
+    } else if (skull.parent) skull.parent.remove(skull);
+    if (left === 0 && now > DUEL.until + 2500) duelEnd('lost');     // the ending never arrived
+}
+
 function startNetBossDeath() {
     if (!netBoss.active) return;
+    if (DUEL.on || DUEL.standAt) duelEnd('clear');
     netBoss.alive = false;
     netBoss.deathT = 0;
     netBoss.deathDir = Math.random() > 0.5 ? 1 : -1;
@@ -8564,6 +8758,7 @@ function animate() {
     updateRemoteBodies(delta);
     updateServerBandits(delta);
     updateNetBoss(delta);
+    updateDuel(delta);
     updateNetHazards(delta);
     updateBanditBullets(delta);
     updateModelRigs(delta);

@@ -1068,6 +1068,11 @@ function registerHandlers(socket) {
             shooter.bossDamage += Math.max(0, healthBefore - res.boss.health);
             scoresChanged(room.code);
         }
+        /* step 30b: a round through the skeleton's skull while it counts a duel down
+           breaks it - the shot never comes, and it goes down on one knee */
+        if (res && !res.killed && head > 0 && boss.duelHeadshot(room, now)) {
+            io.to(room.code).emit("boss-duel", { e: "break", by: shooter.id });
+        }
         if (res && res.killed && res.boss.type.final) {
             // the last boss (step 28): no next wave, no next boss - the game is won
             shooter.kills++;
@@ -1297,6 +1302,8 @@ setInterval(() => {
         for (let i = 0; i < sink.slams.length; i++) io.to(code).emit("boss-slam", sink.slams[i]);
         for (let i = 0; i < sink.blinks.length; i++) io.to(code).emit("boss-blink", sink.blinks[i]);
         for (let i = 0; i < sink.roars.length; i++) io.to(code).emit("boss-roar", sink.roars[i]);
+        // step 30b: the skeleton's HIGH NOON - a mark, and how it ended (shot / lost)
+        for (let i = 0; i < sink.duels.length; i++) io.to(code).emit("boss-duel", sink.duels[i]);
 
         /* A bullet reached a player. This is where the last piece of trust
            goes away: the server no longer has to believe a client that says it

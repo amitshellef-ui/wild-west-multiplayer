@@ -13,7 +13,10 @@
    ability, and the ability is the reason the fight feels different:
 
      skeleton  a quick-draw revolver, one round a draw (step 30a - the first boss,
-               instead of the old triple-burst gunman; its abilities come in 30b-30d)
+               instead of the old triple-burst gunman), and HIGH NOON: it marks a
+               player, counts three seconds down and fires one shot of 80 - unless
+               the player is in cover, or somebody shoots it in the skull first
+               (step 30b - see SKELETON). Its other abilities come in 30c-30d.
      charge   closes the distance at a run and hits you with his shoulder
      robot     spins up a gatling, plants its feet and hoses where it faces
                (step 27 - see ROBOT)
@@ -43,7 +46,7 @@ const bandits = require("./bandits");
 const BOSS_TYPES = [
     // step 30a - the skeleton cowboy, a model of its own. It draws from the hip, fires one
     // round and holsters again, so the delay is a whole draw (GUN.skeleton)
-    { id: "skeleton", name: "BONES McCREADY", ability: "QUICK DRAW", hp: 900, fireDelay: 1100, speed: 3.0 },
+    { id: "skeleton", name: "BONES McCREADY", ability: "HIGH NOON", hp: 900, fireDelay: 1100, speed: 3.0 },
     { id: "charge", name: "IRON-LUNG HANK", ability: "BULL CHARGE", hp: 1100, fireDelay: 1100, speed: 3.6 },
     // step 27 - the first boss with a model of its own. Its gun is a cycle, not a
     // fire delay (see ROBOT); fireDelay is the gap between rounds while it fires.
@@ -125,6 +128,21 @@ const DRAGON = {
     swoopTrigger: 22, swoopEveryMs: 6000, swoopForMs: 1400, swoopSpeed: 16,
     swoopHitRange: 2.9, swoopDamage: 30,
     p2: { summon: 4, breaths: 2, fanSpread: 0.35, swoopEveryMs: 3500 }
+};
+
+/* ---- The skeleton's duel, HIGH NOON (step 30b) ------------------------------
+   Every duelEveryMs (the first duelFirstMs after it arrives) it picks one player
+   it can see within duelRange, marks them - everybody in the room sees a skull
+   over them and the same countdown - plants its feet with a hand over the holster,
+   and after countdownMs fires one round of duelDamage. The answers: be out of its
+   line when the count ends (cover), or put a round through its skull before it
+   does - a headshot from anybody breaks the duel, the shot never comes, and it
+   goes down on one knee for staggerMs, not moving and not shooting. A mark whose
+   player goes down, dies or leaves is dropped. */
+const SKELETON = {
+    duelFirstMs: 6000, duelEveryMs: 15000, duelRange: 32,
+    countdownMs: 3000, duelDamage: 80, missBeyond: 45,
+    staggerMs: 2000
 };
 
 /* ---- Phase two (step 21) ---------------------------------------------------
@@ -240,7 +258,7 @@ function spawnBoss(room, players, now) {
         wedgedFor: 0,
         strafeDir: Math.random() > 0.5 ? 1 : -1,
         lastShot: now + 900,        // a breath before the first round
-        abilityAt: now + 2000,
+        abilityAt: now + (type.id === "skeleton" ? SKELETON.duelFirstMs : 2000),
         ghostUntil: 0,
         chargeUntil: 0
     };
@@ -502,11 +520,72 @@ function tickRobot(room, b, players, near, now, dt, sink) {
     }
 }
 
+/* HIGH NOON (step 30b): somebody it can see within duelRange, picked at random so
+   standing back does not make the others safe. */
+function duelTarget(room, players, b) {
+    const seen = [];
+    for (const id in players) {
+        const p = players[id];
+        if (p.room !== room.code || !p.alive) continue;
+        if (Math.hypot(p.x - b.x, p.z - b.z) > SKELETON.duelRange) continue;
+        if (!nav.losClear(b.x, b.z, p.x, p.z)) continue;
+        seen.push(p);
+    }
+    return seen.length ? seen[Math.floor(Math.random() * seen.length)] : null;
+}
+
+/* mark -> count down -> one shot. b.duel = { target, until }; b.staggerUntil after
+   a skull shot broke it (duelHeadshot). Both are in the snapshot for latecomers. */
+function tickSkeleton(room, b, players, near, now, dt, sink) {
+    if (b.staggerUntil && now < b.staggerUntil) return;         // down on one knee
+    if (b.duel) {
+        const p = players[b.duel.target];
+        if (!p || p.room !== room.code || !p.alive) {           // went down, died or left
+            sink.duels.push({ e: "lost", p: b.duel.target });
+            b.duel = null;
+            b.abilityAt = now + 4000;
+            return;
+        }
+        if (now < b.duel.until) return;
+        // the count is out: behind cover (no line) or too far away, it misses
+        const hit = Math.hypot(p.x - b.x, p.z - b.z) <= SKELETON.missBeyond && nav.losClear(b.x, b.z, p.x, p.z);
+        if (hit) sink.hits.push({ playerId: p.id, damage: SKELETON.duelDamage, from: "boss" });
+        sink.duels.push({
+            e: "shot", p: p.id, hit: hit,
+            o: [round2(b.x), round2(BOSS.eyeHeight), round2(b.z)],
+            at: [round2(p.x), round2(p.y || 1.72), round2(p.z)]
+        });
+        b.duel = null;
+        b.abilityAt = now + SKELETON.duelEveryMs;
+        b.lastShot = now + 400;                                  // a breath before the revolver again
+        return;
+    }
+    if (now >= b.abilityAt) {
+        const p = duelTarget(room, players, b);
+        if (!p) { b.abilityAt = now + 1000; return; }           // nobody in sight - look again in a second
+        b.duel = { target: p.id, until: now + SKELETON.countdownMs };
+        sink.duels.push({ e: "mark", p: p.id, ms: SKELETON.countdownMs });
+    }
+}
+
+/* A round through its skull while it counts (server.js, boss-hit with a head):
+   the duel is broken - no shot - and it staggers. true if there was one to break. */
+function duelHeadshot(room, now) {
+    const b = room.boss;
+    if (!b || !b.alive || !b.duel) return false;
+    b.duel = null;
+    b.staggerUntil = now + SKELETON.staggerMs;
+    b.abilityAt = now + SKELETON.duelEveryMs;
+    b.lastShot = now + SKELETON.staggerMs;
+    return true;
+}
+
 /* ---- Abilities ---------------------------------------------------------- */
 function tickAbility(room, b, players, near, now, dt, sink) {
     const id = b.type.id;
 
     if (id === "robot") { tickRobot(room, b, players, near, now, dt, sink); return; }
+    if (id === "skeleton") { tickSkeleton(room, b, players, near, now, dt, sink); return; }
 
     /* The dragon's swoop (step 28): the charge, with its own numbers. It rides
        on chargeUntil so the walking stands aside and the clients see the flag. */
@@ -682,8 +761,10 @@ function stepBoss(room, b, players, now, dt, sink) {
 
     /* --- walking --- */
     const charging = b.chargeUntil && now < b.chargeUntil;
-    // the robot plants its feet while the barrels spin and fire (step 27)
-    const planted = b.gState === "spin" || b.gState === "fire";
+    // the robot plants its feet while the barrels spin and fire (step 27), and the
+    // skeleton while it counts a duel down or is down on one knee (step 30b)
+    const dueling = !!b.duel || (b.staggerUntil && now < b.staggerUntil);
+    const planted = b.gState === "spin" || b.gState === "fire" || dueling;
     const baseSpeed = b.type.speed * (b.phase === 2 ? PHASE2.speedScale : 1);
     const speed = b.state === "chase" ? baseSpeed : baseSpeed * 0.55;
     let moved = false;
@@ -750,7 +831,7 @@ function stepBoss(room, b, players, now, dt, sink) {
     /* --- shooting --- */
     const range = b.type.id === "snipe" ? BOSS.snipeRange : BOSS.fireRange;
     const fireDelay = b.type.fireDelay * (b.phase === 2 ? PHASE2.fireScale : 1);
-    if (b.type.id !== "robot" && b.hasLos && near && near.dist < range && now - b.lastShot > fireDelay) {
+    if (b.type.id !== "robot" && !dueling && b.hasLos && near && near.dist < range && now - b.lastShot > fireDelay) {
         b.lastShot = now + (Math.random() - 0.5) * 350;
         const p2 = b.phase === 2;
         if (b.type.id === "dynamite") {
@@ -775,14 +856,17 @@ function stepBoss(room, b, players, now, dt, sink) {
 
     /* --- facing --- */
     let faceX, faceZ;
-    if (b.state === "chase" && near) { faceX = near.player.x; faceZ = near.player.z; }
+    const marked = b.duel && players[b.duel.target];
+    if (marked) { faceX = marked.x; faceZ = marked.z; }                  // eyes on whoever it marked
+    else if (b.staggerUntil && now < b.staggerUntil) { /* on its knee: it does not turn */ }
+    else if (b.state === "chase" && near) { faceX = near.player.x; faceZ = near.player.z; }
     else if (b.path && b.path[b.pathIndex]) { faceX = b.path[b.pathIndex].x; faceZ = b.path[b.pathIndex].z; }
     if (faceX !== undefined) {
         const want = Math.atan2(faceX - b.x, faceZ - b.z);
         let d = want - b.yaw;
         while (d > Math.PI) d -= Math.PI * 2;
         while (d < -Math.PI) d += Math.PI * 2;
-        if (planted) {
+        if (planted && b.gState) {
             // slowly: getting round its side is the way out of the stream
             const turn = (b.phase === 2 ? ROBOT.p2.fireTurn : ROBOT.fireTurn) * dt;
             b.yaw += Math.max(-turn, Math.min(turn, d));
@@ -819,7 +903,7 @@ function stepRoom(room, players, now, dt, sink) {
 function emptySink() {
     return {
         shots: [], hits: [], bossShots: [], hazards: [],
-        booms: [], slams: [], blinks: [], roars: [],
+        booms: [], slams: [], blinks: [], roars: [], duels: [],     // duels: step 30b
         bossSpawn: null, bossDied: null, bossPhase: null, wave: null,
         missionHits: [], missionEnd: null, missionState: null      // step 24, see missions.js
     };
@@ -831,7 +915,7 @@ function snapshot(room, now) {
     const b = room.boss;
     if (!b || !b.alive) return null;
     const t = now === undefined ? Date.now() : now;
-    return [
+    const snap = [
         Math.round(b.x * 100) / 100,
         Math.round(b.z * 100) / 100,
         Math.round(b.yaw * 100) / 100,
@@ -842,6 +926,12 @@ function snapshot(room, now) {
         // step 27: the robot's gun - 1 spinning up, 2 firing (0 for everybody else)
         b.gState === "spin" ? 1 : (b.gState === "fire" ? 2 : 0)
     ];
+    /* step 30b: the skeleton's duel, only while there is one - 1 counting down (who
+       is marked, ms left), 2 down on one knee after a skull shot (ms left) - so a
+       latecomer sees the skull, and older clients simply ignore the extra fields */
+    if (b.duel) snap.push(1, b.duel.target, Math.max(0, Math.round(b.duel.until - t)));
+    else if (b.staggerUntil && b.staggerUntil > t) snap.push(2, "", Math.round(b.staggerUntil - t));
+    return snap;
 }
 
 function hurt(room, amount, now) {
@@ -873,6 +963,6 @@ function clearBoss(room) {
 }
 
 module.exports = {
-    BOSS, BOSS_TYPES, PHASE2, ROBOT, DRAGON, GUN, initRoom, stepRoom, snapshot, hurt,
-    secondsToBoss, clearBoss, emptySink
+    BOSS, BOSS_TYPES, PHASE2, ROBOT, DRAGON, SKELETON, GUN, initRoom, stepRoom, snapshot, hurt,
+    secondsToBoss, clearBoss, emptySink, duelHeadshot
 };

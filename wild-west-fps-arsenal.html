@@ -1795,6 +1795,8 @@ function initNetwork() {
         // a puff where it was, and one where it turned up
         if (netBoss.mesh) spawnParticles(netBoss.mesh.position.clone().setY(1.4), 0xccaaff, 16, 3);
         spawnParticles(new THREE.Vector3(m.p[0], 1.4, m.p[1]), 0xccaaff, 16, 3);
+        // step 31a: mist and a whisper where it left, and it unfolds where it turned up
+        if (netBoss.active && netBoss.alive) ghostBlink(netBoss, netBoss.mesh ? netBoss.mesh.position.clone() : null, { x: m.p[0], z: m.p[1] });
         netBoss.buf.length = 0;          // it did not walk there - do not slide it there
         netBoss.hasPrev = false;
     });
@@ -3821,9 +3823,19 @@ const BOSS_SKELETON = {
 function enrageRig(parts) {
     parts.materials.forEach(function (m) {
         if (!m.emissive) return;
-        m.emissive.setHex(0x7a0f00);
-        m.emissiveIntensity = 0.55;
+        emissiveRest(m, null, true);
     });
+}
+
+/* What a material glows with when nothing is flashing it: the phase-two red, or the
+   boss model's own glow `g`, or nothing. A texture with its own glow (step 31a, the
+   ghost: m.userData.glowK) keeps it - white normally, a bright red in phase two, so
+   its eyes, hands and tail burn red instead of fading to a dim tint. */
+function emissiveRest(m, g, phase2) {
+    const map = m.userData.glowK !== undefined;
+    if (phase2) { m.emissive.setHex(map ? 0xff3322 : 0x7a0f00); m.emissiveIntensity = map ? 1.0 : 0.55; }
+    else if (map) { m.emissive.setHex(m.userData.glowHex); m.emissiveIntensity = m.userData.glowK; }
+    else { m.emissive.setHex(g ? g.hex : 0x000000); m.emissiveIntensity = g ? g.k : 0; }
 }
 
 function showBossEnraged(bt, where, loud) {
@@ -3880,7 +3892,10 @@ function blobShadowMaterial() {
     return _blobShadowMat;
 }
 const _blobShadowGeo = new THREE.PlaneGeometry(1.2, 1.2).rotateX(-Math.PI / 2);
-const MODEL_LOWER = { root: 1, hips: 1, thighL: 1, thighR: 1, shinL: 1, shinR: 1, footL: 1, footR: 1 };
+// step 31a: the ghost's coat and smoke tail belong with the hips, or every shot would freeze them
+// (named wisp* / coat*, not tail* - the dragon has tail2 / tail4 in its upper half)
+const MODEL_LOWER = { root: 1, hips: 1, thighL: 1, thighR: 1, shinL: 1, shinR: 1, footL: 1, footR: 1,
+    wisp1: 1, wisp2: 1, wisp3: 1, coatL: 1, coatR: 1, coatB1: 1, coatB2: 1 };
 const MODEL_SPECS = {
     cowboy: {
         file: 'cowboy.glb',
@@ -4005,6 +4020,28 @@ const MODEL_SPECS = {
             { bone: 'head', center: [0, 1.726, 0.0], size: [0.28, 0.32, 0.30], head: true }   // skull and hat crown, not the brim
         ],
         muzzle: { bone: 'muzzle', pos: [0, 0, 0] }
+    },
+    /* Boss 7 (step 31a), the ghost, worn at x1.45 (models/README.md). It has no legs: it
+       floats 0.20 above the ground in every clip (baked in), so there are no footsteps and
+       Walk and Run are glides - vWalk / vRun only say at what speed each looks right (Run at
+       x1 is 4.06 m/s worn, its chase speed is 4.0). The revolver never leaves its right fist
+       and `muzzle` is the tip of the barrel. Shoot raises the gun (0-6), fires on frame 8 and
+       lowers it (16-24). The boxes were measured from the file in the rest pose, where the
+       ghost stands on its tail: the coat and body below the waist, the torso up to where the
+       head box starts (1.61 after MODEL_HITBOX_MUL), and the skull with the hat's crown -
+       not the brim, and not the smoke tail under the coat. */
+    ghost: {
+        file: 'ghost.glb',
+        vWalk: 1.2, vRun: 2.8,
+        gait: { idle: 0.3, runUp: 2.2, runDown: 1.8, walkTs: [0.6, 2.0], runTs: [0.6, 2.0] },
+        shoot: { from: 6 / 24, to: 12 / 24, hold: 0.45, fadeIn: 0.1, fadeOut: 0.3 },
+        hit: [
+            { bone: 'hips', center: [0, 0.78, -0.08], size: [0.70, 0.62, 0.62] },     // coat and body below the waist
+            { bone: 'spine', center: [0, 1.34, 0.03], size: [0.46, 0.40, 0.36] },     // torso
+            { bone: 'head', center: [0, 1.77, 0.07], size: [0.26, 0.26, 0.30], head: true }
+        ],
+        muzzle: { bone: 'muzzle', pos: [0, 0, 0] },
+        noShadow: true          // a ghost casts none
     }
     /* A new model is one more entry here. What it can carry:
          file              the .glb in models/ (uploaded; pin MODEL_BASE_CDN to the new commit)
@@ -4023,7 +4060,8 @@ const MODEL_SPECS = {
          hover             metres the body lifts while it moves (a flier - the dragon)
          deathLift         model units the body rises through Death, if the clip sinks it
          clips             { Walk: 'Fly', Shoot: 'Attack', Hit: null, ... } when its clip names differ
-                           from Idle / Walk / Run / Shoot / Hit / Death (null = it has none) */
+                           from Idle / Walk / Run / Shoot / Hit / Death (null = it has none)
+         noShadow          no soft disc under it, ever */
 };
 
 /* How each boss looks, by its id in BOSS_TYPES. To give a boss a model of its own:
@@ -4033,14 +4071,17 @@ const MODEL_SPECS = {
      scale  how much bigger than the model as built (the server fires from 2.83m up
             and checks the head there, so a boss's head should land about there)
      tint   how far the texture is pulled towards the boss's coat colour (0 = none)
-     glow   a soft glow in the boss's eye colour, so each of them reads differently */
+     glow   a soft glow in the boss's eye colour, so each of them reads differently
+     glowMap  (a model whose texture has its own glow, the ghost's eyes, hands and tail) how
+            bright that glow is, in its own colours - the eye colour would dim and tint it */
 const BOSS_LOOK_DEFAULT = { model: 'cowboy', scale: 1.75, tint: 0.35, glow: 0.12 };
 const BOSS_LOOKS = {
     skeleton: { model: 'skeleton', scale: 1.6, tint: 0, glow: 0.1 },    // step 30a: head at ~2.6m, like the robot
     charge: {},
     robot:{ model: 'robot', scale: 1.5, tint: 0 },       // step 27: head at ~2.6m, the server's eye line 2.83
     snipe: {}, spray: {},
-    dynamite: {}, ghost: {}, slam: {}, poison: {},
+    dynamite: {}, slam: {}, poison: {},
+    ghost: { model: 'ghost', scale: 1.45, tint: 0, glow: 0.06, glowMap: 1.0 },   // step 31a: head at ~2.8m
     dragon: { model: 'dragon', scale: 2.2, tint: 0, glow: 0.08 }       // step 28: head at 2.8m, 4.2m wing to wing
 };
 function bossLook(bt) {
@@ -4049,7 +4090,8 @@ function bossLook(bt) {
         model: own.model || BOSS_LOOK_DEFAULT.model,
         scale: own.scale || BOSS_LOOK_DEFAULT.scale,
         tint: own.tint !== undefined ? own.tint : BOSS_LOOK_DEFAULT.tint,
-        glow: own.glow !== undefined ? own.glow : BOSS_LOOK_DEFAULT.glow
+        glow: own.glow !== undefined ? own.glow : BOSS_LOOK_DEFAULT.glow,
+        glowMap: own.glowMap
     };
 }
 /* Every model the game can use: the bandits' cowboy, the players' soldier and
@@ -4140,7 +4182,7 @@ function createModelRig(key, isBoss, bt) {
     const data = MODEL_DATA[key], spec = MODEL_SPECS[key];
     const look = isBoss && bt ? bossLook(bt) : null;
     const s = look ? look.scale : 1.0;
-    const glow = look && look.glow > 0 ? { hex: bt.eye, k: look.glow } : null;
+    const glow = look && look.glow > 0 ? { hex: bt.eye, k: look.glow, mapK: look.glowMap } : null;
     const root = new THREE.Group();
     const body = THREE.SkeletonUtils.clone(data.scene);   // a plain clone() leaves the bones behind
     body.scale.setScalar(s);
@@ -4154,7 +4196,13 @@ function createModelRig(key, isBoss, bt) {
             o.raycast = _noRaycast;                 // bullets hit the boxes below, never the skin
             o.material = o.material.clone();        // one bandit flashing must not flash them all
             if (look && look.tint > 0) o.material.color.set(0xffffff).lerp(new THREE.Color(bt.coat), look.tint);
-            if (glow) { o.material.emissive.setHex(glow.hex); o.material.emissiveIntensity = glow.k; }
+            if (glow && o.material.emissiveMap && glow.mapK !== undefined) {
+                // a texture with its own glow (step 31a, the ghost): white keeps its colours;
+                // the flash and phase two come back to this (emissiveRest)
+                o.material.userData.glowHex = 0xffffff;
+                o.material.userData.glowK = glow.mapK;
+                o.material.emissive.setHex(0xffffff); o.material.emissiveIntensity = glow.mapK;
+            } else if (glow) { o.material.emissive.setHex(glow.hex); o.material.emissiveIntensity = glow.k; }
             materials.push(o.material);
         }
     });
@@ -4466,7 +4514,8 @@ function rigReload(rig, ms) {
 const MODEL_DEATH_SPEED = 1.5;
 
 function rigDie(rig) {
-    if (!rig || rig.kind !== 'model' || rig.full) return;
+    // (a ghost can die in the middle of turning up - step 31a)
+    if (!rig || rig.kind !== 'model' || (rig.full && rig.full !== 'Appear')) return;
     rigFull(rig, 'Death', { speed: MODEL_DEATH_SPEED, fade: 0.15 });
 }
 
@@ -4603,7 +4652,7 @@ function updateModelRigs(delta) {
 
         // the soft disc near the camera, nothing further out (a metre of slack so it does not flicker)
         const camD = Math.hypot(p.x - camera.position.x, p.z - camera.position.z);
-        const near = rig.shadowNear ? camD < MODEL_SHADOW.near + 1 : camD < MODEL_SHADOW.near - 1;
+        const near = !rig.spec.noShadow && (rig.shadowNear ? camD < MODEL_SHADOW.near + 1 : camD < MODEL_SHADOW.near - 1);
         if (near !== rig.shadowNear) {
             rig.shadowNear = near;
             rig.blob.visible = near;
@@ -5772,6 +5821,7 @@ function createNetBoss(typeIndex, hp, x, z) {
     netBoss.maxHealth = hp || bt.hp;
     netBoss.ghost = false; netBoss.ghostShown = false; netBoss.charging = false;
     netBoss.deathT = -1; netBoss.hasPrev = false; netBoss.speed = 0;
+    netBoss.appearUntil = 0;
     netBoss.phase2 = false;
     ui.bossBar.classList.remove('enraged');
     if (x !== undefined) rig.mesh.position.set(x, 0, z);
@@ -6424,10 +6474,69 @@ function startNetBossDeath() {
     netBoss.alive = false;
     netBoss.deathT = 0;
     netBoss.deathDir = Math.random() > 0.5 ? 1 : -1;
+    netBoss.appearUntil = 0;
     rigDie(netBoss.rig.model);
+    if (isGhostModel(netBoss.rig.model)) spawnGhostMist(netBoss.mesh.position.clone().setY(0.3), 40);   // step 31a
     netBoss.rig.parts.barBg.visible = false;
     netBoss.rig.parts.barFill.visible = false;
     ui.bossBar.style.display = 'none';
+}
+
+/* Step 31a: the ghost in its own model. While it vanishes it is see-through (the
+   server's flag, or the local brain's timer); where it blinks from a mist rises with a
+   whisper, and where it turns up it unfolds out of a thin column (Appear). Dying, it
+   is sucked into the ground (its Death clip) and dissolves as it goes. The same for
+   the cube rig or the stand-in cowboy, minus the clips it does not have. */
+const GHOST_LOOK = { vanishOpacity: 0.22, deathFadeFrom: 0.35, deathFadeFor: 0.9 };
+function ghostFade(parts, op) {
+    parts.materials.forEach(function (m) {
+        m.transparent = op < 1;        // back to solid when it is back - see-through costs sorting
+        m.opacity = op;
+    });
+}
+function isGhostModel(rig) { return !!rig && rig.kind === 'model' && rig.key === 'ghost'; }
+/* A cold wisp of mist rising where the ghost was (lavender-blue, slow, fading). */
+function spawnGhostMist(point, count) {
+    count = count || 26;
+    const pos = [], vel = [];
+    for (let i = 0; i < count; i++) {
+        pos.push(point.x + (Math.random() - 0.5) * 0.8, point.y + Math.random() * 1.6, point.z + (Math.random() - 0.5) * 0.8);
+        vel.push((Math.random() - 0.5) * 1.2, Math.random() * 0.8 + 0.3, (Math.random() - 0.5) * 1.2);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    const mat = new THREE.PointsMaterial({ color: 0xb8c8ff, size: 0.42, transparent: true, opacity: 0.55, depthWrite: false });
+    const sys = new THREE.Points(geo, mat);
+    scene.add(sys);
+    particlePool.push({ sys: sys, vel: vel, life: 1.3, max: 1.3, grav: 0.35, fade: 0.55 });
+}
+/* A whisper: a breathy band of noise with a falling hum under it. */
+function sfxGhostWhisper(pos) {
+    const d = chain(pos, 0.7, 45); if (!d) return;
+    noiseBurst(d, { type: 'bandpass', freq: 750, q: 0.6, dur: 0.6, vol: 0.45 });
+    tone(d, { type: 'sine', f0: 520, f1: 170, dur: 0.55, vol: 0.12 });
+}
+/* It blinked from `from` to `to`: mist and a whisper where it left, Appear where it is. */
+function ghostBlink(owner, from, to) {
+    if (from) { spawnGhostMist(from.clone().setY(0.4)); sfxGhostWhisper(from); }
+    spawnGhostMist(new THREE.Vector3(to.x, 0.4, to.z), 14);
+    const R = owner.rig ? owner.rig.model : owner.model;
+    if (isGhostModel(R) && rigFull(R, 'Appear', { fade: 0.05 })) {
+        owner.appearUntil = performance.now() + rigClip(R, 'Appear').full.duration * 1000;
+    }
+}
+/* Called every frame: out of Appear and back into its motion once the clip is done. */
+function ghostAppearDone(owner, now) {
+    if (!owner.appearUntil || now < owner.appearUntil) return;
+    owner.appearUntil = 0;
+    const R = owner.rig ? owner.rig.model : owner.model;
+    if (R && R.full === 'Appear') rigStand(R, 0.15);
+}
+/* Dissolving through its Death clip (`t` seconds since it died). */
+function ghostDeathFade(parts, rig, t) {
+    if (!isGhostModel(rig)) return;
+    const k = Math.min(1, Math.max(0, (t - GHOST_LOOK.deathFadeFrom) / GHOST_LOOK.deathFadeFor));
+    ghostFade(parts, 1 - k);
 }
 
 function updateNetBoss(delta) {
@@ -6436,6 +6545,7 @@ function updateNetBoss(delta) {
     if (!netBoss.alive) {
         if (netBoss.deathT >= 0) {
             netBoss.deathT += delta;
+            ghostDeathFade(netBoss.rig.parts, netBoss.rig.model, netBoss.deathT);   // step 31a
             if (netBoss.rig.model.kind !== 'model') {       // the model plays its Death clip
                 const t = Math.min(1, netBoss.deathT / 0.75);
                 const e = 1 - Math.pow(1 - t, 3);
@@ -6455,12 +6565,9 @@ function updateNetBoss(delta) {
     /* Vanishing: the server says when, we say what it looks like. */
     if (netBoss.ghost !== netBoss.ghostShown) {
         netBoss.ghostShown = netBoss.ghost;
-        const op = netBoss.ghost ? 0.22 : 1;
-        netBoss.rig.parts.materials.forEach(function (mat) {
-            mat.transparent = true;
-            mat.opacity = op;
-        });
+        ghostFade(netBoss.rig.parts, netBoss.ghost ? GHOST_LOOK.vanishOpacity : 1);
     }
+    ghostAppearDone(netBoss, performance.now());          // step 31a
 
     const shown = sampleAt(netBoss.buf, performance.now() - INTERP_DELAY);
     if (!shown) return;
@@ -6813,7 +6920,9 @@ function killBot(bot, headshot) {
     bot.alive = false;
     bot.deathT = 0;
     bot.deathDir = Math.random() > 0.5 ? 1 : -1;
+    bot.appearUntil = 0;
     rigDie(bot.model);
+    if (isGhostModel(bot.model)) spawnGhostMist(bot.mesh.position.clone().setY(0.3), 40);   // step 31a
     bot.parts.barBg.visible = false;
     bot.parts.barFill.visible = false;
     sfxBotDeath(bot.mesh.position);
@@ -6914,6 +7023,7 @@ function updateBot(bot, delta, now) {
     if (!bot.alive) {
         if (bot.deathT >= 0) {
             bot.deathT += delta;
+            ghostDeathFade(bot.parts, bot.model, bot.deathT);   // step 31a
             if (bot.model.kind !== 'model') {                // the model plays its Death clip
                 const t = Math.min(1, bot.deathT / 0.75);
                 const e = 1 - Math.pow(1 - t, 3);
@@ -6943,9 +7053,8 @@ function updateBot(bot, delta, now) {
         const on = bot.hitFlash > 0;
         bot.parts.materials.forEach(function (m) {
             // after the flash: the phase-two red, or the boss model's own glow, or nothing
-            const g = bot.model.glow;
-            m.emissive.setHex(on ? 0x772211 : (bot.phase2 ? 0x7a0f00 : (g ? g.hex : 0x000000)));
-            m.emissiveIntensity = on ? 1.0 : (bot.phase2 ? 0.55 : (g ? g.k : 0));
+            if (on) { m.emissive.setHex(0x772211); m.emissiveIntensity = 1.0; }
+            else emissiveRest(m, bot.model.glow, bot.phase2);
         });
     }
 
@@ -7472,15 +7581,19 @@ function tickBossAbility(bot, delta, now, dist, toPlayer) {
             bot.abilityT = bot.phase2 ? BOSS_PHASE2.ghostEvery : 4.5;
             bot.ghostUntil = now + 1800;
             const dest = randomNavPoint();
-            if (dest.distanceTo(camera.position) > 8) bot.mesh.position.set(dest.x, 0, dest.z);
+            if (dest.distanceTo(camera.position) > 8) {
+                const from = bot.mesh.position.clone();
+                bot.mesh.position.set(dest.x, 0, dest.z);
+                ghostBlink(bot, from, dest);                    // step 31a
+            }
             spawnParticles(bot.mesh.position.clone().setY(1.4), 0xccaaff, 16, 3);
         }
+        ghostAppearDone(bot, now);
         const ghosting = now < bot.ghostUntil;
-        const op = ghosting ? 0.22 : 1;
-        bot.parts.materials.forEach(function (m) {
-            m.transparent = true;
-            m.opacity = op;
-        });
+        if (ghosting !== !!bot.ghostShown) {
+            bot.ghostShown = ghosting;
+            ghostFade(bot.parts, ghosting ? GHOST_LOOK.vanishOpacity : 1);
+        }
     }
 
     if (id === 'charge' && bot.hasLOS && dist < 22 && bot.abilityT <= 0) {

@@ -26,10 +26,12 @@
      snipe     one accurate round from further than you can answer
      spray     a wall of lead, cheap per bullet
      dynamite  lobs a stick that lands where you were
-     ghost     disappears and reappears somewhere else - and every few seconds
-               raises its gun in both hands for a SPECTRAL SHOT: a fast round that
-               goes through walls (step 31b - see GHOST); and raises a hand for a
-               GRAVE BURST: hands out of the ground under you (step 31c)
+     ghost     turns to mist, is gone for a second and comes out of the ground
+               beside somebody at a run - GHOST DASH (step 31d, which took the
+               old VANISH's place); every few seconds raises its gun in both
+               hands for a SPECTRAL SHOT: a fast round that goes through walls
+               (step 31b - see GHOST); and raises a hand for a GRAVE BURST:
+               hands out of the ground under you (step 31c)
      slam      hits the ground and hurts everyone standing near it
      poison    throws a bottle that leaves a cloud sitting on the ground
      dragon    breathes fire that burns on the ground, swoops - and is the last
@@ -60,7 +62,7 @@ const BOSS_TYPES = [
     { id: "snipe", name: "WIDOW-MAKER SAL", ability: "LONGSHOT", hp: 750, fireDelay: 2100, speed: 2.6 },
     { id: "spray", name: "MACHINE-GUN MURPHY", ability: "LEAD STORM", hp: 1000, fireDelay: 120, speed: 3.0 },
     { id: "dynamite", name: "DYNAMITE DAISY", ability: "TNT TOSS", hp: 850, fireDelay: 1600, speed: 3.2 },
-    { id: "ghost", name: "GHOST-WALKER COLE", ability: "VANISH", hp: 800, fireDelay: 900, speed: 4.0 },
+    { id: "ghost", name: "GHOST-WALKER COLE", ability: "GHOST DASH", hp: 800, fireDelay: 900, speed: 4.0 },
     { id: "slam", name: "THUNDER-HOOF BART", ability: "EARTHQUAKE", hp: 1300, fireDelay: 1400, speed: 2.8 },
     { id: "poison", name: "POISON-DOC REED", ability: "TOXIC CLOUD", hp: 880, fireDelay: 1300, speed: 3.0 },
     // step 28 - the last one. Breathes fire from a distance (see DRAGON) and swoops;
@@ -81,10 +83,11 @@ const BOSS = {
     bulletLife: 3.5,
 
     /* Abilities */
-    ghostEveryMs: 4500,
-    ghostForMs: 1800,
-    blinkMin: 8,               // never right on top of you
-    blinkMax: 26,              // and never out of the fight - see tickAbility
+    /* step 31d: the ghost's old VANISH (ghostEveryMs / ghostForMs / blinkMin /
+       blinkMax - a jump to a random point 8-26 m away) is gone from the server.
+       GHOST DASH took its place, and it always comes out 7 m from somebody, so
+       the range the blink needed is not a question any more. Offline (the
+       browser's own brain) still vanishes: it has numbers of its own. */
     chargeEveryMs: 5500,
     chargeForMs: 900,
     chargeTrigger: 22,         // starts the run from this far out
@@ -189,7 +192,33 @@ const SKELETON = {
    silent, no VANISH. The SPECTRAL SHOT and it never run together; whichever comes
    second waits gapMs after the other is over. Killing it before the burst is the
    other answer - the circle goes with it.
-   b.grave = { e: raise / fill / burst, target, until, i, x, z, T, inside, judged }. */
+   b.grave = { e: raise / fill / burst, target, until, i, x, z, T, inside, judged }.
+
+   GHOST DASH (step 31d), which took the old VANISH's place. Every dashEveryMs (the
+   first dashFirstMs after it arrives) it picks a living player at random within
+   dashRange - no line needed - and goes:
+
+     mist     mistMs      it wraps itself up and thins out. Still there to be shot.
+     gone     dashGoneMs  no body at all (`hurt` returns null, like the skeleton's
+                          scatter). markLeadMs before it comes out, a whirl of mist
+                          opens on the ground where it is going to - the warning.
+     appear   appearMs    it unfolds appearDist from its target, at a random angle
+                          (not behind - behind is the skeleton's), somewhere the body
+                          fits and there is a straight line from there to them. At the
+                          end of this part the direction locks, on where they are then.
+     dash     dashMaxMs   dashSpeed in a straight line, at most dashReach metres,
+                          stopped by a wall. Everybody within dashWidth of the line it
+                          takes is hit for dashDamage - once each, however many times
+                          the line crosses them.
+     recover  recoverMs   planted, not shooting: the window to hurt it.
+
+   The answer is a step to the side once it is out: the aim is locked on where you
+   were, not where you are going. In phase two there is no recover after the first
+   dash - a short mist (p2.dashMistMs / p2.dashGoneMs), a new mark, a second dash,
+   and only then recover. A target that goes down or leaves while it is gone: it
+   comes out where it went in and there is no charge. It never runs with a SPECTRAL
+   SHOT or a GRAVE BURST - whichever comes second waits gapMs.
+   b.dash = { e, until, target, left, fx, fz, mx, mz, marked, ox, oz, dx, dz, gone, hit }. */
 const GHOST = {
     spectralFirstMs: 5000, spectralEveryMs: 7000, spectralRange: 45,
     raiseMs: 250, flashMs: 600, lockMs: 250, lowerMs: 500,
@@ -198,7 +227,12 @@ const GHOST = {
     graveFirstMs: 10000, graveEveryMs: 13000, graveRange: 30,
     graveRaiseMs: 500, graveFillMs: 1100, graveLowerMs: 350,
     graveRadius: 2.5, graveDamage: 40, gapMs: 2500,
-    p2: { spectralEveryMs: 5000 }
+    // step 31d - GHOST DASH
+    dashFirstMs: 8000, dashEveryMs: 12000, dashRange: 40,
+    mistMs: 500, dashGoneMs: 1000, markLeadMs: 700, appearMs: 450, appearDist: 7,
+    dashSpeed: 16, dashReach: 12, dashMaxMs: 750, dashWidth: 1.8, dashDamage: 35,
+    recoverMs: 1000,
+    p2: { spectralEveryMs: 5000, dashes: 2, dashMistMs: 400, dashGoneMs: 400 }
 };
 
 /* ---- The skeleton's BONE HARVEST (step 30d) ----------------------------------
@@ -244,7 +278,7 @@ const GHOST = {
      snipe     calls three bandits to her and backs off to 18 metres
      spray     every 3 seconds, a ring of 12 rounds in every direction
      dynamite  three sticks in a fan
-     ghost     vanishes twice as often, and a SPECTRAL SHOT every 5 seconds (GHOST.p2)
+     ghost     two GHOST DASHes back to back, and a SPECTRAL SHOT every 5 seconds (GHOST.p2)
      slam      a wider, more frequent quake
      poison    two bottles a throw, and the cloud lingers for 8 seconds
      robot     OVERDRIVE: spins up in 0.3s, fires for 4s, and vents steam (ROBOT.p2)
@@ -260,7 +294,6 @@ const PHASE2 = {
     ringRounds: 12,
     fanSticks: 3,
     fanSpread: 0.35,           // radians between sticks
-    ghostEveryMs: 2200,
     slamRadius: 9,
     slamTrigger: 11,
     slamEveryMs: 3200,
@@ -351,7 +384,7 @@ function spawnBoss(room, players, now) {
         harvestAt: now + SKELETON.harvestFirstMs,       // step 30d - read by the skeleton only
         spectralAt: now + GHOST.spectralFirstMs,        // step 31b - read by the ghost only
         graveAt: now + GHOST.graveFirstMs,              // step 31c - read by the ghost only
-        ghostUntil: 0,
+        dashAt: now + GHOST.dashFirstMs,                // step 31d - read by the ghost only
         chargeUntil: 0
     };
     room.bossAlive = true;
@@ -889,6 +922,7 @@ function tickSpectral(room, b, players, now, sink) {
                 b.spectral = null;
                 b.lastShot = now + 400;
                 b.graveAt = Math.max(b.graveAt || 0, now + GHOST.gapMs);   // step 31c: never back to back
+                b.dashAt = Math.max(b.dashAt || 0, now + GHOST.gapMs);     // step 31d: nor a GHOST DASH
                 sink.spectrals.push({ e: "done", off: 1 });
                 return;
             }
@@ -919,6 +953,7 @@ function tickSpectral(room, b, players, now, sink) {
     b.spectral = null;
     b.lastShot = now + 400;                                      // a breath before the ordinary gun
     b.graveAt = Math.max(b.graveAt || 0, now + GHOST.gapMs);    // step 31c: never back to back
+    b.dashAt = Math.max(b.dashAt || 0, now + GHOST.gapMs);      // step 31d: nor a GHOST DASH
     sink.spectrals.push({ e: "done" });
 }
 
@@ -1011,7 +1046,176 @@ function endGrave(b, now, sink, off) {
     b.graveFeet = null;
     b.lastShot = now + 400;                                      // a breath before the ordinary gun
     b.spectralAt = Math.max(b.spectralAt || 0, now + GHOST.gapMs);   // never back to back
+    b.dashAt = Math.max(b.dashAt || 0, now + GHOST.gapMs);           // step 31d: nor a GHOST DASH
     sink.graves.push(off ? { e: "done", off: 1 } : { e: "done" });
+}
+
+/* ---- GHOST DASH (step 31d) -------------------------------------------------- */
+/* Who it comes for: a living player at random within dashRange. No line to them is
+   needed - it is not walking there. */
+function dashTarget(room, players, b) {
+    const near = [];
+    for (const id in players) {
+        const p = players[id];
+        if (p.room !== room.code || !p.alive) continue;
+        if (Math.hypot(p.x - b.x, p.z - b.z) <= GHOST.dashRange) near.push(p);
+    }
+    return near.length ? near[Math.floor(Math.random() * near.length)] : null;
+}
+
+/* Where it comes out: appearDist from them at a random angle - swung round, and
+   nearer or further, until the body fits there and has a straight line to them. So
+   it never turns up inside a wall, and never on the far side of one. */
+function spotNear(p, radius) {
+    const start = Math.random() * Math.PI * 2;
+    const dists = [GHOST.appearDist, GHOST.appearDist - 1.5, GHOST.appearDist + 1.5];
+    for (let k = 0; k < 24; k++) {
+        const a = start + k * (Math.PI * 2 / 24);
+        for (const r of dists) {
+            const x = p.x + Math.sin(a) * r, z = p.z + Math.cos(a) * r;
+            if (nav.collidesAt(x, z, radius) || !nav.lineClear(p.x, p.z, x, z)) continue;
+            return { x: x, z: z };
+        }
+    }
+    return null;
+}
+
+function startDash(b, p, now, sink) {
+    b.dash = {
+        e: "mist", until: now + GHOST.mistMs, target: p.id,
+        left: (b.phase === 2 ? GHOST.p2.dashes : 1) - 1,
+        fx: b.x, fz: b.z, marked: false, again: false, hit: [], gone: 0
+    };
+    sink.dashes.push({ e: "mist", p: [round2(b.x), round2(b.z)], tgt: p.id, ms: GHOST.mistMs });
+}
+
+/* How far a point is from the line it just travelled. A charge at 16 m/s covers
+   0.8 m a tick, and a body that jumps that far at once steps clean over somebody
+   standing in the way - the lesson of the fast round (HANDOFF section 6). */
+function distToSegment(px, pz, ax, az, bx, bz) {
+    const vx = bx - ax, vz = bz - az;
+    const len = vx * vx + vz * vz;
+    let t = len > 0 ? ((px - ax) * vx + (pz - az) * vz) / len : 0;
+    t = Math.max(0, Math.min(1, t));
+    return Math.hypot(px - (ax + vx * t), pz - (az + vz * t));
+}
+
+/* The charge itself, in small steps so that corners stop it and nobody is stepped
+   over. Everybody within dashWidth of the line it takes is caught - once each,
+   however many times the line comes back past them. */
+function stepDash(room, b, players, now, dt, sink) {
+    const s = b.dash;
+    const step = GHOST.dashSpeed * dt;
+    const parts = Math.max(1, Math.ceil(step / 0.25));
+    const hit = [];
+    for (let i = 0; i < parts && s.gone < GHOST.dashReach && !s.stopped; i++) {
+        const want = Math.min(step / parts, GHOST.dashReach - s.gone);
+        const ax = b.x, az = b.z;
+        moveAxis(b, s.dx * want, s.dz * want);
+        const went = Math.hypot(b.x - ax, b.z - az);
+        s.gone += went;
+        for (const id in players) {
+            const p = players[id];
+            if (p.room !== room.code || !p.alive || s.hit.indexOf(id) >= 0) continue;
+            if (distToSegment(p.x, p.z, ax, az, b.x, b.z) > GHOST.dashWidth) continue;
+            s.hit.push(id);
+            hit.push(id);
+            sink.hits.push({ playerId: id, damage: GHOST.dashDamage, from: "boss" });
+        }
+        if (went < want - 0.0001) s.stopped = true;              // a wall
+    }
+    if (hit.length) sink.dashes.push({ e: "hit", ids: hit, p: [round2(b.x), round2(b.z)] });
+    if (s.gone >= GHOST.dashReach) s.stopped = true;
+}
+
+/* The charge is over: in phase two a short mist and another one, otherwise the
+   recovery - planted and silent, the window to hurt it. */
+function afterDash(room, b, players, now, sink) {
+    const s = b.dash;
+    if (s.left > 0) {
+        const t = dashTarget(room, players, b);
+        if (t) {
+            s.left--;
+            s.again = true;
+            s.target = t.id;
+            s.e = "mist"; s.until = now + GHOST.p2.dashMistMs;
+            s.fx = b.x; s.fz = b.z; s.marked = false; s.mx = undefined; s.mz = undefined;
+            sink.dashes.push({ e: "mist", p: [round2(b.x), round2(b.z)], tgt: t.id, ms: GHOST.p2.dashMistMs, again: 1 });
+            return;
+        }
+    }
+    s.e = "recover"; s.until = now + GHOST.recoverMs;
+    sink.dashes.push({ e: "recover", p: [round2(b.x), round2(b.z)], ms: GHOST.recoverMs });
+}
+
+function endDash(b, now, sink, off) {
+    b.dash = null;
+    b.spectralAt = Math.max(b.spectralAt || 0, now + GHOST.gapMs);   // never back to back
+    b.graveAt = Math.max(b.graveAt || 0, now + GHOST.gapMs);
+    b.lastShot = now + 300;                                          // a breath before the gun
+    sink.dashes.push(off ? { e: "done", off: 1 } : { e: "done" });
+}
+
+/* mist -> gone (and the mark) -> appear (the aim locks at the end of it) -> dash
+   -> another one in phase two -> recover */
+function tickDash(room, b, players, now, dt, sink) {
+    const s = b.dash;
+
+    if (s.e === "dash") {
+        stepDash(room, b, players, now, dt, sink);
+        if (!s.stopped && now < s.until) return;
+        afterDash(room, b, players, now, sink);
+        return;
+    }
+
+    /* The whirl of mist on the ground where it is going to come out, markLeadMs
+       before it does - by where its target is standing at that moment. They keep
+       moving until it opens, which is why the aim only locks after it is out. */
+    if (s.e === "gone" && !s.marked && now >= s.until - s.markAt) {
+        s.marked = true;
+        const t = players[s.target];
+        const spot = t && t.room === room.code && t.alive ? spotNear(t, b.radius || BOSS.radius) : null;
+        if (spot) { s.mx = spot.x; s.mz = spot.z; }
+        sink.dashes.push({
+            e: "mark", p: [round2(spot ? spot.x : s.fx), round2(spot ? spot.z : s.fz)],
+            tgt: spot ? s.target : "", ms: Math.max(0, Math.round(s.until - now))
+        });
+    }
+    if (now < s.until) return;
+
+    if (s.e === "mist") {
+        const ms = s.again ? GHOST.p2.dashGoneMs : GHOST.dashGoneMs;
+        s.e = "gone"; s.until = now + ms; s.markAt = Math.min(GHOST.markLeadMs, ms);
+        s.fx = b.x; s.fz = b.z; s.marked = false; s.mx = undefined; s.mz = undefined;
+        sink.dashes.push({ e: "gone", p: [round2(b.x), round2(b.z)], tgt: s.target, ms: ms });
+    } else if (s.e === "gone") {
+        // nowhere to come out beside them (they went down, or left): it comes out
+        // where it went in, and there is no charge
+        if (s.mx !== undefined) {
+            b.x = s.mx; b.z = s.mz;
+            b.path = null; b.repathAt = 0;
+            b.lastX = b.x; b.lastZ = b.z;
+        }
+        const t = players[s.target];
+        if (s.mx !== undefined && t && t.room === room.code && t.alive) b.yaw = Math.atan2(t.x - b.x, t.z - b.z);
+        s.e = "appear"; s.until = now + GHOST.appearMs;
+        sink.dashes.push({
+            e: "appear", p: [round2(b.x), round2(b.z)], y: round2(b.yaw),
+            tgt: s.mx !== undefined ? s.target : "", ms: GHOST.appearMs
+        });
+    } else if (s.e === "appear") {
+        const t = players[s.target];
+        if (s.mx === undefined || !t || t.room !== room.code || !t.alive) { endDash(b, now, sink, true); return; }
+        const dx = t.x - b.x, dz = t.z - b.z, d = Math.hypot(dx, dz) || 1;
+        s.dx = dx / d; s.dz = dz / d;
+        s.ox = b.x; s.oz = b.z;
+        s.gone = 0; s.stopped = false; s.hit = [];
+        s.e = "dash"; s.until = now + GHOST.dashMaxMs;
+        b.yaw = Math.atan2(s.dx, s.dz);
+        sink.dashes.push({ e: "dash", o: [round2(b.x), round2(b.z)], d: [round3(s.dx), round3(s.dz)], ms: GHOST.dashMaxMs });
+    } else if (s.e === "recover") {
+        endDash(b, now, sink, false);
+    }
 }
 
 /* ---- Abilities ---------------------------------------------------------- */
@@ -1043,9 +1247,21 @@ function tickAbility(room, b, players, near, now, dt, sink) {
     }
 
     if (id === "ghost") {
-        // step 31b: the SPECTRAL SHOT has a clock of its own; VANISH waits while the gun is up
+        /* Three clocks, and never two of them running at once: whichever is due
+           first starts, and the others wait gapMs after it is over. The GHOST DASH
+           (step 31d) is asked first - it is the one that took VANISH's place. */
+        if (b.dash) { tickDash(room, b, players, now, dt, sink); return; }
         if (b.spectral) { tickSpectral(room, b, players, now, sink); return; }
         if (b.grave) { tickGrave(room, b, players, now, sink); return; }       // step 31c: and while the hand is up
+        if (now >= b.dashAt) {
+            const p = dashTarget(room, players, b);
+            if (p) {
+                b.dashAt = now + GHOST.dashEveryMs;
+                startDash(b, p, now, sink);
+                return;
+            }
+            b.dashAt = now + 1000;                              // nobody near enough - look again in a second
+        }
         if (now >= b.spectralAt) {
             const p = spectralTarget(room, players, b);
             if (p) {
@@ -1063,33 +1279,6 @@ function tickAbility(room, b, players, near, now, dt, sink) {
                 return;
             }
             b.graveAt = now + 1000;                             // nobody near enough - look again in a second
-        }
-        if (now >= b.abilityAt) {
-            b.abilityAt = now + (b.phase === 2 ? PHASE2.ghostEveryMs : BOSS.ghostEveryMs);
-            b.ghostUntil = now + BOSS.ghostForMs;
-
-            /* Vanishing means reappearing somewhere you were not looking - not
-               leaving the county. The browser picked any point on the map,
-               which put it 40 metres away four times out of five and quietly
-               ended the fight: it could not shoot from there, and nobody could
-               find it to shoot back. So the blink stays inside the fight, far
-               enough to break your aim and no further. */
-            let placed = false;
-            for (let k = 0; k < 40 && !placed; k++) {
-                const dest = nav.randomNavPoint();
-                if (nav.collidesAt(dest.x, dest.z, b.radius || BOSS.radius)) continue;
-                if (near) {
-                    const d = Math.hypot(dest.x - near.player.x, dest.z - near.player.z);
-                    if (d <= BOSS.blinkMin || d > BOSS.blinkMax) continue;
-                }
-                b.x = dest.x; b.z = dest.z;
-                placed = true;
-            }
-            if (placed) {
-                b.path = null; b.repathAt = 0;
-                b.lastX = b.x; b.lastZ = b.z;
-                sink.blinks.push({ p: [round2(b.x), round2(b.z)] });
-            }
         }
         return;
     }
@@ -1220,8 +1409,9 @@ function stepBoss(room, b, players, now, dt, sink) {
     // skeleton while it counts a duel down or is down on one knee (step 30b), and
     // all through BONE SCATTER (step 30c) - no walking (only its leap, tickScatter) and no revolver -
     // and all through BONE HARVEST (step 30d); the ghost from the moment it raises
-    // its gun for a SPECTRAL SHOT until it is down again (step 31b), and its hand for a GRAVE BURST (step 31c)
-    const dueling = !!b.duel || (b.staggerUntil && now < b.staggerUntil) || !!b.scatter || !!b.harvest || !!b.spectral || !!b.grave;
+    // its gun for a SPECTRAL SHOT until it is down again (step 31b), and its hand for a GRAVE BURST (step 31c),
+    // and all through a GHOST DASH (step 31d) - the charge itself is tickDash's, not the walking's
+    const dueling = !!b.duel || (b.staggerUntil && now < b.staggerUntil) || !!b.scatter || !!b.harvest || !!b.spectral || !!b.grave || !!b.dash;
     const planted = b.gState === "spin" || b.gState === "fire" || dueling;
     const baseSpeed = b.type.speed * (b.phase === 2 ? PHASE2.speedScale : 1);
     const speed = b.state === "chase" ? baseSpeed : baseSpeed * 0.55;
@@ -1332,6 +1522,13 @@ function stepBoss(room, b, players, now, dt, sink) {
         if (who) { faceX = who.x; faceZ = who.z; }
         else if (b.grave.x !== undefined) { faceX = b.grave.x; faceZ = b.grave.z; }
     }
+    else if (b.dash) {
+        /* step 31d: it turns on its target only while it is coming out. Once the
+           charge starts the yaw is the locked direction and nothing moves it, and
+           as mist, gone or bent double after it, it does not turn at all. */
+        const who = b.dash.e === "appear" && players[b.dash.target];
+        if (who) { faceX = who.x; faceZ = who.z; }
+    }
     else if (b.state === "chase" && near) { faceX = near.player.x; faceZ = near.player.z; }
     else if (b.path && b.path[b.pathIndex]) { faceX = b.path[b.pathIndex].x; faceZ = b.path[b.pathIndex].z; }
     if (faceX !== undefined) {
@@ -1376,11 +1573,13 @@ function stepRoom(room, players, now, dt, sink) {
 function emptySink() {
     return {
         shots: [], hits: [], bossShots: [], hazards: [],
+        // step 31d: nothing fills `blinks` any more - GHOST DASH took VANISH's place
         booms: [], slams: [], blinks: [], roars: [], duels: [],     // duels: step 30b
         scatters: [],                                               // step 30c: BONE SCATTER
         harvests: [],                                               // step 30d: BONE HARVEST
         spectrals: [],                                              // step 31b: the ghost's SPECTRAL SHOT
         graves: [],                                                 // step 31c: its GRAVE BURST
+        dashes: [],                                                 // step 31d: its GHOST DASH
         bossSpawn: null, bossDied: null, bossPhase: null, wave: null,
         missionHits: [], missionEnd: null, missionState: null      // step 24, see missions.js
     };
@@ -1390,6 +1589,7 @@ function emptySink() {
    see-through. Sent at the same rate as the bandit snapshot. */
 const SCATTER_CODE = { collapse: 3, gone: 4, rise: 5, strike: 6 };
 const HARVEST_CODE = { summon: 7, spin: 8, tired: 9 };
+const DASH_CODE = { mist: 14, gone: 15, appear: 16, dash: 17, recover: 18 };
 function snapshot(room, now) {
     const b = room.boss;
     if (!b || !b.alive) return null;
@@ -1399,7 +1599,8 @@ function snapshot(room, now) {
         Math.round(b.z * 100) / 100,
         Math.round(b.yaw * 100) / 100,
         Math.round(b.health),
-        b.ghostUntil > t ? 1 : 0,
+        // step 31d: see-through while it is turning to mist (VANISH used to set this)
+        (b.dash && b.dash.e === "mist") ? 1 : 0,
         (b.chargeUntil && b.chargeUntil > t) ? 1 : 0,
         b.phase === 2 ? 1 : 0,
         // step 27: the robot's gun - 1 spinning up, 2 firing (0 for everybody else)
@@ -1423,6 +1624,10 @@ function snapshot(room, now) {
        circle is: fields 11-12) */
     else if (b.grave && b.grave.e === "raise") snap.push(12, b.grave.target, Math.max(0, Math.round(b.grave.until - t)));
     else if (b.grave && b.grave.e === "fill") snap.push(13, b.grave.target, Math.max(0, Math.round(b.grave.until - t)), round2(b.grave.x), round2(b.grave.z));
+    /* step 31d: GHOST DASH - 14 mist, 15 gone (with the mark, fields 11-12, once it is
+       open, so a latecomer sees it too), 16 coming out, 17 charging, 18 recovering */
+    else if (b.dash && b.dash.e === "gone" && b.dash.mx !== undefined) snap.push(15, b.dash.target || "", Math.max(0, Math.round(b.dash.until - t)), round2(b.dash.mx), round2(b.dash.mz));
+    else if (b.dash) snap.push(DASH_CODE[b.dash.e], b.dash.target || "", Math.max(0, Math.round(b.dash.until - t)));
     return snap;
 }
 
@@ -1431,6 +1636,7 @@ function hurt(room, amount, now) {
     if (!b || !b.alive) return null;
     const t = now === undefined ? Date.now() : now;
     if (b.scatter && b.scatter.e === "gone") return null;       // step 30c: there is nothing there to hit
+    if (b.dash && b.dash.e === "gone") return null;             // step 31d: nor while the ghost is mist
     b.health -= amount;
     if (b.health <= 0) {
         b.health = 0;

@@ -1323,6 +1323,7 @@ setInterval(() => {
         for (let i = 0; i < sink.hazards.length; i++) io.to(code).emit("boss-hazard", sink.hazards[i]);
         for (let i = 0; i < sink.booms.length; i++) io.to(code).emit("boss-boom", sink.booms[i]);
         for (let i = 0; i < sink.slams.length; i++) io.to(code).emit("boss-slam", sink.slams[i]);
+        // step 31d: nothing fills `blinks` any more - GHOST DASH took VANISH's place
         for (let i = 0; i < sink.blinks.length; i++) io.to(code).emit("boss-blink", sink.blinks[i]);
         for (let i = 0; i < sink.roars.length; i++) io.to(code).emit("boss-roar", sink.roars[i]);
         // step 30b: the skeleton's HIGH NOON - a mark, and how it ended (shot / lost)
@@ -1335,6 +1336,8 @@ setInterval(() => {
         for (let i = 0; i < sink.spectrals.length; i++) io.to(code).emit("boss-spectral", sink.spectrals[i]);
         // step 31c: its GRAVE BURST - raise, cast (the circle), burst, judge (who it got), done
         for (let i = 0; i < sink.graves.length; i++) io.to(code).emit("boss-grave", sink.graves[i]);
+        // step 31d: its GHOST DASH - mist, gone, mark (the whirl), appear, dash, hit, recover, done
+        for (let i = 0; i < sink.dashes.length; i++) io.to(code).emit("boss-dash", sink.dashes[i]);
 
         /* A bullet reached a player. This is where the last piece of trust
            goes away: the server no longer has to believe a client that says it

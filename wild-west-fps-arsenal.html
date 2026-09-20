@@ -1793,16 +1793,9 @@ function initNetwork() {
         if (d < 10) camShake = Math.min(0.7, camShake + 0.4 * (1 - d / 10));
     });
 
-    NET.socket.on('boss-blink', function (m) {
-        if (!m || !m.p) return;
-        // a puff where it was, and one where it turned up
-        if (netBoss.mesh) spawnParticles(netBoss.mesh.position.clone().setY(1.4), 0xccaaff, 16, 3);
-        spawnParticles(new THREE.Vector3(m.p[0], 1.4, m.p[1]), 0xccaaff, 16, 3);
-        // step 31a: mist and a whisper where it left, and it unfolds where it turned up
-        if (netBoss.active && netBoss.alive) ghostBlink(netBoss, netBoss.mesh ? netBoss.mesh.position.clone() : null, { x: m.p[0], z: m.p[1] });
-        netBoss.buf.length = 0;          // it did not walk there - do not slide it there
-        netBoss.hasPrev = false;
-    });
+    /* step 31d: `boss-blink` is gone from the server - GHOST DASH took VANISH's
+       place online. The browser's own brain still blinks offline, through
+       ghostBlink, which is why that one is still here. */
 
     NET.socket.on('boss-roar', function (m) {
         if (!m || !m.p) return;
@@ -1816,6 +1809,7 @@ function initNetwork() {
     NET.socket.on('boss-harvest', onBossHarvest);       // step 30d: BONE HARVEST
     NET.socket.on('boss-spectral', onBossSpectral);     // step 31b: the ghost's SPECTRAL SHOT
     NET.socket.on('boss-grave', onBossGrave);           // step 31c: its GRAVE BURST
+    NET.socket.on('boss-dash', onBossDash);             // step 31d: its GHOST DASH
 
     NET.socket.on('boss-died', function (m) {
         if (!m) return;
@@ -3756,7 +3750,7 @@ const BOSS_TYPES = [
     { id: 'snipe', name: 'WIDOW-MAKER SAL', ability: 'LONGSHOT', hp: 750, fireDelay: 2100, speed: 2.6, shirt: 0x243018, pants: 0x1a2214, hat: 0x101408, coat: 0x2a3820, eye: 0x66ff88 },
     { id: 'spray', name: 'MACHINE-GUN MURPHY', ability: 'LEAD STORM', hp: 1000, fireDelay: 120, speed: 3.0, shirt: 0x3a3a48, pants: 0x222228, hat: 0x18181c, coat: 0x404050, eye: 0x88ccff },
     { id: 'dynamite', name: 'DYNAMITE DAISY', ability: 'TNT TOSS', hp: 850, fireDelay: 1600, speed: 3.2, shirt: 0x6a1820, pants: 0x2a1418, hat: 0x3a1014, coat: 0x5a2028, eye: 0xff3344 },
-    { id: 'ghost', name: 'GHOST-WALKER COLE', ability: 'VANISH', hp: 800, fireDelay: 900, speed: 4.0, shirt: 0x2a2a38, pants: 0x1a1a28, hat: 0x101018, coat: 0x3a3a50, eye: 0xccaaff },
+    { id: 'ghost', name: 'GHOST-WALKER COLE', ability: 'GHOST DASH', hp: 800, fireDelay: 900, speed: 4.0, shirt: 0x2a2a38, pants: 0x1a1a28, hat: 0x101018, coat: 0x3a3a50, eye: 0xccaaff },
     { id: 'slam', name: 'THUNDER-HOOF BART', ability: 'EARTHQUAKE', hp: 1300, fireDelay: 1400, speed: 2.8, shirt: 0x4a3818, pants: 0x2a2210, hat: 0x201808, coat: 0x5a4820, eye: 0xffaa33 },
     { id: 'poison', name: 'POISON-DOC REED', ability: 'TOXIC CLOUD', hp: 880, fireDelay: 1300, speed: 3.0, shirt: 0x184a28, pants: 0x102818, hat: 0x0c2010, coat: 0x205830, eye: 0x44ff66 },
     // step 28: the last one - killing it wins the game (BOSS_DRAGON, BOSS_LOOKS)
@@ -3843,7 +3837,12 @@ const BOSS_GHOST = {
     graveFirstMs: 10000, graveEveryMs: 13000, graveRange: 30,
     graveRaiseMs: 500, graveFillMs: 1100, graveLowerMs: 350,
     graveRadius: 2.5, graveDamage: 40, gapMs: 2500,
-    p2: { spectralEveryMs: 5000 }
+    // step 31d - GHOST DASH
+    dashFirstMs: 8000, dashEveryMs: 12000, dashRange: 40,
+    mistMs: 500, dashGoneMs: 1000, markLeadMs: 700, appearMs: 450, appearDist: 7,
+    dashSpeed: 16, dashReach: 12, dashMaxMs: 750, dashWidth: 1.8, dashDamage: 35,
+    recoverMs: 1000,
+    p2: { spectralEveryMs: 5000, dashes: 2, dashMistMs: 400, dashGoneMs: 400 }
 };
 
 function enrageRig(parts) {
@@ -5867,6 +5866,7 @@ function destroyNetBoss() {
     harvestClear();                                          // step 30d
     spectralClear();                                         // step 31b
     graveClear();                                            // step 31c
+    dashClear();                                             // step 31d
     if (SCATTER.e || SCATTER.standAt || SCATTER.bones.length) scatterStep({ e: 'clear' });   // step 30c
     if (netBoss.mesh) {
         banditGroup.remove(netBoss.mesh);
@@ -5913,6 +5913,7 @@ function onBossState(m) {
         harvestFromSnapshot(r);              // step 30d: its BONE HARVEST
         spectralFromSnapshot(r);             // step 31b: the ghost's SPECTRAL SHOT
         graveFromSnapshot(r);                // step 31c: its GRAVE BURST
+        dashFromSnapshot(r);                 // step 31d: its GHOST DASH
         netBoss.buf.push({ t: performance.now(), x: r[0], z: r[1], yaw: r[2] });
         if (netBoss.buf.length > 14) netBoss.buf.shift();
         netBoss.countdown = -1;
@@ -6503,6 +6504,7 @@ function startNetBossDeath() {
     harvestClear();                                                                          // step 30d
     spectralClear();                                                                         // step 31b
     graveClear();                                                                            // step 31c
+    dashClear();                                                                             // step 31d
     if (DUEL.on || DUEL.standAt) duelEnd('clear');
     netBoss.alive = false;
     netBoss.deathT = 0;
@@ -7096,6 +7098,270 @@ function updateGrave(delta) {
     const hud = say ? graveHud() : GRAVE.hud;
     if (hud) {
         if (say) { hud.style.display = 'block'; hud.textContent = '⚠ MOVE ⚠'; }
+        else hud.style.display = 'none';
+    }
+}
+
+/* ---- GHOST DASH - the ghost out of the ground beside you (step 31d) ----------
+   It took VANISH's place. The server owns all of it and says what part it is in
+   (boss-dash): "mist" - Vanish, it wraps up and thins out, still there to be shot;
+   "gone" - no body at all, nothing to hit and nothing on the minimap; "mark" - the
+   whirl of mist on the ground where it is going to come out, 0.7s before it does,
+   and the whisper from there; "appear" - Appear, at that exact spot, facing whoever
+   it came for; "dash" - Dash, the charge along the line the server locked when it
+   finished coming out; "hit" - who it went through; "recover" - Recover, bent
+   double and silent, the window to hurt it; "done" - back to the fight. Here it is
+   only seen and heard. The see-through look while it is mist rides on the snapshot's
+   field 4, the same flag VANISH used, so ghostFade does that part. */
+const DASH = { e: null, target: '', markTarget: '', until: 0, hidden: false, mark: null, told: false, standAt: 0, trailAt: 0, hud: null };
+let _dashDiscGeo = null, _dashRingGeo = null, _dashDiscMat = null, _dashRingMat = null, _dashCoreMat = null;
+
+function dashRig() { return spectralRig(); }
+
+/* The whirl: a dark pool with two rings turning against each other and a bright
+   eye in the middle, all of it growing as the moment comes. */
+function dashWhirlParts() {
+    if (_dashDiscGeo) return;
+    _dashDiscGeo = new THREE.CircleGeometry(1, 40);
+    _dashDiscGeo.rotateX(-Math.PI / 2);
+    _dashRingGeo = new THREE.RingGeometry(0.72, 1, 56);
+    _dashRingGeo.rotateX(-Math.PI / 2);
+    const flat = { transparent: true, depthWrite: false, side: THREE.DoubleSide };
+    _dashDiscMat = new THREE.MeshBasicMaterial(Object.assign({ color: 0x120a26, opacity: 0.55 }, flat));
+    _dashRingMat = new THREE.MeshBasicMaterial(Object.assign({ color: 0xb8c8ff, opacity: 0.8 }, flat));
+    _dashCoreMat = new THREE.MeshBasicMaterial(Object.assign({ color: 0xe4dcff, opacity: 0.85 }, flat));
+}
+function makeDashWhirl(p, ms) {
+    dashWhirlParts();
+    const g = new THREE.Group();
+    const disc = new THREE.Mesh(_dashDiscGeo, _dashDiscMat.clone());
+    const r1 = new THREE.Mesh(_dashRingGeo, _dashRingMat.clone());
+    const r2 = new THREE.Mesh(_dashRingGeo, _dashCoreMat.clone());
+    disc.position.y = 0.03; r1.position.y = 0.05; r2.position.y = 0.07;
+    [disc, r1, r2].forEach(function (m) { m.raycast = function () { }; g.add(m); });
+    g.position.set(p[0], 0, p[1]);
+    scene.add(g);
+    return { g: g, disc: disc, r1: r1, r2: r2, x: p[0], z: p[1], t0: performance.now(), ms: Math.max(120, ms || BOSS_GHOST.markLeadMs), closeAt: 0, mistAt: 0 };
+}
+function dropDashWhirl() {
+    const W = DASH.mark;
+    if (!W) return;
+    scene.remove(W.g);
+    [W.disc, W.r1, W.r2].forEach(function (m) { m.material.dispose(); });
+    DASH.mark = null;
+}
+
+/* The ground opening: a whisper that climbs out of it for as long as it is open. */
+function sfxDashMark(pos, ms) {
+    const d = chain(pos, 0.75, 55); if (!d) return;
+    const dur = Math.max(0.2, (ms || BOSS_GHOST.markLeadMs) / 1000);
+    noiseBurst(d, { type: 'bandpass', freq: 420, sweepTo: 1700, q: 1.2, dur: dur, vol: 0.4 });
+    tone(d, { type: 'sine', f0: 140, f1: 460, dur: dur, vol: 0.16 });
+}
+/* The charge going past: air torn open, no footsteps - it has no feet. */
+function sfxDashRush(pos) {
+    const d = chain(pos, 0.9, 60); if (!d) return;
+    noiseBurst(d, { type: 'bandpass', freq: 2600, sweepTo: 350, q: 0.7, dur: 0.55, vol: 0.55 });
+    tone(d, { type: 'sawtooth', f0: 320, f1: 70, dur: 0.5, vol: 0.18 });
+}
+function sfxDashBlow(pos, landed) {
+    const d = chain(pos, 0.9, 50); if (!d) return;
+    noiseBurst(d, { type: 'bandpass', freq: 900, sweepTo: 180, q: 1.1, dur: 0.3, vol: 0.5 });
+    if (landed) {
+        tone(d, { type: 'sine', f0: 190, f1: 48, dur: 0.32, vol: 0.55 });
+        noiseBurst(d, { type: 'lowpass', freq: 600, dur: 0.24, vol: 0.7, delay: 0.03 });
+    }
+}
+
+function dashHud() {
+    if (DASH.hud) return DASH.hud;
+    const d = document.createElement('div');
+    d.id = 'dash-hud';
+    d.style.cssText = 'position:fixed;top:40%;left:50%;transform:translate(-50%,-50%);z-index:40;pointer-events:none;display:none;' +
+        'text-align:center;font:bold 40px Georgia,serif;letter-spacing:4px;color:#c9b8ff;text-shadow:0 0 12px #3a1a9a,0 0 4px #000;white-space:nowrap';
+    document.body.appendChild(d);
+    return (DASH.hud = d);
+}
+
+/* No body: off the target list and off the minimap, exactly as the skeleton's
+   bones are while they are in the air. */
+function dashHide(on) {
+    DASH.hidden = on;
+    if (netBoss.mesh) netBoss.mesh.visible = !on && netBoss.alive;
+}
+
+function dashClear() {
+    const rig = dashRig();
+    // a whole-body clip would keep Death from playing (rigDie) - let go of it
+    if (rig && (rig.full === 'Vanish' || rig.full === 'Appear' || rig.full === 'Dash' || rig.full === 'Recover')) rig.full = null;
+    dropDashWhirl();
+    DASH.e = null; DASH.target = ''; DASH.markTarget = ''; DASH.until = 0; DASH.standAt = 0; DASH.trailAt = 0;
+    dashHide(false);
+    if (DASH.hud) DASH.hud.style.display = 'none';
+}
+
+/* mist / gone / mark / appear / dash / hit / recover / done, or clear (no boss) */
+function dashStep(m, late) {
+    const now = performance.now();
+    const rig = dashRig();
+    const e = m.e;
+    const at = Array.isArray(m.p) ? new THREE.Vector3(m.p[0], 0, m.p[1])
+        : (netBoss.mesh ? netBoss.mesh.position.clone() : new THREE.Vector3());
+    if (e === 'clear') { dashClear(); return; }
+
+    if (e === 'mist') {
+        DASH.e = 'mist'; DASH.target = m.tgt || ''; DASH.markTarget = '';
+        DASH.until = now + (typeof m.ms === 'number' ? m.ms : BOSS_GHOST.mistMs);
+        DASH.standAt = 0;
+        dropDashWhirl();
+        dashHide(false);
+        if (rig) rigFull(rig, 'Vanish', { fade: 0.08, instant: !!late });
+        if (!late) {
+            spawnGhostMist(at.clone().setY(0.4), 18);
+            sfxGhostWhisper(at);
+            if (!DASH.told) {
+                DASH.told = true;
+                pushFeed('GHOST DASH — WHEN THE MIST OPENS BESIDE YOU, STEP ASIDE');
+            }
+        }
+    } else if (e === 'gone') {
+        DASH.e = 'gone'; DASH.target = m.tgt || '';
+        DASH.until = now + (typeof m.ms === 'number' ? m.ms : BOSS_GHOST.dashGoneMs);
+        dashHide(true);
+        if (!late && Array.isArray(m.p)) spawnGhostMist(at.clone().setY(0.5), 22);
+    } else if (e === 'mark') {
+        if (!Array.isArray(m.p)) return;
+        dropDashWhirl();
+        DASH.mark = makeDashWhirl(m.p, m.ms);
+        DASH.markTarget = m.tgt || '';
+        if (!late) {
+            sfxDashMark(at.clone().setY(0.3), m.ms);
+            spawnGhostMist(at.clone().setY(0.2), 8);
+            if (DASH.markTarget === NET.id) pushFeed('IT IS COMING OUT BESIDE YOU');
+        }
+    } else if (e === 'appear') {
+        DASH.e = 'appear';
+        DASH.until = now + (typeof m.ms === 'number' ? m.ms : BOSS_GHOST.appearMs);
+        if (netBoss.mesh && Array.isArray(m.p)) {
+            // straight there: it did not walk, so there is nothing to slide from
+            netBoss.mesh.position.set(m.p[0], 0, m.p[1]);
+            if (typeof m.y === 'number') netBoss.mesh.rotation.y = m.y;
+            netBoss.buf = [{ t: now - INTERP_DELAY, x: m.p[0], z: m.p[1], yaw: typeof m.y === 'number' ? m.y : netBoss.mesh.rotation.y }];
+            netBoss.hasPrev = false; netBoss.speed = 0;
+        }
+        dashHide(false);
+        if (rig) rigFull(rig, 'Appear', { fade: 0.04, instant: !!late });
+        if (DASH.mark && !DASH.mark.closeAt) DASH.mark.closeAt = now;
+        if (!late) {
+            spawnGhostMist(at.clone().setY(0.4), 20);
+            spawnDust(at.clone().setY(0.08), 10);
+            sfxGhostWhisper(at);
+            if (DASH.markTarget === NET.id) camShake = Math.min(0.5, camShake + 0.18);
+        }
+    } else if (e === 'dash') {
+        DASH.e = 'dash';
+        DASH.until = now + (typeof m.ms === 'number' ? m.ms : BOSS_GHOST.dashMaxMs);
+        DASH.trailAt = 0;
+        dashHide(false);
+        if (rig) rigFull(rig, 'Dash', { loop: true, fade: 0.05 });
+        if (!late) sfxDashRush(Array.isArray(m.o) ? new THREE.Vector3(m.o[0], 1.2, m.o[1]) : at.clone().setY(1.2));
+    } else if (e === 'hit') {
+        const ids = Array.isArray(m.ids) ? m.ids : [];
+        const mine = ids.indexOf(NET.id) >= 0;
+        sfxDashBlow(at.clone().setY(1.2), ids.length > 0);
+        spawnGhostMist(at.clone().setY(0.9), 14);
+        if (mine) {
+            camShake = Math.min(0.9, camShake + 0.55);
+            pushFeed('GHOST DASH — IT WENT STRAIGHT THROUGH YOU');
+        } else if (ids.length) pushFeed('GHOST DASH — IT WENT THROUGH ' + ids.map(duelName).join(', '));
+    } else if (e === 'recover') {
+        DASH.e = 'recover';
+        DASH.until = now + (typeof m.ms === 'number' ? m.ms : BOSS_GHOST.recoverMs);
+        dashHide(false);
+        if (rig) rigFull(rig, 'Recover', { fade: 0.08, instant: !!late });
+        if (DASH.hud) DASH.hud.style.display = 'none';
+    } else if (e === 'done') {
+        const was = DASH.e || (rig && rig.full === 'Recover');
+        DASH.e = null; DASH.target = ''; DASH.markTarget = ''; DASH.until = 0;
+        dropDashWhirl();
+        dashHide(false);
+        if (DASH.hud) DASH.hud.style.display = 'none';
+        if (was && rig && netBoss.alive) DASH.standAt = now + 60;
+        else DASH.standAt = 0;
+    }
+}
+
+function onBossDash(m) {
+    if (!m || typeof m.e !== 'string' || !netBoss.active || !netBoss.alive) return;
+    dashStep(m, false);
+}
+
+/* The snapshot's fields 8-12 with 14-18 in 8 (a latecomer, or a missed event).
+   15 carries the whirl in 11-12 once it is open, so somebody who walks in then
+   sees the ground already torn. */
+const DASH_FROM_CODE = { 14: 'mist', 15: 'gone', 16: 'appear', 17: 'dash', 18: 'recover' };
+function dashFromSnapshot(r) {
+    const e = DASH_FROM_CODE[r[8]];
+    if (e && DASH.e !== e) {
+        const m = { e: e, tgt: r[9] || '', ms: r[10] || 0, p: [r[0], r[1]], y: r[2] };
+        if (e === 'gone' || e === 'mist') m.p = null;
+        dashStep(m, true);
+    }
+    if (e === 'gone' && !DASH.mark && typeof r[11] === 'number' && typeof r[12] === 'number') {
+        dashStep({ e: 'mark', p: [r[11], r[12]], tgt: r[9] || '', ms: r[10] || 0 }, true);
+    }
+    if (!e && DASH.e && performance.now() > DASH.until + 1500) dashStep({ e: 'done' });   // the ending never arrived
+}
+
+function updateDash(delta) {
+    const now = performance.now();
+    if (DASH.standAt && now >= DASH.standAt) {
+        DASH.standAt = 0;
+        const rig = dashRig();
+        if (rig && netBoss.alive && !DASH.e && (rig.full === 'Recover' || rig.full === 'Dash' || rig.full === 'Appear')) rigStand(rig, 0.3);
+    }
+    // a rebuilt body (the model arriving late) is visible by default
+    if (DASH.e && netBoss.mesh && netBoss.mesh.visible === DASH.hidden) netBoss.mesh.visible = !DASH.hidden;
+
+    const W = DASH.mark;
+    if (W) {
+        if (W.closeAt) {
+            // it is out: the whirl snaps shut
+            const k = Math.min(1, (now - W.closeAt) / 260);
+            const s = Math.max(0.01, 1.35 * (1 - k));
+            W.disc.scale.set(s, 1, s); W.r1.scale.set(s, 1, s); W.r2.scale.set(s * 0.6, 1, s * 0.6);
+            W.disc.material.opacity = 0.55 * (1 - k);
+            W.r1.material.opacity = 0.8 * (1 - k);
+            W.r2.material.opacity = 0.85 * (1 - k);
+            if (k >= 1) dropDashWhirl();
+        } else {
+            const k = Math.min(1, Math.max(0, (now - W.t0) / W.ms));
+            const s = 0.35 + 1.0 * k;
+            W.disc.scale.set(s, 1, s);
+            W.r1.scale.set(s, 1, s);
+            W.r2.scale.set(s * (0.62 + 0.22 * Math.sin(now * 0.012)), 1, s * (0.62 + 0.22 * Math.sin(now * 0.012)));
+            W.r1.rotation.y += delta * 2.6;
+            W.r2.rotation.y -= delta * 4.2;
+            W.disc.material.opacity = 0.25 + 0.4 * k;
+            W.r1.material.opacity = 0.55 + 0.4 * k;
+            if (now >= W.mistAt) {
+                W.mistAt = now + 160;
+                const a = Math.random() * Math.PI * 2, d = Math.sqrt(Math.random()) * s;
+                spawnGhostMist(new THREE.Vector3(W.x + Math.cos(a) * d, 0.05, W.z + Math.sin(a) * d), 3);
+            }
+        }
+    }
+
+    // the charge leaves mist behind it
+    if (DASH.e === 'dash' && netBoss.mesh && now >= DASH.trailAt) {
+        DASH.trailAt = now + 55;
+        spawnGhostMist(netBoss.mesh.position.clone().setY(0.6), 4);
+    }
+
+    const say = playerHealth > 0 && DASH.markTarget === NET.id && (DASH.e === 'gone' || DASH.e === 'appear' || DASH.e === 'dash');
+    const hud = say ? dashHud() : DASH.hud;
+    if (hud) {
+        if (say) { hud.style.display = 'block'; hud.textContent = '⚠ STEP ASIDE ⚠'; }
         else hud.style.display = 'none';
     }
 }
@@ -8137,6 +8403,10 @@ function tickBossAbility(bot, delta, now, dist, toPlayer) {
         return;
     }
 
+    /* step 31d: online the ghost's ability is the GHOST DASH (see DASH); single
+       player keeps the old VANISH - the blink is all in this file and costs the
+       server nothing, and taking it away would leave boss 7 offline with nothing
+       at all. The bar says GHOST DASH in both. */
     if (id === 'ghost') {
         if (bot.abilityT <= 0) {
             bot.abilityT = bot.phase2 ? BOSS_PHASE2.ghostEvery : 4.5;
@@ -9098,8 +9368,9 @@ function fireOneRay(spread, dmgBody, dmgHead, range) {
             const sb = serverBandits[bIds[i]];
             if (sb.alive) targets.push(sb.mesh);
         }
-        // step 30c: while its bones are in the air there is nothing there to hit
-        if (netBoss.active && netBoss.alive && netBoss.mesh && !SCATTER.hidden) targets.push(netBoss.mesh);
+        // step 30c: while its bones are in the air there is nothing there to hit,
+        // and step 31d: nor while the ghost is mist on its way to you
+        if (netBoss.active && netBoss.alive && netBoss.mesh && !SCATTER.hidden && !DASH.hidden) targets.push(netBoss.mesh);
     } else {
         for (let i = 0; i < bots.length; i++) if (bots[i].alive) targets.push(bots[i].mesh);
     }
@@ -9492,7 +9763,7 @@ function drawMinimap() {
             if (!sb.alive) continue;
             plotBandit(sb.mesh.position.x, sb.mesh.position.z, false);
         }
-        if (netBoss.active && netBoss.alive && netBoss.mesh && !SCATTER.hidden) {
+        if (netBoss.active && netBoss.alive && netBoss.mesh && !SCATTER.hidden && !DASH.hidden) {
             plotBandit(netBoss.mesh.position.x, netBoss.mesh.position.z, true);
         }
     } else {
@@ -9848,6 +10119,7 @@ function animate() {
     updateHarvest(delta);
     updateSpectral(delta);
     updateGrave(delta);
+    updateDash(delta);
     updateNetHazards(delta);
     updateBanditBullets(delta);
     updateModelRigs(delta);

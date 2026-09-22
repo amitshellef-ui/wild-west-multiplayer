@@ -3890,7 +3890,7 @@ function showBossEnraged(bt, where, loud) {
    - it has no bone masks, so every clip is cut once into a lower half (legs and
      hips) and an upper half. The legs keep walking while the arms shoot.
    ========================================================================= */
-const MODEL_BASE_CDN = 'https://cdn.jsdelivr.net/gh/amitshellef-ui/wild-west-multiplayer@d8a7d5ea18a41755051da6e44662e3419439e933/models/';   // step 31a: + ghost.glb
+const MODEL_BASE_CDN = 'https://cdn.jsdelivr.net/gh/amitshellef-ui/wild-west-multiplayer@86f4026b089611395d0df2e579a46c5c657e1b5e/models/';   // step 33a: + the new dragon.glb (10 clips, eyes, jaw)
 const MODEL_BASE_LOCAL = '/models/';
 const MODEL_FORCE_CUBES = /[?&]cubes\b/.test(location.search);   // ?cubes = the old rig, for comparisons
 const MODEL_HITBOX_MUL = 1.2;                                       // the same margin the cube rig uses
@@ -4107,7 +4107,10 @@ const BOSS_LOOKS = {
     snipe: {}, spray: {},
     dynamite: {}, slam: {}, poison: {},
     ghost: { model: 'ghost', scale: 1.45, tint: 0, glow: 0.06, glowMap: 1.0 },   // step 31a: head at ~2.8m
-    dragon: { model: 'dragon', scale: 2.2, tint: 0, glow: 0.08 }       // step 28: head at 2.8m, 4.2m wing to wing
+    // step 33a: glowMap keeps the painted amber eyes in their own colours. Without it the eye
+    // material takes the boss eye colour at 0.08 like the body, and the eyes go dark and tinted.
+    // The body has no emissiveMap, so it still takes the 0.08 glow - only the eyes take this.
+    dragon: { model: 'dragon', scale: 2.2, tint: 0, glow: 0.08, glowMap: 1.0 }   // step 28: head at 2.8m, 4.2m wing to wing
 };
 function bossLook(bt) {
     const own = (bt && BOSS_LOOKS[bt.id]) || {};

@@ -1342,6 +1342,8 @@ setInterval(() => {
         for (let i = 0; i < sink.dashes.length; i++) io.to(code).emit("boss-dash", sink.dashes[i]);
         // step 33b: the dragon's EMBER RAIN - takeoff, spit, rain (where and when each lands), hit, hover, land, done
         for (let i = 0; i < sink.embers.length; i++) io.to(code).emit("boss-ember", sink.embers[i]);
+        // step 33c: its TAIL SWEEP - charge, sweep, hit (who, and from where they are thrown), recover, done
+        for (let i = 0; i < sink.tails.length; i++) io.to(code).emit("boss-tail", sink.tails[i]);
 
         /* A bullet reached a player. This is where the last piece of trust
            goes away: the server no longer has to believe a client that says it

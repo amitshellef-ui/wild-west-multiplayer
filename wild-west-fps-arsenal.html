@@ -1811,6 +1811,7 @@ function initNetwork() {
     NET.socket.on('boss-grave', onBossGrave);           // step 31c: its GRAVE BURST
     NET.socket.on('boss-dash', onBossDash);             // step 31d: its GHOST DASH
     NET.socket.on('boss-ember', onBossEmber);           // step 33b: the dragon's EMBER RAIN
+    NET.socket.on('boss-tail', onBossTail);             // step 33c: its TAIL SWEEP
 
     NET.socket.on('boss-died', function (m) {
         if (!m) return;
@@ -3812,7 +3813,11 @@ const BOSS_DRAGON = {
     emberCount: 12, emberPerPlayer: 2, emberMax: 20, emberNear: 0.5, aroundR: 5, randomR: 16,
     emberRadius: 1.6, emberDamage: 25,
     emberPoolRadius: 1.5, emberPoolLife: 3, emberPoolTick: 0.6, emberPoolDamage: 3,
-    p2: { summon: 4, breaths: 2, fanSpread: 0.35, swoopEveryMs: 3500, emberEveryMs: 11200 }
+    // step 33c - TAIL SWEEP (online only, like the rain)
+    tailFirstMs: 3000, tailEveryMs: 7000, tailTrigger: 7, tailRange: 8,
+    tailChargeMs: 790, tailSweepMs: 500, tailRecoverMs: 625, tailGapMs: 1500,
+    tailDamage: 40, tailKnock: 13,
+    p2: { summon: 4, breaths: 2, fanSpread: 0.35, swoopEveryMs: 3500, emberEveryMs: 11200, tailEveryMs: 4900 }
 };
 
 /* The skeleton's duel, HIGH NOON (step 30b) - SKELETON in boss.js; online those are
@@ -5879,6 +5884,7 @@ function destroyNetBoss() {
     graveClear();                                            // step 31c
     dashClear();                                             // step 31d
     emberClear(false);                                       // step 33b
+    tailClear();                                             // step 33c
     if (SCATTER.e || SCATTER.standAt || SCATTER.bones.length) scatterStep({ e: 'clear' });   // step 30c
     if (netBoss.mesh) {
         banditGroup.remove(netBoss.mesh);
@@ -5927,6 +5933,7 @@ function onBossState(m) {
         graveFromSnapshot(r);                // step 31c: its GRAVE BURST
         dashFromSnapshot(r);                 // step 31d: its GHOST DASH
         emberFromSnapshot(r);                // step 33b: the dragon's EMBER RAIN
+        tailFromSnapshot(r);                 // step 33c: its TAIL SWEEP
         netBoss.buf.push({ t: performance.now(), x: r[0], z: r[1], yaw: r[2] });
         if (netBoss.buf.length > 14) netBoss.buf.shift();
         netBoss.countdown = -1;
@@ -6519,6 +6526,7 @@ function startNetBossDeath() {
     graveClear();                                                                            // step 31c
     dashClear();                                                                             // step 31d
     emberClear(true);                                                                        // step 33b: shot down in the air, it falls
+    tailClear();                                                                             // step 33c
     if (DUEL.on || DUEL.standAt) duelEnd('clear');
     netBoss.alive = false;
     netBoss.deathT = 0;
@@ -7639,6 +7647,192 @@ function updateEmber(delta) {
     }
 }
 
+/* ---- TAIL SWEEP - the dragon spins and sweeps the ground round it (step 33c) -----
+   The server owns it (boss-tail): "charge" - TailSweep from the start, it crouches and
+   draws the tail aside, growling; `y` is where it faces, `dir` which way it will spin,
+   `r` how far the tail reaches - a red circle that wide opens on the ground round it,
+   with a ring closing from its edge to the middle as the spin comes; "sweep" - the
+   body goes once round in `ms` (here, on top of the server's yaw, which stays put), a
+   ring of dust races out and the tail tip throws up dust as it goes; "hit" - who it
+   caught: they are thrown outwards from `p` at `k` m/s (their own page moves them -
+   TAIL_THROW in updatePlayer); "recover" - getting up; "done". "JUMP" in the middle of
+   the screen for whoever is inside the circle while it crouches. */
+const TAIL = { e: null, t0: 0, ms: 1, dir: 1, r: 8, zone: null, told: false, hud: null, dustAt: 0, standAt: 0 };
+const TAIL_THROW = { x: 0, z: 0 };
+let _tailDiscGeo = null, _tailRingGeo = null;
+
+function tailRig() { return emberRig(); }
+/* How far round the spin is, on top of the server's yaw. */
+function tailSpin(now) {
+    if (TAIL.e !== 'sweep') return 0;
+    const k = Math.min(1, Math.max(0, (now - TAIL.t0) / TAIL.ms));
+    return TAIL.dir * Math.PI * 2 * k;                             // even, like the server's clock for who it reaches when
+}
+function makeTailZone(r) {
+    if (!_tailDiscGeo) {
+        _tailDiscGeo = new THREE.CircleGeometry(1, 48);
+        _tailDiscGeo.rotateX(-Math.PI / 2);
+        _tailRingGeo = new THREE.RingGeometry(0.95, 1, 64);
+        _tailRingGeo.rotateX(-Math.PI / 2);
+    }
+    const flat = { transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 };
+    const g = new THREE.Group();
+    const disc = new THREE.Mesh(_tailDiscGeo, new THREE.MeshBasicMaterial(Object.assign({ color: 0x6a1408, opacity: 0.12 }, flat)));
+    const edge = new THREE.Mesh(_tailRingGeo, new THREE.MeshBasicMaterial(Object.assign({ color: 0xff3a1a, opacity: 0.8, side: THREE.DoubleSide }, flat)));
+    const inner = new THREE.Mesh(_tailRingGeo, new THREE.MeshBasicMaterial(Object.assign({ color: 0xffb08a, opacity: 0.8, side: THREE.DoubleSide }, flat)));
+    const wave = new THREE.Mesh(_tailRingGeo, new THREE.MeshBasicMaterial(Object.assign({ color: 0xd8b37e, opacity: 0, side: THREE.DoubleSide }, flat)));
+    disc.position.y = 0.03; edge.position.y = 0.04; inner.position.y = 0.045; wave.position.y = 0.05;
+    [disc, edge, inner, wave].forEach(function (m) { m.renderOrder = 2; m.raycast = function () { }; m.scale.set(r, 1, r); g.add(m); });
+    scene.add(g);
+    return { g: g, disc: disc, edge: edge, inner: inner, wave: wave, r: r };
+}
+function dropTailZone() {
+    const Z = TAIL.zone;
+    if (!Z) return;
+    scene.remove(Z.g);
+    [Z.disc, Z.edge, Z.inner, Z.wave].forEach(function (m) { m.material.dispose(); });
+    TAIL.zone = null;
+}
+function tailHud() {
+    if (TAIL.hud) return TAIL.hud;
+    const d = document.createElement('div');
+    d.id = 'tail-hud';
+    d.style.cssText = 'position:fixed;top:40%;left:50%;transform:translate(-50%,-50%);z-index:40;pointer-events:none;display:none;' +
+        'text-align:center;font:bold 44px Georgia,serif;letter-spacing:4px;color:#ffc27a;text-shadow:0 0 12px #8a2000,0 0 4px #000;white-space:nowrap';
+    document.body.appendChild(d);
+    return (TAIL.hud = d);
+}
+/* A deep growl while it crouches. */
+function sfxTailGrowl(pos, ms) {
+    const d = chain(pos, 0.9, 50); if (!d) return;
+    const dur = Math.max(0.2, ms / 1000);
+    tone(d, { type: 'sawtooth', f0: 55, f1: 42, dur: dur, vol: 0.3 });
+    noiseBurst(d, { type: 'lowpass', freq: 240, dur: dur, vol: 0.6 });
+}
+/* The tail going round: a heavy whoosh, and the ground scraped. */
+function sfxTailWhoosh(pos) {
+    const d = chain(pos, 1.0, 55); if (!d) return;
+    noiseBurst(d, { type: 'bandpass', freq: 500, q: 0.6, sweepTo: 1400, dur: 0.5, vol: 0.9 });
+    noiseBurst(d, { type: 'lowpass', freq: 700, sweepTo: 200, dur: 0.6, vol: 0.6, delay: 0.1 });
+}
+function tailLetGo(rig) { if (rig && rig.full === 'TailSweep') rig.full = null; }
+
+function tailClear() {
+    tailLetGo(tailRig());
+    dropTailZone();
+    TAIL.e = null; TAIL.standAt = 0;
+    if (TAIL.hud) TAIL.hud.style.display = 'none';
+}
+
+function tailStep(m, late) {
+    const now = performance.now();
+    const rig = tailRig();
+    const at = netBoss.mesh ? netBoss.mesh.position : null;
+    if (m.e === 'charge') {
+        const ms = typeof m.ms === 'number' ? m.ms : BOSS_DRAGON.tailChargeMs;
+        TAIL.e = 'charge'; TAIL.ms = BOSS_DRAGON.tailChargeMs; TAIL.t0 = now - Math.max(0, BOSS_DRAGON.tailChargeMs - ms);
+        TAIL.dir = m.dir === -1 ? -1 : 1;
+        TAIL.r = typeof m.r === 'number' ? m.r : BOSS_DRAGON.tailRange;
+        TAIL.standAt = 0;
+        dropTailZone();
+        TAIL.zone = makeTailZone(TAIL.r);
+        if (rig && rigFull(rig, 'TailSweep', { fade: 0.1 }) && late) { const s = (now - TAIL.t0) / 1000; rig.lower.time = s; rig.upper.time = s; }
+        if (at && !late) sfxTailGrowl(at, ms);
+        if (!late && !TAIL.told) {
+            TAIL.told = true;
+            pushFeed('TAIL SWEEP — GET OUT OF THE CIRCLE, OR JUMP WHEN IT SPINS');
+        }
+    } else if (m.e === 'sweep') {
+        const ms = typeof m.ms === 'number' ? m.ms : BOSS_DRAGON.tailSweepMs;
+        TAIL.e = 'sweep'; TAIL.ms = BOSS_DRAGON.tailSweepMs; TAIL.t0 = now - Math.max(0, BOSS_DRAGON.tailSweepMs - ms);
+        if (typeof m.dir === 'number') TAIL.dir = m.dir === -1 ? -1 : 1;
+        if (!TAIL.zone) TAIL.zone = makeTailZone(TAIL.r);
+        if (rig && rigFull(rig, 'TailSweep', { fade: 0.1 }) && late) { const s = BOSS_DRAGON.tailChargeMs / 1000 + (now - TAIL.t0) / 1000; rig.lower.time = s; rig.upper.time = s; }
+        if (at && !late) sfxTailWhoosh(at);
+    } else if (m.e === 'hit') {
+        if (Array.isArray(m.hit) && m.hit.indexOf(NET.id) >= 0 && Array.isArray(m.p)) {
+            const me = camera.position;
+            let dx = me.x - m.p[0], dz = me.z - m.p[1];
+            const d = Math.hypot(dx, dz) || 1;
+            const k = typeof m.k === 'number' ? m.k : BOSS_DRAGON.tailKnock;
+            TAIL_THROW.x = dx / d * k; TAIL_THROW.z = dz / d * k;
+            if (onGround) { velY = 4; onGround = false; }            // off the feet for a moment
+            camShake = Math.min(1, camShake + 0.6);
+            pushFeed('THE TAIL THREW YOU — JUMP IT NEXT TIME');
+        }
+    } else if (m.e === 'recover') {
+        TAIL.e = 'recover'; TAIL.t0 = now; TAIL.ms = typeof m.ms === 'number' ? m.ms : BOSS_DRAGON.tailRecoverMs;
+        dropTailZone();
+    } else if (m.e === 'done') {
+        const was = !!TAIL.e;
+        TAIL.e = null;
+        dropTailZone();
+        if (was && rig && netBoss.alive) TAIL.standAt = now + 30;
+    }
+}
+
+function onBossTail(m) {
+    if (!m || typeof m.e !== 'string' || !netBoss.active || !netBoss.alive) return;
+    tailStep(m, false);
+}
+
+/* The snapshot's fields 8-11 with 25-27 in 8 (a latecomer, or a missed event). */
+const TAIL_PARTS = { 25: 'charge', 26: 'sweep', 27: 'recover' };
+function tailFromSnapshot(r) {
+    const e = TAIL_PARTS[r[8]];
+    if (e) {
+        if (TAIL.e !== e && typeof r[10] === 'number') tailStep({ e: e, ms: r[10], dir: r[11] }, true);
+    } else if (TAIL.e && performance.now() > TAIL.t0 + TAIL.ms + 1500) {
+        tailStep({ e: 'done' });                                     // the ending never arrived
+    }
+}
+
+function updateTail(delta) {
+    const now = performance.now();
+    if (TAIL.standAt && now >= TAIL.standAt) {
+        TAIL.standAt = 0;
+        const rig = tailRig();
+        if (rig && netBoss.alive && !TAIL.e && rig.full === 'TailSweep') rigStand(rig, 0.3);
+    }
+    const Z = TAIL.zone;
+    let say = false;
+    if (Z && netBoss.mesh) {
+        const p = netBoss.mesh.position;
+        Z.g.position.set(p.x, 0, p.z);
+        const k = Math.min(1, Math.max(0, (now - TAIL.t0) / TAIL.ms));
+        if (TAIL.e === 'charge') {
+            Z.disc.material.opacity = 0.12 + 0.25 * k;
+            const s = Math.max(0.05, Z.r * (1 - k));
+            Z.inner.scale.set(s, 1, s);
+            Z.edge.material.opacity = 0.6 + 0.3 * Math.sin(now * 0.025);
+            const me = camera.position;
+            if (playerHealth > 0 && Math.hypot(me.x - p.x, me.z - p.z) <= Z.r + 0.3) say = 'out';
+        } else if (TAIL.e === 'sweep') {
+            // a jump now clears the tail wherever it is on its way round - jumping in the crouch is too soon
+            const me = camera.position;
+            if (playerHealth > 0 && Math.hypot(me.x - p.x, me.z - p.z) <= Z.r + 0.3) say = 'jump';
+            Z.inner.visible = false;
+            Z.disc.material.opacity = 0.37 * (1 - k);
+            Z.edge.material.opacity = 0.8 * (1 - k);
+            const w = Math.max(0.5, Z.r * k);
+            Z.wave.scale.set(w, 1, w);
+            Z.wave.material.opacity = 0.7 * (1 - k * 0.6);
+            // dust thrown up off the tail tip as it goes round
+            if (now >= TAIL.dustAt) {
+                TAIL.dustAt = now + 45;
+                const tip = netBoss.mesh.getObjectByName('tail5');
+                const q = tip ? tip.getWorldPosition(new THREE.Vector3()) : null;
+                if (q) { q.y = 0.15; spawnDust(q, 6); }
+            }
+        }
+    }
+    const hud = say ? tailHud() : TAIL.hud;
+    if (hud) {
+        if (say) { hud.style.display = 'block'; hud.textContent = say === 'jump' ? '⬆ JUMP ⬆' : '⚠ GET OUT ⚠'; }
+        else hud.style.display = 'none';
+    }
+}
+
 function updateNetBoss(delta) {
     if (!netBoss.active || !netBoss.rig) return;
 
@@ -7675,7 +7869,7 @@ function updateNetBoss(delta) {
     if (!shown) return;
     const m = netBoss.mesh;
     m.position.set(shown.x, emberLift(performance.now()), shown.z);   // step 33b: up in the air in an EMBER RAIN
-    m.rotation.y = shown.yaw;
+    m.rotation.y = shown.yaw + tailSpin(performance.now());           // step 33c: once round in a TAIL SWEEP
 
     let inst = 0;
     if (delta > 0 && netBoss.hasPrev) {
@@ -10154,6 +10348,15 @@ function updatePlayer(delta, now) {
         if (!collidesAt(nx, camera.position.z, 0.42)) camera.position.x = nx;
         if (!collidesAt(camera.position.x, nz, 0.42)) camera.position.z = nz;
     }
+    // step 33c: thrown by the dragon's tail - fast at first, dying away in half a second; walls still stop it
+    if (TAIL_THROW.x !== 0 || TAIL_THROW.z !== 0) {
+        const tx = camera.position.x + TAIL_THROW.x * delta, tz = camera.position.z + TAIL_THROW.z * delta;
+        if (!collidesAt(tx, camera.position.z, 0.42)) camera.position.x = tx; else TAIL_THROW.x = 0;
+        if (!collidesAt(camera.position.x, tz, 0.42)) camera.position.z = tz; else TAIL_THROW.z = 0;
+        const k = Math.exp(-6 * delta);
+        TAIL_THROW.x *= k; TAIL_THROW.z *= k;
+        if (Math.hypot(TAIL_THROW.x, TAIL_THROW.z) < 0.3) { TAIL_THROW.x = 0; TAIL_THROW.z = 0; }
+    }
 
     // Jump / gravity
     velY -= 21 * delta;
@@ -10406,6 +10609,7 @@ function animate() {
     updateGrave(delta);
     updateDash(delta);
     updateEmber(delta);                  // step 33b
+    updateTail(delta);                   // step 33c
     updateNetHazards(delta);
     updateBanditBullets(delta);
     updateModelRigs(delta);

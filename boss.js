@@ -143,8 +143,34 @@ const DRAGON = {
     emberCount: 12, emberPerPlayer: 2, emberMax: 20, emberNear: 0.5, aroundR: 5, randomR: 16,
     emberRadius: 1.6, emberDamage: 25,
     emberPoolRadius: 1.5, emberPoolLife: 3, emberPoolTick: 0.6, emberPoolDamage: 3,
-    p2: { summon: 4, breaths: 2, fanSpread: 0.35, swoopEveryMs: 3500, emberEveryMs: 11200 }
+    // step 33c - TAIL SWEEP, see below
+    tailFirstMs: 3000, tailEveryMs: 7000, tailTrigger: 7, tailRange: 8,
+    tailChargeMs: 790, tailSweepMs: 500, tailRecoverMs: 625, tailGapMs: 1500,
+    tailDamage: 40, tailKnock: 13,
+    p2: { summon: 4, breaths: 2, fanSpread: 0.35, swoopEveryMs: 3500, emberEveryMs: 11200, tailEveryMs: 4900 }
 };
+
+/* ---- The dragon's TAIL SWEEP (step 33c) ---------------------------------------
+   It keeps its distance, and this is what it does to whoever does not: when somebody
+   living is within tailTrigger of it (every tailEveryMs at most, the first tailFirstMs
+   after it arrives; p2 30% sooner), and it is not in the air or in a swoop:
+
+     charge   tailChargeMs   TailSweep, frames 0-19: it crouches and draws the tail
+                             aside, growling - the warning. It does not turn.
+     sweep    tailSweepMs    frames 19-31: the whole body spins once round (the clients
+                             turn it - the server's yaw stays where it was), `dir` one
+                             way or the other, the tail sweeping the ground out to
+                             tailRange. It reaches every bearing once: a player is judged
+                             at the moment it crosses where they are (from the line the
+                             tail started on), the way the ghost's circle is judged - any
+                             sample SKELETON.dodgeFromMs..dodgeToMs after it with their
+                             feet above lowClear (a jump) or out beyond tailRange, and it
+                             missed. Otherwise tailDamage, and they are thrown outwards at
+                             tailKnock m/s (their own page moves them - `hit` says from where).
+     recover  tailRecoverMs  frames 31-46, back up
+
+   All through it: planted, no breath. The swoop and EMBER RAIN wait tailGapMs after it,
+   and it waits as long after them. b.tail = { e, until, yaw, dir, T0, judged, feet }. */
 
 /* ---- The dragon's EMBER RAIN (step 33b) ---------------------------------------
    Every emberEveryMs (the first emberFirstMs after it arrives; p2 30% sooner) it
@@ -418,6 +444,7 @@ function spawnBoss(room, players, now) {
         graveAt: now + GHOST.graveFirstMs,              // step 31c - read by the ghost only
         dashAt: now + GHOST.dashFirstMs,                // step 31d - read by the ghost only
         emberAt: now + DRAGON.emberFirstMs,             // step 33b - read by the dragon only
+        tailAt: now + DRAGON.tailFirstMs,               // step 33c - read by the dragon only
         chargeUntil: 0
     };
     room.bossAlive = true;
@@ -1390,8 +1417,88 @@ function tickEmber(room, b, players, now, sink) {
 function endEmber(b, now, sink) {
     b.ember = null;
     b.abilityAt = Math.max(b.abilityAt || 0, now + DRAGON.emberGapMs);   // no swoop straight after
+    b.tailAt = Math.max(b.tailAt || 0, now + DRAGON.tailGapMs);          // step 33c: nor a tail
     b.lastShot = now + 300;                                             // a breath before the breath
     sink.embers.push({ e: "done" });
+}
+
+/* TAIL SWEEP (step 33c): the nearest living player, if they are within tailTrigger. */
+function tailDue(room, players, b) {
+    const n = nearestPlayer(room, players, b.x, b.z);
+    return n && n.dist <= DRAGON.tailTrigger ? n : null;
+}
+
+function startTail(b, now, sink) {
+    const dir = Math.random() < 0.5 ? 1 : -1;
+    b.tail = { e: "charge", until: now + DRAGON.tailChargeMs, yaw: b.yaw, dir: dir, T0: 0, judged: {}, feet: {} };
+    b.chargeUntil = 0;
+    sink.tails.push({ e: "charge", ms: DRAGON.tailChargeMs, y: round2(b.yaw), dir: dir, r: DRAGON.tailRange });
+}
+
+/* Where the tail is pointing `ms` into the sweep: it starts straight behind (yaw + PI)
+   and goes once round, `dir` one way or the other. When does it cross bearing `a`? */
+function tailCrossMs(t, a) {
+    const TWO = Math.PI * 2;
+    let d = (a - (t.yaw + Math.PI)) * t.dir;
+    d = ((d % TWO) + TWO) % TWO;
+    return (d / TWO) * DRAGON.tailSweepMs;
+}
+
+function recordTailFeet(room, t, players, now) {
+    for (const id in players) {
+        const p = players[id];
+        if (p.room !== room.code) continue;
+        const hist = t.feet[id] || (t.feet[id] = []);
+        hist.push([now, (typeof p.y === "number" ? p.y : 1.72) - 1.72, p.x, p.z]);
+        while (hist.length && hist[0][0] < now - 1500) hist.shift();
+    }
+}
+
+/* Everybody the tail has gone past and not been judged yet, dodgeToMs after it did.
+   Where they were when it crossed decides the moment; the samples after it decide. */
+function judgeTail(room, b, players, now, sink) {
+    const t = b.tail;
+    const hit = [];
+    for (const id in players) {
+        const p = players[id];
+        if (p.room !== room.code || !p.alive || t.judged[id]) continue;
+        const hist = t.feet[id] || [];
+        // where they were at the start of the sweep decides when it reaches them
+        const at = hist.find((f) => f[0] >= t.T0) || [now, 0, p.x, p.z];
+        const cross = t.T0 + tailCrossMs(t, Math.atan2(at[2] - b.x, at[3] - b.z));
+        if (now < cross + SKELETON.dodgeToMs) continue;
+        t.judged[id] = true;
+        const win = hist.filter((f) => f[0] >= cross + SKELETON.dodgeFromMs && f[0] <= cross + SKELETON.dodgeToMs);
+        if (!win.length) win.push([now, (typeof p.y === "number" ? p.y : 1.72) - 1.72, p.x, p.z]);
+        const dodged = win.some((f) => f[1] > SKELETON.lowClear || Math.hypot(f[2] - b.x, f[3] - b.z) > DRAGON.tailRange);
+        if (dodged) continue;
+        hit.push(id);
+        sink.hits.push({ playerId: id, damage: DRAGON.tailDamage, from: "boss" });
+    }
+    if (hit.length) sink.tails.push({ e: "hit", hit: hit, p: [round2(b.x), round2(b.z)], k: DRAGON.tailKnock });
+}
+
+/* charge -> sweep (judged as it goes, and dodgeToMs after it) -> recover -> back to the fight */
+function tickTail(room, b, players, now, sink) {
+    const t = b.tail;
+    recordTailFeet(room, t, players, now);
+    if (t.T0) judgeTail(room, b, players, now, sink);
+    if (now < t.until) return;
+    if (t.e === "charge") {
+        t.e = "sweep"; t.T0 = now; t.until = now + DRAGON.tailSweepMs;
+        sink.tails.push({ e: "sweep", ms: DRAGON.tailSweepMs });
+    } else if (t.e === "sweep") {
+        t.e = "recover"; t.until = now + Math.max(DRAGON.tailRecoverMs, SKELETON.dodgeToMs);
+        sink.tails.push({ e: "recover", ms: DRAGON.tailRecoverMs });
+    } else if (t.e === "recover") {
+        judgeTail(room, b, players, now + SKELETON.dodgeToMs, sink);   // anybody still waiting for a verdict
+        b.tail = null;
+        b.abilityAt = Math.max(b.abilityAt || 0, now + DRAGON.tailGapMs);
+        b.emberAt = Math.max(b.emberAt || 0, now + DRAGON.tailGapMs);
+        b.tailAt = now + (b.phase === 2 ? DRAGON.p2.tailEveryMs : DRAGON.tailEveryMs);
+        b.lastShot = now + 300;
+        sink.tails.push({ e: "done" });
+    }
 }
 
 /* ---- Abilities ---------------------------------------------------------- */
@@ -1407,6 +1514,12 @@ function tickAbility(room, b, players, near, now, dt, sink) {
         /* step 33b: EMBER RAIN owns it from takeoff to landing, and starts only
            between swoops - never in the middle of one */
         if (b.ember) { tickEmber(room, b, players, now, sink); return; }
+        if (b.tail) { tickTail(room, b, players, now, sink); return; }          // step 33c
+        // step 33c: TAIL SWEEP for whoever comes too close - asked before the rain, which runs on a clock
+        if (!(b.chargeUntil && now < b.chargeUntil) && now >= b.tailAt && tailDue(room, players, b)) {
+            startTail(b, now, sink);
+            return;
+        }
         if (!(b.chargeUntil && now < b.chargeUntil) && now >= b.emberAt) {
             if (emberTargets(room, players, b).length) {
                 b.emberAt = now + (b.phase === 2 ? DRAGON.p2.emberEveryMs : DRAGON.emberEveryMs);
@@ -1418,6 +1531,8 @@ function tickAbility(room, b, players, near, now, dt, sink) {
         if (b.hasLos && near && near.dist < DRAGON.swoopTrigger && now >= b.abilityAt) {
             b.abilityAt = now + (b.phase === 2 ? DRAGON.p2.swoopEveryMs : DRAGON.swoopEveryMs);
             b.chargeUntil = now + DRAGON.swoopForMs;
+            b.tailAt = Math.max(b.tailAt || 0, now + DRAGON.swoopForMs + DRAGON.tailGapMs);   // step 33c: not the tail straight after
+
             sink.roars.push({ p: [round2(b.x), round2(b.z)] });
         }
         if (b.chargeUntil && now < b.chargeUntil && near) {
@@ -1598,8 +1713,8 @@ function stepBoss(room, b, players, now, dt, sink) {
     // and all through BONE HARVEST (step 30d); the ghost from the moment it raises
     // its gun for a SPECTRAL SHOT until it is down again (step 31b), and its hand for a GRAVE BURST (step 31c),
     // and all through a GHOST DASH (step 31d) - the charge itself is tickDash's, not the walking's;
-    // the dragon from takeoff to landing in an EMBER RAIN (step 33b)
-    const dueling = !!b.duel || (b.staggerUntil && now < b.staggerUntil) || !!b.scatter || !!b.harvest || !!b.spectral || !!b.grave || !!b.dash || !!b.ember;
+    // the dragon from takeoff to landing in an EMBER RAIN (step 33b), and all through a TAIL SWEEP (step 33c)
+    const dueling = !!b.duel || (b.staggerUntil && now < b.staggerUntil) || !!b.scatter || !!b.harvest || !!b.spectral || !!b.grave || !!b.dash || !!b.ember || !!b.tail;
     const planted = b.gState === "spin" || b.gState === "fire" || dueling;
     const baseSpeed = b.type.speed * (b.phase === 2 ? PHASE2.speedScale : 1);
     const speed = b.state === "chase" ? baseSpeed : baseSpeed * 0.55;
@@ -1710,6 +1825,7 @@ function stepBoss(room, b, players, now, dt, sink) {
         if (who) { faceX = who.x; faceZ = who.z; }
         else if (b.grave.x !== undefined) { faceX = b.grave.x; faceZ = b.grave.z; }
     }
+    else if (b.tail) { /* step 33c: crouched, then spinning (the clients turn it): the yaw stays put */ }
     else if (b.dash) {
         /* step 31d: it turns on its target only while it is coming out. Once the
            charge starts the yaw is the locked direction and nothing moves it, and
@@ -1769,6 +1885,7 @@ function emptySink() {
         graves: [],                                                 // step 31c: its GRAVE BURST
         dashes: [],                                                 // step 31d: its GHOST DASH
         embers: [],                                                 // step 33b: the dragon's EMBER RAIN
+        tails: [],                                                  // step 33c: its TAIL SWEEP
         bossSpawn: null, bossDied: null, bossPhase: null, wave: null,
         missionHits: [], missionEnd: null, missionState: null      // step 24, see missions.js
     };
@@ -1780,6 +1897,7 @@ const SCATTER_CODE = { collapse: 3, gone: 4, rise: 5, strike: 6 };
 const HARVEST_CODE = { summon: 7, spin: 8, tired: 9 };
 const DASH_CODE = { mist: 14, gone: 15, appear: 16, dash: 17, recover: 18 };
 const EMBER_CODE = { takeoff: 21, spit: 22, hover: 23, land: 24 };
+const TAIL_CODE = { charge: 25, sweep: 26, recover: 27 };
 function snapshot(room, now) {
     const b = room.boss;
     if (!b || !b.alive) return null;
@@ -1821,6 +1939,9 @@ function snapshot(room, now) {
     /* step 33b: the dragon's EMBER RAIN - 21 taking off, 22 spitting, 23 hovering,
        24 landing (ms left in that part). Its codes are 21-29. */
     else if (b.ember) snap.push(EMBER_CODE[b.ember.e], "", Math.max(0, Math.round(b.ember.until - t)));
+    /* step 33c: TAIL SWEEP - 25 crouching, 26 sweeping, 27 getting up (ms left in that
+       part), and which way it spins (field 11: 1 or -1) */
+    else if (b.tail) snap.push(TAIL_CODE[b.tail.e], "", Math.max(0, Math.round(b.tail.until - t)), b.tail.dir);
     return snap;
 }
 

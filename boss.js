@@ -150,6 +150,7 @@ const DRAGON = {
     // step 33d - the ROAR (phase two only), see below
     roarFirstMs: 3000, roarEveryMs: 15000, roarRange: 45,
     roarSwellMs: 1250, roarAfterMs: 958, roarDazeMs: 2000, roarGapMs: 1500,
+    layMs: 500, eggsAtMs: 250,           // step 33d2: LayEggs (12 frames), the eggs drop at frame 6
     p2: { summon: 4, breaths: 2, fanSpread: 0.35, swoopEveryMs: 3500, emberEveryMs: 11200, tailEveryMs: 4900 }
 };
 
@@ -163,6 +164,10 @@ const DRAGON = {
                          with a clear line to it on the ground (nav.losClear - any
                          collider in the way is cover, a barrel as much as a wall) is
                          dazed for roarDazeMs: their screen blurs and shakes. No damage.
+
+     lay    layMs        step 33d2: LayEggs - it crouches and eggsAtMs in the eggs drop in
+                         an arc in front of it (bandits.js, BROOD: how many, and what
+                         hatches out of them). Skipped when the room is at the brood's cap.
 
    All through it: planted, no breath; swoop, rain and tail wait roarGapMs after it,
    and it waits as long after them. b.roar = { e, until }. */
@@ -1536,9 +1541,15 @@ function startRoar(b, now, sink) {
     sink.roarAttacks.push({ e: "swell", ms: DRAGON.roarSwellMs, r: DRAGON.roarRange });
 }
 
-/* swell -> the shout: who it reaches (in range, nothing between) -> done */
+/* swell -> the shout: who it reaches (in range, nothing between) -> lay -> done */
 function tickRoar(room, b, players, now, sink) {
     const s = b.roar;
+    // step 33d2: the eggs leave it partway into the crouch
+    if (s.e === "lay" && s.eggsAt && now >= s.eggsAt) {
+        s.eggsAt = 0;
+        const eggs = bandits.layEggs(room, players, b.x, b.z, b.yaw, s.n, now);
+        if (eggs.length) sink.roarAttacks.push({ e: "eggs", eg: eggs, hatch: bandits.BROOD.hatchMs });
+    }
     if (now < s.until) return;
     if (s.e === "swell") {
         const dazed = [], covered = [];
@@ -1550,6 +1561,9 @@ function tickRoar(room, b, players, now, sink) {
         }
         s.e = "roar"; s.until = now + DRAGON.roarAfterMs;
         sink.roarAttacks.push({ e: "roar", ms: DRAGON.roarAfterMs, hit: dazed, safe: covered, daze: DRAGON.roarDazeMs });
+    } else if (s.e === "roar" && (s.n = bandits.eggsFor(room, players)) > 0) {
+        s.e = "lay"; s.until = now + DRAGON.layMs; s.eggsAt = now + DRAGON.eggsAtMs;     // step 33d2
+        sink.roarAttacks.push({ e: "lay", ms: DRAGON.layMs });
     } else {
         b.roar = null;
         b.abilityAt = Math.max(b.abilityAt || 0, now + DRAGON.roarGapMs);
@@ -1955,6 +1969,7 @@ function emptySink() {
         embers: [],                                                 // step 33b: the dragon's EMBER RAIN
         tails: [],                                                  // step 33c: its TAIL SWEEP
         roarAttacks: [],                                            // step 33d: its ROAR (not `roars` - that is the old swoop/phase roar sound)
+        bites: [],                                                  // step 33d2: a hatchling leaps
         bossSpawn: null, bossDied: null, bossPhase: null, wave: null,
         missionHits: [], missionEnd: null, missionState: null      // step 24, see missions.js
     };
@@ -1967,7 +1982,7 @@ const HARVEST_CODE = { summon: 7, spin: 8, tired: 9 };
 const DASH_CODE = { mist: 14, gone: 15, appear: 16, dash: 17, recover: 18 };
 const EMBER_CODE = { takeoff: 21, spit: 22, hover: 23, land: 24 };
 const TAIL_CODE = { charge: 25, sweep: 26, recover: 27 };
-const ROAR_CODE = { swell: 28, roar: 29 };
+const ROAR_CODE = { swell: 28, roar: 29, lay: 30 };
 function snapshot(room, now) {
     const b = room.boss;
     if (!b || !b.alive) return null;
@@ -2012,7 +2027,7 @@ function snapshot(room, now) {
     /* step 33c: TAIL SWEEP - 25 crouching, 26 sweeping, 27 getting up (ms left in that
        part), and which way it spins (field 11: 1 or -1) */
     else if (b.tail) snap.push(TAIL_CODE[b.tail.e], "", Math.max(0, Math.round(b.tail.until - t)), b.tail.dir);
-    /* step 33d: the ROAR - 28 swelling, 29 roaring (ms left in that part) */
+    /* step 33d: the ROAR - 28 swelling, 29 roaring, 30 laying eggs (step 33d2) (ms left in that part) */
     else if (b.roar) snap.push(ROAR_CODE[b.roar.e], "", Math.max(0, Math.round(b.roar.until - t)));
     return snap;
 }

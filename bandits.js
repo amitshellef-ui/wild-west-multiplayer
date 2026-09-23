@@ -52,6 +52,28 @@ const BANDIT = {
     hitRadius: 0.62
 };
 
+/* ---- The dragon's brood (step 33d2) -------------------------------------
+   After its ROAR the dragon lays eggs in an arc in front of it. They live in the
+   room's bandit list - same hit report, same snapshot, same death - as two kinds:
+
+     egg    eggHealth, does not move. hatchMs after it lands it hatches, unless a
+            shot got there first (then it bursts, and nothing comes out).
+     hatch  the hatchling: health, runs at `speed` straight for the nearest living
+            player (faster than a walk, slower than a sprint), and at biteRange
+            leaps. The bite lands biteLeapMs later if the player is still within
+            biteReach - so stepping back as it leaps is a dodge. biteEveryMs apart.
+
+   Eggs per roar: eggs, +eggsPerPlayer for every player in the room past the first,
+   at most eggsMax - and never past `cap` eggs and hatchlings alive at once. Like
+   any summoned help they never come back after dying, and they are not the wave's. */
+const BROOD = {
+    eggHealth: 15, hatchMs: 3000, eggRadius: 0.35,
+    health: 30, radius: 0.35, speed: 6,
+    biteRange: 2, biteLeapMs: 250, biteReach: 2.6, biteDamage: 8, biteEveryMs: 1200,
+    eggs: 3, eggsPerPlayer: 1, eggsMax: 5, cap: 8,
+    layNear: 3, layFar: 4.5, layArc: 1.25       // metres in front of it, and radians either side
+};
+
 const TICK_MS = 50;            // 20 simulation steps a second
 
 /* ---- Room lifecycle ---------------------------------------------------- */
@@ -262,8 +284,9 @@ function stepBullets(room, players, dt, sink) {
 
 /* ---- Movement ---------------------------------------------------------- */
 function moveAxis(b, dx, dz) {
-    if (dx !== 0 && !nav.collidesAt(b.x + dx, b.z, BANDIT.radius)) b.x += dx;
-    if (dz !== 0 && !nav.collidesAt(b.x, b.z + dz, BANDIT.radius)) b.z += dz;
+    const r = b.radius || BANDIT.radius;          // step 33d2: a hatchling is smaller
+    if (dx !== 0 && !nav.collidesAt(b.x + dx, b.z, r)) b.x += dx;
+    if (dz !== 0 && !nav.collidesAt(b.x, b.z + dz, r)) b.z += dz;
 }
 
 /* Bandits push each other apart so a group does not collapse into one body. */
@@ -329,6 +352,13 @@ function stepBandit(room, b, players, now, dt, sink) {
         }
         return;
     }
+
+    /* step 33d2: the dragon's brood - an egg only waits, a hatchling only chases */
+    if (b.kind === "egg") {
+        if (now < b.hatchAt) return;
+        hatchEgg(b);
+    }
+    if (b.kind === "hatch") { stepHatchling(room, b, players, now, dt, sink); return; }
 
     let near = nearestPlayer(room, players, b.x, b.z);
 
@@ -487,6 +517,234 @@ function stepBandit(room, b, players, now, dt, sink) {
     }
 }
 
+/* ---- The brood (step 33d2), see BROOD above ----------------------------- */
+function hatchEgg(b) {
+    b.kind = "hatch";
+    b.health = b.maxHealth = BROOD.health;
+    b.radius = BROOD.radius;
+    b.state = "chase";
+    b.path = null; b.repathAt = 0;
+    b.biteAt = 0; b.bite = null;
+}
+
+function stepHatchling(room, b, players, now, dt, sink) {
+    /* a leap in the air lands where it lands: the player it went for, if still in reach */
+    if (b.bite && now >= b.bite.at) {
+        const v = players[b.bite.id];
+        if (v && v.alive && v.room === room.code &&
+            Math.hypot(v.x - b.x, v.z - b.z) <= BROOD.biteReach && nav.losClear(b.x, b.z, v.x, v.z)) {
+            sink.hits.push({ playerId: v.id, damage: BROOD.biteDamage, from: b.id });
+        }
+        b.bite = null;
+    }
+
+    const near = nearestPlayer(room, players, b.x, b.z);
+    let moved = false;
+    if (near) {
+        const t = near.player;
+        b.targetId = t.id;
+        /* nothing between them on the ground (losClear - the walking grid's lineClear
+           calls a player standing against a wall unreachable even from a metre off) */
+        if (!b.bite && near.dist <= BROOD.biteRange && now >= b.biteAt && nav.losClear(b.x, b.z, t.x, t.z)) {
+            b.bite = { id: t.id, at: now + BROOD.biteLeapMs };
+            b.biteAt = now + BROOD.biteEveryMs;
+            if (sink.bites) sink.bites.push({ id: b.id });
+        }
+        /* routing: straight at it when the way is open (or it is a few metres off with
+           nothing between), otherwise the grid's path, waypoint by waypoint */
+        if (now >= b.repathAt || !b.path || b.pathIndex >= b.path.length) {
+            b.repathAt = now + 300 + Math.random() * 200;
+            let local;
+            if (nav.lineClear(b.x, b.z, t.x, t.z) || (near.dist < 4 && nav.losClear(b.x, b.z, t.x, t.z))) {
+                b.path = [{ x: t.x, z: t.z }]; b.pathIndex = 0; b.direct = true;
+            } else if (near.dist < FINE.reach + (b.fine ? FINE.margin : 0) && (local = finePath(b, t))) {
+                // once on one it keeps to it out to reach + margin: a way round a building can
+                // lead away first, and back on the coarse grid it would only turn round again
+                b.path = local; b.pathIndex = 0; b.direct = false; b.fine = true;
+            } else {
+                b.fine = false;
+                const to = approachPoint(b, t);
+                const route = nav.findPath(b.x, b.z, to.x, to.z);
+                if (route === undefined) b.repathAt = now + 50 + Math.random() * 100;
+                else {
+                    b.path = route; b.pathIndex = 0; b.direct = false;
+                    b.repathAt = now + 600 + Math.random() * 300;       // a long route: asked for no more often than a bandit's
+                }
+            }
+        }
+        /* it runs until it is on top of you - nothing to keep its distance for */
+        if (near.dist > 1.1 && b.path && b.pathIndex < b.path.length) {
+            const wp = b.direct ? { x: t.x, z: t.z } : b.path[b.pathIndex];
+            const dx = wp.x - b.x, dz = wp.z - b.z;
+            const d = Math.hypot(dx, dz);
+            if (!b.direct && d < 0.6) b.pathIndex++;
+            else if (d > 0.01) {
+                const step = Math.min(d, BROOD.speed * dt);
+                moveAxis(b, (dx / d) * step, (dz / d) * step);
+                moved = true;
+            }
+        }
+        const want = Math.atan2(t.x - b.x, t.z - b.z);
+        let dy = want - b.yaw;
+        while (dy > Math.PI) dy -= Math.PI * 2;
+        while (dy < -Math.PI) dy += Math.PI * 2;
+        b.yaw += dy * Math.min(1, 12 * dt);
+    }
+
+    separate(room, b);
+    b.moving = moved;
+    recordTrail(b);
+
+    if (now >= b.stuckCheckAt) {
+        b.stuckCheckAt = now + 800;
+        if (moved && Math.hypot(b.x - b.lastX, b.z - b.lastZ) < 0.22) {
+            b.wedgedFor = (b.wedgedFor || 0) + 800;
+            b.path = null; b.repathAt = 0;
+            if (b.wedgedFor >= 1600) {
+                const spot = nav.freeSpotNear(b.x, b.z, 2, 12, BROOD.radius);
+                if (spot) { b.x = spot.x; b.z = spot.z; }
+                b.wedgedFor = 0;
+            }
+        } else b.wedgedFor = 0;
+        b.lastX = b.x; b.lastZ = b.z;
+    }
+}
+
+/* The last few metres (step 33d2). The walking grid pads every wall by 1.3 m and its
+   cells are big: fine for a bandit that shoots from eleven metres, not for something
+   that has to reach you - it gives up on a player against a wall, in the corral or in
+   the mine. Within FINE.reach of the player it finds its way on a grid of FINE.cell
+   squares tested against the colliders themselves (clear by FINE.clear - a player is
+   0.42). The whole town is worked out once, here, as the server starts: ~130 ms, the
+   way the walking grid is. Worked out as it went, the first chase past new ground cost
+   the server a 130 ms tick. Breadth-first from the player's square out to its own, no
+   corner cutting. */
+const FINE = { cell: 0.5, reach: 14, margin: 6, clear: 0.4 };     // margin: room to go round a building
+const fineGrid = (function () {
+    const N = nav.NAV, C = FINE.cell;
+    const g = { ox: Math.floor(N.minX / C), oz: Math.floor(N.minZ / C) };
+    g.w = Math.ceil((N.minX + N.w * N.cell) / C) - g.ox;
+    g.h = Math.ceil((N.minZ + N.h * N.cell) / C) - g.oz;
+    g.free = new Uint8Array(g.w * g.h);
+    for (let z = 0; z < g.h; z++) {
+        for (let x = 0; x < g.w; x++) {
+            g.free[z * g.w + x] = nav.collidesAt((x + g.ox + 0.5) * C, (z + g.oz + 0.5) * C, FINE.clear) ? 0 : 1;
+        }
+    }
+    return g;
+})();
+function fineFree(cx, cz) {
+    const x = cx - fineGrid.ox, z = cz - fineGrid.oz;
+    return x >= 0 && z >= 0 && x < fineGrid.w && z < fineGrid.h && fineGrid.free[z * fineGrid.w + x] === 1;
+}
+function finePath(b, t) {
+    const C = FINE.cell, R = Math.ceil((FINE.reach + FINE.margin) / C);
+    const gx = Math.floor(t.x / C), gz = Math.floor(t.z / C);
+    const sx = Math.floor(b.x / C), sz = Math.floor(b.z / C);
+    if (Math.abs(sx - gx) > R || Math.abs(sz - gz) > R) return null;
+    const W = 2 * R + 1, key = (x, z) => (z - gz + R) * W + (x - gx + R);
+    const from = new Int32Array(W * W).fill(-1);
+    const q = [gx, gz];
+    from[key(gx, gz)] = key(gx, gz);
+    const D = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+    for (let h = 0; h < q.length; h += 2) {
+        const x = q[h], z = q[h + 1];
+        if (x === sx && z === sz) {
+            const out = [];
+            let cx = x, cz = z;
+            while (!(cx === gx && cz === gz)) {
+                const f = from[key(cx, cz)];
+                cx = (f % W) + gx - R; cz = Math.floor(f / W) + gz - R;
+                out.push({ x: (cx + 0.5) * C, z: (cz + 0.5) * C });
+            }
+            out[out.length - 1] = { x: t.x, z: t.z };
+            return out;
+        }
+        for (let d = 0; d < 8; d++) {
+            const nx = x + D[d][0], nz = z + D[d][1];
+            if (Math.abs(nx - gx) > R || Math.abs(nz - gz) > R) continue;
+            const k = key(nx, nz);
+            if (from[k] >= 0) continue;
+            const isStart = nx === sx && nz === sz;
+            if (!isStart && !fineFree(nx, nz)) continue;
+            if (d > 3 && (!fineFree(x + D[d][0], z) || !fineFree(x, z + D[d][1]))) continue;
+            from[k] = key(x, z);
+            q.push(nx, nz);
+        }
+    }
+    return null;
+}
+
+/* Where to run to for a player: the player, unless they stand in a grid cell the
+   walking grid calls blocked (against a wall - hiding from the roar, say). Then the
+   grid would send it to the nearest free cell, which can be the far side of that wall;
+   instead, a free spot 0.8-6 m from them with nothing between on the ground, the one
+   nearest the hatchling. */
+function approachPoint(b, t) {
+    if (!nav.isBlocked(nav.toCellX(t.x), nav.toCellZ(t.z))) return t;
+    let best = null, bestD = Infinity;
+    for (const r of [0.8, 1.3, 2, 3, 4.5, 6]) {
+        for (let k = 0; k < 16; k++) {
+            const a = k * Math.PI / 8, x = t.x + Math.sin(a) * r, z = t.z + Math.cos(a) * r;
+            if (nav.isBlocked(nav.toCellX(x), nav.toCellZ(z)) || nav.collidesAt(x, z, BROOD.radius + 0.1)) continue;
+            if (!nav.losClear(x, z, t.x, t.z)) continue;
+            const d = Math.hypot(x - b.x, z - b.z);
+            if (d < bestD) { bestD = d; best = { x: x, z: z }; }
+        }
+        if (best) return best;
+    }
+    return t;
+}
+
+/* Eggs and hatchlings alive in the room right now. */
+function broodCount(room) {
+    let n = 0;
+    for (const id in room.bandits) {
+        const b = room.bandits[id];
+        if (b.alive && (b.kind === "egg" || b.kind === "hatch")) n++;
+    }
+    return n;
+}
+
+/* How many eggs this roar lays: by the room's head count, under the cap. */
+function eggsFor(room, players) {
+    let inRoom = 0;
+    for (const id in players) if (players[id].room === room.code) inRoom++;
+    const want = Math.min(BROOD.eggsMax, BROOD.eggs + BROOD.eggsPerPlayer * Math.max(0, inRoom - 1));
+    return Math.max(0, Math.min(want, BROOD.cap - broodCount(room)));
+}
+
+/* The eggs drop in an arc in front of it (yaw), on ground it can see from where it
+   stands (up against a wall, anywhere round it within layFar + 1.5). Returns
+   [[id, x, z], ...] for the ones that found a place. */
+function layEggs(room, players, x, z, yaw, count, now) {
+    const out = [];
+    for (let i = 0; i < count; i++) {
+        const mid = count === 1 ? 0 : -BROOD.layArc + (2 * BROOD.layArc) * i / (count - 1);
+        /* 16 tries in its place in the arc; then, up against a wall, anywhere round it
+           a little further out - the room gets every egg it was promised */
+        for (let k = 0; k < 40; k++) {
+            const round = k >= 16;
+            const a = round ? Math.random() * Math.PI * 2 : yaw + mid + (Math.random() - 0.5) * 0.3 * (1 + k / 4);
+            const r = BROOD.layNear + Math.random() * (BROOD.layFar - BROOD.layNear + (round ? 1.5 : 0));
+            const px = x + Math.sin(a) * r, pz = z + Math.cos(a) * r;
+            if (nav.collidesAt(px, pz, BROOD.eggRadius + 0.15)) continue;
+            if (!nav.lineClear(x, z, px, pz)) continue;
+            const b = spawnBandit(room, players, { x: px, z: pz });
+            b.kind = "egg";
+            b.summoned = true;
+            b.health = b.maxHealth = BROOD.eggHealth;
+            b.radius = BROOD.eggRadius;
+            b.hatchAt = (now === undefined ? Date.now() : now) + BROOD.hatchMs;
+            b.yaw = Math.random() * Math.PI * 2;
+            b.lastShot = Infinity;
+            out.push([b.id, round2(px), round2(pz)]);
+            break;
+        }
+    }
+    return out;
+}
+
 function stepRoom(room, players, now, dt, sink) {
     if (!room.bandits) initRoom(room);
     if (!room.bullets) room.bullets = [];
@@ -513,8 +771,9 @@ function stepRoom(room, players, now, dt, sink) {
 
    Same whole numbers as the player packet: centimetres and hundredths of a
    radian, written without a decimal point. */
-function snapshot(room) {
+function snapshot(room, now) {
     const out = [];
+    const t = now === undefined ? Date.now() : now;
     for (const id in room.bandits) {
         const b = room.bandits[id];
         out.push([
@@ -525,6 +784,10 @@ function snapshot(room) {
             Math.round(b.health),
             b.alive ? (b.state === "chase" ? 2 : 1) : 0
         ]);
+        /* step 33d2: the brood, and only the brood, carries a 7th field - 1 an egg
+           (+ tenths of a second to hatching), 2 a hatchling. Older clients ignore it. */
+        if (b.kind === "egg") out[out.length - 1].push(1, Math.max(0, Math.round((b.hatchAt - t) / 100)));
+        else if (b.kind === "hatch") out[out.length - 1].push(2);
     }
     return out;
 }
@@ -609,5 +872,6 @@ function hurt(room, banditId, amount) {
 
 module.exports = {
     BANDIT, TICK_MS, initRoom, stepRoom, snapshot, hurt, aliveCount, banditList, fillTo,
-    recordTrail, TRAIL_LENGTH, applyWave, summon, regularCount
+    recordTrail, TRAIL_LENGTH, applyWave, summon, regularCount,
+    BROOD, layEggs, eggsFor, broodCount                              // step 33d2
 };

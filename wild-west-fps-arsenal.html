@@ -1689,14 +1689,20 @@ function initNetwork() {
         const body = serverBandits[m.id];
         const at = body ? body.mesh.position.clone().setY(1.2)
                         : new THREE.Vector3(m.x || 0, 1.2, m.z || 0);
-        sfxBotDeath(at);
-        spawnParticles(at, 0x8a2a1a, 20, 4);
-        spawnDust(at.clone().setY(0.2), 14);
+        const brood = body && body.brood;              // step 33d2: an egg bursts on its own (eggBurst)
+        if (brood !== 'egg') {
+            sfxBotDeath(at);
+            spawnParticles(at, 0x8a2a1a, brood ? 12 : 20, 4);
+            spawnDust(at.clone().setY(0.2), 14);
+        }
         if (m.by === NET.id) {
             kills++; onKillReward(); updateBoard();
-            netFeed((m.headshot ? 'HEADSHOT! ' : '') + 'Bandit eliminated');
+            netFeed(brood === 'egg' ? 'Egg smashed' : brood === 'hatch' ? 'Hatchling down'
+                : (m.headshot ? 'HEADSHOT! ' : '') + 'Bandit eliminated');
         }
     });
+
+    NET.socket.on('bandit-bite', function (m) { if (m) onHatchlingBite(m); });     // step 33d2
 
     /* =====================================================================
        THE ROOM'S BOSS (step 12)
@@ -3821,7 +3827,18 @@ const BOSS_DRAGON = {
     // step 33d - the ROAR (online only, phase two)
     roarFirstMs: 3000, roarEveryMs: 15000, roarRange: 45,
     roarSwellMs: 1250, roarAfterMs: 958, roarDazeMs: 2000, roarGapMs: 1500,
+    layMs: 500, eggsAtMs: 250,           // step 33d2: LayEggs (12 frames), the eggs drop at frame 6
     p2: { summon: 4, breaths: 2, fanSpread: 0.35, swoopEveryMs: 3500, emberEveryMs: 11200, tailEveryMs: 4900 }
+};
+
+/* The dragon's brood (step 33d2) - BROOD in bandits.js, online only. Drawn from here:
+   how long an egg takes, and the health bars. */
+const BOSS_BROOD = {
+    eggHealth: 15, hatchMs: 3000, eggRadius: 0.35,
+    health: 30, radius: 0.35, speed: 6,
+    biteRange: 2, biteLeapMs: 250, biteReach: 2.6, biteDamage: 8, biteEveryMs: 1200,
+    eggs: 3, eggsPerPlayer: 1, eggsMax: 5, cap: 8,
+    layNear: 3, layFar: 4.5, layArc: 1.25
 };
 
 /* The skeleton's duel, HIGH NOON (step 30b) - SKELETON in boss.js; online those are
@@ -4127,7 +4144,8 @@ const BOSS_LOOKS = {
     // step 33a: glowMap keeps the painted amber eyes in their own colours. Without it the eye
     // material takes the boss eye colour at 0.08 like the body, and the eyes go dark and tinted.
     // The body has no emissiveMap, so it still takes the 0.08 glow - only the eyes take this.
-    dragon: { model: 'dragon', scale: 2.2, tint: 0, glow: 0.08, glowMap: 1.0 }   // step 28: head at 2.8m, 4.2m wing to wing
+    dragon: { model: 'dragon', scale: 2.2, tint: 0, glow: 0.08, glowMap: 1.0 },  // step 28: head at 2.8m, 4.2m wing to wing
+    hatchling: { model: 'dragon', scale: 0.55, tint: 0, glow: 0.08, glowMap: 1.0 }  // step 33d2: a quarter of the boss, head at 0.7m
 };
 function bossLook(bt) {
     const own = (bt && BOSS_LOOKS[bt.id]) || {};
@@ -4710,7 +4728,7 @@ function updateModelRigs(delta) {
         // a flier lifts off while it moves and settles to land (step 28, the dragon)
         if (rig.spec.hover || rig.spec.deathLift) {
             const flying = !rig.full && (rig.motion === 'Walk' || rig.motion === 'Run');
-            const want = rig.full === 'Death' ? (rig.spec.deathLift || 0) * rig.scale : (flying ? (rig.spec.hover || 0) : 0);
+            const want = rig.full === 'Death' ? (rig.spec.deathLift || 0) * rig.scale : (flying ? (rig.spec.hover || 0) * (rig.hoverK || 1) : 0);   // hoverK: step 33d2, the hatchling
             rig.body.position.y += (want - rig.body.position.y) * Math.min(1, 3 * delta);
         }
 
@@ -4768,7 +4786,7 @@ function disposeModelRig(rig) {
 function upgradeRigs() {
     Object.keys(serverBandits).forEach(function (id) {
         const body = serverBandits[id];
-        if (body.rig.model.kind === 'model') return;
+        if (body.brood || body.rig.model.kind === 'model') return;      // step 33d2: the brood keeps its own
         const old = body.rig;
         const rig = liftServerBanditRig(id);
         rig.mesh.position.copy(old.mesh.position);
@@ -5630,6 +5648,7 @@ function createServerBandit(id) {
 function destroyServerBandit(id) {
     const body = serverBandits[id];
     if (!body) return;
+    if (body.brood === 'egg') { destroyEggBody(body); delete serverBandits[id]; return; }     // step 33d2
     banditGroup.remove(body.mesh);
     // a model rig lets go of its own materials once it is out of the scene
     if (body.rig.model.kind !== 'model') disposeBoxRig(body.mesh);
@@ -5651,11 +5670,20 @@ function onBanditSnapshot(rows) {
         const id = r[0];
         present[id] = true;
         let body = serverBandits[id];
-        if (!body) body = createServerBandit(id);
+        /* step 33d2: the dragon's brood carries a 7th field - 1 an egg, 2 a hatchling. An
+           egg that hatched becomes a new body in the same place. */
+        const kind = r.length > 6 ? r[6] : 0;
+        if (body && (body.broodKind || 0) !== kind) {
+            if (body.broodKind === 1 && kind === 2) eggHatchBurst(body);
+            destroyServerBandit(id);
+            body = null;
+        }
+        if (!body) body = kind ? createBroodBody(id, kind) : createServerBandit(id);
+        if (kind === 1 && typeof r[7] === 'number') body.hatchAt = nowT + r[7] * 100;
 
         const wasAlive = body.alive;
         // somebody hit it (not on first sight - there is no earlier health to compare)
-        if (body.buf.length && body.alive && r[4] < body.health && r[5] !== 0) rigHit(body.rig.model);
+        if (body.buf.length && body.alive && r[4] < body.health && r[5] !== 0 && body.rig) rigHit(body.rig.model);
         body.health = r[4];
         body.alive = r[5] !== 0;
         body.chasing = r[5] === 2;
@@ -5736,7 +5764,8 @@ function clearBanditBullets() {
 }
 
 function showBanditHealth(body) {
-    const pct = Math.max(0, Math.min(1, body.health / netBanditMaxHp));
+    if (body.brood === 'egg') return;                   // step 33d2: one shot, no bar
+    const pct = Math.max(0, Math.min(1, body.health / (body.maxHp || netBanditMaxHp)));
     const P = body.rig.parts;
     const show = body.alive && pct < 1 && pct > 0;
     P.barBg.visible = show;
@@ -5746,6 +5775,7 @@ function showBanditHealth(body) {
 }
 
 function startBanditDeath(body) {
+    if (body.brood === 'egg') { eggBurst(body); return; }      // step 33d2
     body.deathT = 0;
     body.deathDir = Math.random() > 0.5 ? 1 : -1;
     rigDie(body.rig.model);
@@ -5754,6 +5784,7 @@ function startBanditDeath(body) {
 }
 
 function reviveBandit(body) {
+    if (body.brood) return;                             // step 33d2: the brood never comes back
     body.deathT = -1;
     body.mesh.visible = true;
     if (body.rig.model.kind === 'model') rigReset(body.rig.model);
@@ -5774,6 +5805,7 @@ function updateServerBandits(delta) {
     const ids = Object.keys(serverBandits);
     for (let i = 0; i < ids.length; i++) {
         const body = serverBandits[ids[i]];
+        if (body.brood === 'egg') { updateEggBody(body); continue; }       // step 33d2
 
         if (!body.alive) {
             if (body.deathT >= 0) {
@@ -5797,7 +5829,7 @@ function updateServerBandits(delta) {
         const shown = sampleAt(body.buf, performance.now() - INTERP_DELAY);
         if (!shown) continue;
         const m = body.mesh;
-        m.position.set(shown.x, 0, shown.z);
+        m.position.set(shown.x, body.leapT0 ? hatchLeapY(body) : 0, shown.z);
         m.rotation.y = shown.yaw;
 
         let inst = 0;
@@ -7896,7 +7928,7 @@ function sfxRoarSwell(pos, ms) {
     noiseBurst(d, { type: 'lowpass', freq: 180, sweepTo: 520, dur: dur, vol: 0.55 });
     tone(d, { type: 'sine', f0: 40, f1: 75, dur: dur, vol: 0.3 });
 }
-function roarLetGo(rig) { if (rig && rig.full === 'Roar') rig.full = null; }
+function roarLetGo(rig) { if (rig && (rig.full === 'Roar' || rig.full === 'LayEggs')) rig.full = null; }
 function roarUnblur() { renderer.domElement.style.filter = ''; ROAR.dazeT0 = 0; }
 
 function roarClear() {
@@ -7940,6 +7972,12 @@ function roarStep(m, late) {
             camShake = Math.min(1, camShake + 0.7);
             pushFeed('THE ROAR DAZED YOU — TAKE COVER WHEN ITS CHEST SWELLS');
         } else if (Array.isArray(m.safe) && m.safe.indexOf(NET.id) >= 0) pushFeed('BEHIND COVER — THE ROAR MISSED YOU');
+    } else if (m.e === 'lay') {                                    // step 33d2: LayEggs
+        const ms = typeof m.ms === 'number' ? m.ms : BOSS_DRAGON.layMs;
+        ROAR.e = 'lay'; ROAR.ms = BOSS_DRAGON.layMs; ROAR.t0 = now - Math.max(0, BOSS_DRAGON.layMs - ms);
+        if (rig && rigFull(rig, 'LayEggs', { fade: 0.1 }) && late) { const s = (now - ROAR.t0) / 1000; rig.lower.time = s; rig.upper.time = s; }
+    } else if (m.e === 'eggs') {                                   // step 33d2: out of it, onto the ground
+        if (Array.isArray(m.eg)) eggsDropped(m.eg);
     } else if (m.e === 'done') {
         const was = !!ROAR.e;
         ROAR.e = null;
@@ -7953,7 +7991,7 @@ function onBossRoarAttack(m) {
 }
 
 /* The snapshot's fields 8-10 with 28 or 29 in 8 (a latecomer, or a missed event). */
-const ROAR_PARTS = { 28: 'swell', 29: 'roar' };
+const ROAR_PARTS = { 28: 'swell', 29: 'roar', 30: 'lay' };
 function roarFromSnapshot(r) {
     const e = ROAR_PARTS[r[8]];
     if (e) {
@@ -7968,7 +8006,7 @@ function updateRoar(delta) {
     if (ROAR.standAt && now >= ROAR.standAt) {
         ROAR.standAt = 0;
         const rig = emberRig();
-        if (rig && netBoss.alive && !ROAR.e && rig.full === 'Roar') rigStand(rig, 0.3);
+        if (rig && netBoss.alive && !ROAR.e && (rig.full === 'Roar' || rig.full === 'LayEggs')) rigStand(rig, 0.3);
     }
     // the throat: glowing up through the swell, bright through the shout, gone after
     let glow = 0;
@@ -8013,6 +8051,171 @@ function updateRoar(delta) {
         if (say) { hud.style.display = 'block'; hud.textContent = '⚠ TAKE COVER ⚠'; }
         else hud.style.display = 'none';
     }
+}
+
+/* ---- The BROOD - the dragon's eggs and hatchlings (step 33d2) -----------------
+   The server keeps them in the room's bandit list (bandits.js, BROOD): a snapshot row
+   with a 7th field, 1 an egg (+ tenths of a second to hatching), 2 a hatchling. They
+   are shot like any bandit (userData.banditId) and drawn here. An egg: a speckled
+   oval that shakes harder and glows hotter as it gets close; shot, it bursts; hatching,
+   the shell flies apart and a hatchling - the dragon's own model at a quarter of the
+   boss's size - stands where it lay. A hatchling runs with the dragon's Fly, and bites
+   with its Attack and a hop (bandit-bite). */
+const EGG_DROPS = {};                  // id -> { from, t0 } for the eggs we saw leave it
+const EGG_DROP_MS = 380;
+let _eggGeo = null, _eggMap = null, _hatchType = null, _eggsTold = false;
+
+function eggMap() {
+    if (_eggMap) return _eggMap;
+    const c = document.createElement('canvas'); c.width = 128; c.height = 64;
+    const g = c.getContext('2d');
+    g.fillStyle = '#6b1a12'; g.fillRect(0, 0, 128, 64);
+    let seed = 7;
+    const rnd = function () { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+    for (let i = 0; i < 70; i++) {
+        g.fillStyle = rnd() > 0.5 ? '#3a0c08' : '#9c3a1c';
+        g.beginPath(); g.ellipse(rnd() * 128, rnd() * 64, 1.5 + rnd() * 4, 1 + rnd() * 3, rnd() * 3, 0, 7); g.fill();
+    }
+    _eggMap = new THREE.CanvasTexture(c);
+    _eggMap.wrapS = THREE.RepeatWrapping;
+    return _eggMap;
+}
+function hatchType() {
+    if (_hatchType) return _hatchType;
+    const d = BOSS_TYPES.find(function (t) { return t.id === 'dragon'; });
+    _hatchType = Object.assign({}, d, { id: 'hatchling', hp: BOSS_BROOD.health, radius: BOSS_BROOD.radius, final: false });
+    return _hatchType;
+}
+
+function createBroodBody(id, kind) {
+    const body = {
+        id: id, broodKind: kind, buf: [], alive: true, health: 0, maxHp: 0,
+        walkPhase: Math.random() * 6.28, speed: 0, recoil: 0,
+        deathT: -1, deathDir: 1, leapT0: 0,
+        prevPos: new THREE.Vector3(), hasPrev: false
+    };
+    if (kind === 1) {
+        if (!_eggGeo) _eggGeo = new THREE.SphereGeometry(0.3, 18, 12);
+        const mat = new THREE.MeshStandardMaterial({ map: eggMap(), roughness: 0.55, metalness: 0.05, emissive: 0xff5a10, emissiveIntensity: 0 });
+        const egg = new THREE.Mesh(_eggGeo, mat);
+        egg.scale.set(1, 1.3, 1);
+        egg.position.y = 0.39;
+        egg.userData.banditId = id;
+        const root = new THREE.Group();
+        root.add(egg);
+        root.visible = false;                            // until we know where it is
+        banditGroup.add(root);
+        body.brood = 'egg'; body.mesh = root; body.egg = egg; body.rig = null;
+        body.maxHp = BOSS_BROOD.eggHealth; body.health = BOSS_BROOD.eggHealth;
+        body.hatchAt = performance.now() + BOSS_BROOD.hatchMs;
+        body.spin = Math.random() * 6.28;
+    } else {
+        const rig = createBandit(true, hatchType());
+        const idx = bots.indexOf(rig);
+        if (idx > -1) bots.splice(idx, 1);
+        botGroup.remove(rig.mesh);
+        banditGroup.add(rig.mesh);
+        if (rig.model.kind !== 'model') rig.mesh.scale.setScalar(0.55 / 1.75);     // the cubes: a small stand-in
+        else rig.model.hoverK = 0.25;                   // its hover is a quarter of the dragon's, like the rest of it
+        rig.mesh.traverse(function (o) {
+            if (o.isMesh) { delete o.userData.bot; o.userData.banditId = id; }
+        });
+        body.brood = 'hatch'; body.rig = rig; body.mesh = rig.mesh;
+        body.maxHp = BOSS_BROOD.health; body.health = BOSS_BROOD.health;
+    }
+    serverBandits[id] = body;
+    return body;
+}
+
+function destroyEggBody(body) {
+    banditGroup.remove(body.mesh);
+    body.egg.material.dispose();
+    delete EGG_DROPS[body.id];
+}
+
+/* The eggs as they leave it: from under its belly, on an arc, to where they lie. */
+function eggsDropped(eg) {
+    const now = performance.now();
+    const from = netBoss.mesh ? netBoss.mesh.position.clone().setY(1.3) : null;
+    for (let i = 0; i < eg.length; i++) {
+        if (!Array.isArray(eg[i])) continue;
+        if (from) EGG_DROPS[eg[i][0]] = { from: from, t0: now };
+    }
+    if (!_eggsTold) { _eggsTold = true; pushFeed('EGGS — SHOOT THEM BEFORE THEY HATCH'); }
+}
+
+function updateEggBody(body) {
+    if (!body.alive) { body.mesh.visible = false; return; }
+    const shown = sampleAt(body.buf, performance.now() - INTERP_DELAY);
+    if (!shown && !body.buf.length) return;
+    const at = shown || body.buf[body.buf.length - 1];
+    const now = performance.now();
+    const m = body.mesh, egg = body.egg;
+    m.visible = true;
+    const drop = EGG_DROPS[body.id];
+    if (drop) {
+        const t = (now - drop.t0) / EGG_DROP_MS;
+        if (t < 1) {
+            m.position.set(drop.from.x + (at.x - drop.from.x) * t, drop.from.y * (1 - t) + Math.sin(Math.PI * t) * 1.2 - 0.39 * t, drop.from.z + (at.z - drop.from.z) * t);
+            egg.rotation.set(t * 5, 0, t * 3);
+            return;
+        }
+        delete EGG_DROPS[body.id];
+        spawnDust(new THREE.Vector3(at.x, 0.1, at.z), 8);
+        sfxEggLand(new THREE.Vector3(at.x, 0.3, at.z));
+    }
+    m.position.set(at.x, 0, at.z);
+    // closer to hatching: a harder shake, a hotter glow
+    const left = Math.max(0, body.hatchAt - now), k = 1 - Math.min(1, left / BOSS_BROOD.hatchMs);
+    const amp = 0.04 + 0.22 * k * k, fast = 10 + 22 * k;
+    egg.rotation.set(Math.sin(now / 1000 * fast) * amp, body.spin, Math.cos(now / 1000 * fast * 1.3) * amp * 0.7);
+    egg.material.emissiveIntensity = 0.05 + 0.9 * k * k * (0.6 + 0.4 * Math.sin(now / 1000 * (8 + 16 * k)));
+}
+
+/* Shot before it hatched: nothing comes out of it. */
+function eggBurst(body) {
+    const at = body.mesh.position.clone().setY(0.4);
+    spawnParticles(at, 0x6b1a12, 18, 4);
+    spawnParticles(at, 0xd9a13a, 10, 3);
+    spawnDust(at.clone().setY(0.1), 8);
+    sfxEggCrack(at, 1);
+    body.mesh.visible = false;
+}
+/* Hatched: the shell flies apart where the hatchling now stands. */
+function eggHatchBurst(body) {
+    const at = body.mesh.position.clone().setY(0.4);
+    spawnParticles(at, 0x6b1a12, 14, 3.2);
+    spawnDust(at.clone().setY(0.1), 10);
+    sfxEggCrack(at, 0.7);
+}
+
+/* The bite: its Attack, and a hop at you that lasts the leap. */
+function onHatchlingBite(m) {
+    const body = serverBandits[m.id];
+    if (!body || body.brood !== 'hatch' || !body.alive) return;
+    body.leapT0 = performance.now();
+    if (body.rig && body.rig.model) rigShoot(body.rig.model);
+    sfxHatchlingBite(body.mesh.position);
+}
+function hatchLeapY(body) {
+    const t = (performance.now() - body.leapT0) / BOSS_BROOD.biteLeapMs;
+    if (t >= 1.4) { body.leapT0 = 0; return 0; }
+    return t >= 1 ? 0 : Math.sin(Math.PI * t) * 0.45;
+}
+
+function sfxEggLand(pos) {
+    const d = chain(pos, 0.5, 40); if (!d) return;
+    noiseBurst(d, { type: 'lowpass', freq: 400, dur: 0.12, vol: 0.5 });
+}
+function sfxEggCrack(pos, vol) {
+    const d = chain(pos, vol, 50); if (!d) return;
+    noiseBurst(d, { type: 'highpass', freq: 1800, dur: 0.07, vol: 0.7 });
+    noiseBurst(d, { type: 'bandpass', freq: 700, dur: 0.18, vol: 0.5 });
+}
+function sfxHatchlingBite(pos) {
+    const d = chain(pos, 0.7, 40); if (!d) return;
+    tone(d, { type: 'sawtooth', f0: 900, f1: 380, dur: 0.16, vol: 0.18 });
+    noiseBurst(d, { type: 'bandpass', freq: 2400, dur: 0.05, vol: 0.5 });
 }
 
 function updateNetBoss(delta) {

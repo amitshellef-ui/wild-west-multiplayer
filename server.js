@@ -1346,6 +1346,8 @@ setInterval(() => {
         for (let i = 0; i < sink.tails.length; i++) io.to(code).emit("boss-tail", sink.tails[i]);
         // step 33d: its ROAR - swell, roar (who it dazed, who was behind cover), done
         for (let i = 0; i < sink.roarAttacks.length; i++) io.to(code).emit("boss-roar-attack", sink.roarAttacks[i]);
+        // step 33d2: a hatchling leaps (the bite itself is a hit like a bullet's, below)
+        for (let i = 0; i < sink.bites.length; i++) io.to(code).emit("bandit-bite", sink.bites[i]);
 
         /* A bullet reached a player. This is where the last piece of trust
            goes away: the server no longer has to believe a client that says it

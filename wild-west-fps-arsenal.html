@@ -1812,6 +1812,7 @@ function initNetwork() {
     NET.socket.on('boss-dash', onBossDash);             // step 31d: its GHOST DASH
     NET.socket.on('boss-ember', onBossEmber);           // step 33b: the dragon's EMBER RAIN
     NET.socket.on('boss-tail', onBossTail);             // step 33c: its TAIL SWEEP
+    NET.socket.on('boss-roar-attack', onBossRoarAttack); // step 33d: its ROAR
 
     NET.socket.on('boss-died', function (m) {
         if (!m) return;
@@ -3817,6 +3818,9 @@ const BOSS_DRAGON = {
     tailFirstMs: 3000, tailEveryMs: 7000, tailTrigger: 7, tailRange: 8,
     tailChargeMs: 790, tailSweepMs: 500, tailRecoverMs: 625, tailGapMs: 1500,
     tailDamage: 40, tailKnock: 13,
+    // step 33d - the ROAR (online only, phase two)
+    roarFirstMs: 3000, roarEveryMs: 15000, roarRange: 45,
+    roarSwellMs: 1250, roarAfterMs: 958, roarDazeMs: 2000, roarGapMs: 1500,
     p2: { summon: 4, breaths: 2, fanSpread: 0.35, swoopEveryMs: 3500, emberEveryMs: 11200, tailEveryMs: 4900 }
 };
 
@@ -5885,6 +5889,7 @@ function destroyNetBoss() {
     dashClear();                                             // step 31d
     emberClear(false);                                       // step 33b
     tailClear();                                             // step 33c
+    roarClear();                                             // step 33d
     if (SCATTER.e || SCATTER.standAt || SCATTER.bones.length) scatterStep({ e: 'clear' });   // step 30c
     if (netBoss.mesh) {
         banditGroup.remove(netBoss.mesh);
@@ -5934,6 +5939,7 @@ function onBossState(m) {
         dashFromSnapshot(r);                 // step 31d: its GHOST DASH
         emberFromSnapshot(r);                // step 33b: the dragon's EMBER RAIN
         tailFromSnapshot(r);                 // step 33c: its TAIL SWEEP
+        roarFromSnapshot(r);                 // step 33d: its ROAR
         netBoss.buf.push({ t: performance.now(), x: r[0], z: r[1], yaw: r[2] });
         if (netBoss.buf.length > 14) netBoss.buf.shift();
         netBoss.countdown = -1;
@@ -6527,6 +6533,7 @@ function startNetBossDeath() {
     dashClear();                                                                             // step 31d
     emberClear(true);                                                                        // step 33b: shot down in the air, it falls
     tailClear();                                                                             // step 33c
+    roarClear();                                                                             // step 33d
     if (DUEL.on || DUEL.standAt) duelEnd('clear');
     netBoss.alive = false;
     netBoss.deathT = 0;
@@ -7829,6 +7836,181 @@ function updateTail(delta) {
     const hud = say ? tailHud() : TAIL.hud;
     if (hud) {
         if (say) { hud.style.display = 'block'; hud.textContent = say === 'jump' ? '⬆ JUMP ⬆' : '⚠ GET OUT ⚠'; }
+        else hud.style.display = 'none';
+    }
+}
+
+/* ---- The ROAR - the dragon's shout, phase two (step 33d) ----------------------
+   The server owns it (boss-roar-attack; not boss-roar, which is the old swoop sound):
+   "swell" - Roar from the start, the chest fills and the throat glows for `ms` (a
+   warning in the middle of the screen for whoever is within `r` with nothing between
+   them and it - the same ground line the server checks); "roar" - the shout, three
+   rings of sound out of its mouth, and whoever is in `hit` is dazed for `daze` ms:
+   the picture blurs (a CSS filter on the canvas - the HUD stays sharp) and shakes;
+   "done". No damage. */
+const ROAR = { e: null, t0: 0, ms: 1, r: 45, glow: null, waves: [], dazeT0: 0, dazeMs: 0, told: false, hud: null, standAt: 0 };
+let _roarWaveGeo = null;
+
+/* The ground line the server checks (nav.losClear): nothing collides along it. */
+function roarLosClear(ax, az, bx, bz) {
+    const dist = Math.hypot(bx - ax, bz - az), steps = Math.max(2, Math.ceil(dist / 0.6));
+    for (let i = 1; i < steps; i++) {
+        const t = i / steps;
+        if (collidesAt(ax + (bx - ax) * t, az + (bz - az) * t, 0.05)) return false;
+    }
+    return true;
+}
+function roarHud() {
+    if (ROAR.hud) return ROAR.hud;
+    const d = document.createElement('div');
+    d.id = 'roar-hud';
+    d.style.cssText = 'position:fixed;top:40%;left:50%;transform:translate(-50%,-50%);z-index:40;pointer-events:none;display:none;' +
+        'text-align:center;font:bold 44px Georgia,serif;letter-spacing:4px;color:#ffd08a;text-shadow:0 0 12px #8a2000,0 0 4px #000;white-space:nowrap';
+    document.body.appendChild(d);
+    return (ROAR.hud = d);
+}
+/* The glow in its throat: a sprite on the neck, growing with the swell. */
+function roarGlow() {
+    if (ROAR.glow) return ROAR.glow;
+    const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: emberTexture(), color: 0xff6a20, transparent: true, opacity: 0,
+        depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false }));
+    s.raycast = function () { };
+    scene.add(s);
+    return (ROAR.glow = s);
+}
+/* A ring of sound, standing up, facing the way it roars. */
+function makeRoarWave(at, dir, delay) {
+    if (!_roarWaveGeo) _roarWaveGeo = new THREE.RingGeometry(0.8, 1, 48);
+    const m = new THREE.Mesh(_roarWaveGeo, new THREE.MeshBasicMaterial({ color: 0xffe0b0, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false, toneMapped: false }));
+    m.raycast = function () { };
+    m.position.copy(at);
+    m.lookAt(at.clone().add(dir));
+    m.visible = false;
+    scene.add(m);
+    ROAR.waves.push({ m: m, t0: performance.now() + delay, dir: dir.clone(), from: at.clone() });
+}
+/* The breath drawn in before it: a rising rumble. */
+function sfxRoarSwell(pos, ms) {
+    const d = chain(pos, 0.9, 80); if (!d) return;
+    const dur = Math.max(0.2, ms / 1000);
+    noiseBurst(d, { type: 'lowpass', freq: 180, sweepTo: 520, dur: dur, vol: 0.55 });
+    tone(d, { type: 'sine', f0: 40, f1: 75, dur: dur, vol: 0.3 });
+}
+function roarLetGo(rig) { if (rig && rig.full === 'Roar') rig.full = null; }
+function roarUnblur() { renderer.domElement.style.filter = ''; ROAR.dazeT0 = 0; }
+
+function roarClear() {
+    roarLetGo(emberRig());
+    ROAR.e = null; ROAR.standAt = 0;
+    if (ROAR.glow) ROAR.glow.material.opacity = 0;
+    ROAR.waves.forEach(function (w) { scene.remove(w.m); w.m.material.dispose(); });
+    ROAR.waves.length = 0;
+    if (ROAR.hud) ROAR.hud.style.display = 'none';
+    roarUnblur();
+}
+
+function roarStep(m, late) {
+    const now = performance.now();
+    const rig = emberRig();
+    const at = netBoss.mesh ? netBoss.mesh.position : null;
+    if (m.e === 'swell') {
+        const ms = typeof m.ms === 'number' ? m.ms : BOSS_DRAGON.roarSwellMs;
+        ROAR.e = 'swell'; ROAR.ms = BOSS_DRAGON.roarSwellMs; ROAR.t0 = now - Math.max(0, BOSS_DRAGON.roarSwellMs - ms);
+        ROAR.r = typeof m.r === 'number' ? m.r : BOSS_DRAGON.roarRange;
+        ROAR.standAt = 0;
+        if (rig && rigFull(rig, 'Roar', { fade: 0.12 }) && late) { const s = (now - ROAR.t0) / 1000; rig.lower.time = s; rig.upper.time = s; }
+        if (at && !late) sfxRoarSwell(at, ms);
+        if (!late && !ROAR.told) {
+            ROAR.told = true;
+            pushFeed('THE ROAR — GET SOMETHING BETWEEN YOU AND IT WHILE ITS CHEST SWELLS');
+        }
+    } else if (m.e === 'roar') {
+        const ms = typeof m.ms === 'number' ? m.ms : BOSS_DRAGON.roarAfterMs;
+        ROAR.e = 'roar'; ROAR.ms = BOSS_DRAGON.roarAfterMs; ROAR.t0 = now - Math.max(0, BOSS_DRAGON.roarAfterMs - ms);
+        if (rig && rigFull(rig, 'Roar', { fade: 0.12 }) && late) { const s = (BOSS_DRAGON.roarSwellMs + now - ROAR.t0) / 1000; rig.lower.time = s; rig.upper.time = s; }
+        if (!late && netBoss.mesh) {
+            const mouth = emberMouth(new THREE.Vector3());
+            const fwd = new THREE.Vector3(Math.sin(netBoss.mesh.rotation.y), 0, Math.cos(netBoss.mesh.rotation.y));
+            for (let i = 0; i < 3; i++) makeRoarWave(mouth, fwd, i * 160);
+            sfxBossRoar(mouth);
+            sfxBossRoar(mouth);                                    // twice as loud as the old one
+        }
+        if (Array.isArray(m.hit) && m.hit.indexOf(NET.id) >= 0 && playerHealth > 0) {
+            ROAR.dazeT0 = now; ROAR.dazeMs = typeof m.daze === 'number' ? m.daze : BOSS_DRAGON.roarDazeMs;
+            camShake = Math.min(1, camShake + 0.7);
+            pushFeed('THE ROAR DAZED YOU — TAKE COVER WHEN ITS CHEST SWELLS');
+        } else if (Array.isArray(m.safe) && m.safe.indexOf(NET.id) >= 0) pushFeed('BEHIND COVER — THE ROAR MISSED YOU');
+    } else if (m.e === 'done') {
+        const was = !!ROAR.e;
+        ROAR.e = null;
+        if (was && rig && netBoss.alive) ROAR.standAt = now + 30;
+    }
+}
+
+function onBossRoarAttack(m) {
+    if (!m || typeof m.e !== 'string' || !netBoss.active || !netBoss.alive) return;
+    roarStep(m, false);
+}
+
+/* The snapshot's fields 8-10 with 28 or 29 in 8 (a latecomer, or a missed event). */
+const ROAR_PARTS = { 28: 'swell', 29: 'roar' };
+function roarFromSnapshot(r) {
+    const e = ROAR_PARTS[r[8]];
+    if (e) {
+        if (ROAR.e !== e && typeof r[10] === 'number') roarStep({ e: e, ms: r[10] }, true);
+    } else if (ROAR.e && performance.now() > ROAR.t0 + ROAR.ms + 1500) {
+        roarStep({ e: 'done' });                                     // the ending never arrived
+    }
+}
+
+function updateRoar(delta) {
+    const now = performance.now();
+    if (ROAR.standAt && now >= ROAR.standAt) {
+        ROAR.standAt = 0;
+        const rig = emberRig();
+        if (rig && netBoss.alive && !ROAR.e && rig.full === 'Roar') rigStand(rig, 0.3);
+    }
+    // the throat: glowing up through the swell, bright through the shout, gone after
+    let glow = 0;
+    if (ROAR.e === 'swell') glow = Math.min(1, (now - ROAR.t0) / ROAR.ms);
+    else if (ROAR.e === 'roar') glow = Math.max(0, 1 - (now - ROAR.t0) / ROAR.ms);
+    if (glow > 0 || (ROAR.glow && ROAR.glow.material.opacity > 0)) {
+        const g = roarGlow();
+        const neck = netBoss.mesh && netBoss.mesh.getObjectByName('neck1');
+        if (neck) neck.getWorldPosition(g.position); else if (netBoss.mesh) g.position.copy(netBoss.mesh.position).setY(2.2);
+        // out in front of the throat - inside the neck the body hides it
+        if (netBoss.mesh) { const ry = netBoss.mesh.rotation.y; g.position.x += Math.sin(ry) * 0.7; g.position.z += Math.cos(ry) * 0.7; }
+        g.material.opacity = 0.95 * glow;
+        g.scale.setScalar(0.8 + 2.2 * glow);
+    }
+    // the rings of sound: out 10 m in 0.8 s, growing to 14 m across, fading
+    for (let i = ROAR.waves.length - 1; i >= 0; i--) {
+        const w = ROAR.waves[i], t = (now - w.t0) / 800;
+        if (t < 0) continue;
+        if (t >= 1) { scene.remove(w.m); w.m.material.dispose(); ROAR.waves.splice(i, 1); continue; }
+        w.m.visible = true;
+        w.m.position.copy(w.from).addScaledVector(w.dir, 10 * t);
+        w.m.scale.setScalar(1 + 13 * t);
+        w.m.material.opacity = 0.55 * (1 - t);
+    }
+    // dazed: blurred, easing back over the daze, the shake topped up
+    if (ROAR.dazeT0) {
+        const k = (now - ROAR.dazeT0) / ROAR.dazeMs;
+        if (k >= 1 || playerHealth <= 0) roarUnblur();
+        else {
+            renderer.domElement.style.filter = 'blur(' + (7 * (1 - k * k)).toFixed(1) + 'px)';
+            camShake = Math.max(camShake, 0.25 * (1 - k));
+        }
+    }
+    // the warning: whoever it will reach, while the chest swells
+    let say = false;
+    if (ROAR.e === 'swell' && netBoss.mesh && playerHealth > 0) {
+        const b = netBoss.mesh.position, me = camera.position;
+        if (Math.hypot(me.x - b.x, me.z - b.z) <= ROAR.r && roarLosClear(b.x, b.z, me.x, me.z)) say = true;
+    }
+    const hud = say ? roarHud() : ROAR.hud;
+    if (hud) {
+        if (say) { hud.style.display = 'block'; hud.textContent = '⚠ TAKE COVER ⚠'; }
         else hud.style.display = 'none';
     }
 }
@@ -10610,6 +10792,7 @@ function animate() {
     updateDash(delta);
     updateEmber(delta);                  // step 33b
     updateTail(delta);                   // step 33c
+    updateRoar(delta);                   // step 33d
     updateNetHazards(delta);
     updateBanditBullets(delta);
     updateModelRigs(delta);

@@ -147,8 +147,25 @@ const DRAGON = {
     tailFirstMs: 3000, tailEveryMs: 7000, tailTrigger: 7, tailRange: 8,
     tailChargeMs: 790, tailSweepMs: 500, tailRecoverMs: 625, tailGapMs: 1500,
     tailDamage: 40, tailKnock: 13,
+    // step 33d - the ROAR (phase two only), see below
+    roarFirstMs: 3000, roarEveryMs: 15000, roarRange: 45,
+    roarSwellMs: 1250, roarAfterMs: 958, roarDazeMs: 2000, roarGapMs: 1500,
     p2: { summon: 4, breaths: 2, fanSpread: 0.35, swoopEveryMs: 3500, emberEveryMs: 11200, tailEveryMs: 4900 }
 };
+
+/* ---- The dragon's ROAR (step 33d) ---------------------------------------------
+   Phase two only: roarFirstMs after it turns, then every roarEveryMs, when somebody
+   living is within roarRange. Roar, 53 frames:
+
+     swell  roarSwellMs  its chest fills and its throat glows (frames 0-30) - the
+                         warning: get something between you and it
+     roar   roarAfterMs  the shout (frame 30 on). Everybody living within roarRange
+                         with a clear line to it on the ground (nav.losClear - any
+                         collider in the way is cover, a barrel as much as a wall) is
+                         dazed for roarDazeMs: their screen blurs and shakes. No damage.
+
+   All through it: planted, no breath; swoop, rain and tail wait roarGapMs after it,
+   and it waits as long after them. b.roar = { e, until }. */
 
 /* ---- The dragon's TAIL SWEEP (step 33c) ---------------------------------------
    It keeps its distance, and this is what it does to whoever does not: when somebody
@@ -445,6 +462,7 @@ function spawnBoss(room, players, now) {
         dashAt: now + GHOST.dashFirstMs,                // step 31d - read by the ghost only
         emberAt: now + DRAGON.emberFirstMs,             // step 33b - read by the dragon only
         tailAt: now + DRAGON.tailFirstMs,               // step 33c - read by the dragon only
+        roarAt: Infinity,                               // step 33d - set when the dragon turns (phase two)
         chargeUntil: 0
     };
     room.bossAlive = true;
@@ -1418,6 +1436,7 @@ function endEmber(b, now, sink) {
     b.ember = null;
     b.abilityAt = Math.max(b.abilityAt || 0, now + DRAGON.emberGapMs);   // no swoop straight after
     b.tailAt = Math.max(b.tailAt || 0, now + DRAGON.tailGapMs);          // step 33c: nor a tail
+    b.roarAt = Math.max(b.roarAt || 0, now + DRAGON.roarGapMs);          // step 33d: nor a roar
     b.lastShot = now + 300;                                             // a breath before the breath
     sink.embers.push({ e: "done" });
 }
@@ -1495,9 +1514,50 @@ function tickTail(room, b, players, now, sink) {
         b.tail = null;
         b.abilityAt = Math.max(b.abilityAt || 0, now + DRAGON.tailGapMs);
         b.emberAt = Math.max(b.emberAt || 0, now + DRAGON.tailGapMs);
+        b.roarAt = Math.max(b.roarAt || 0, now + DRAGON.roarGapMs);    // step 33d
         b.tailAt = now + (b.phase === 2 ? DRAGON.p2.tailEveryMs : DRAGON.tailEveryMs);
         b.lastShot = now + 300;
         sink.tails.push({ e: "done" });
+    }
+}
+
+/* The ROAR (step 33d): is anybody living within roarRange? */
+function roarDue(room, players, b) {
+    for (const id in players) {
+        const p = players[id];
+        if (p.room === room.code && p.alive && Math.hypot(p.x - b.x, p.z - b.z) <= DRAGON.roarRange) return true;
+    }
+    return false;
+}
+
+function startRoar(b, now, sink) {
+    b.roar = { e: "swell", until: now + DRAGON.roarSwellMs };
+    b.chargeUntil = 0;
+    sink.roarAttacks.push({ e: "swell", ms: DRAGON.roarSwellMs, r: DRAGON.roarRange });
+}
+
+/* swell -> the shout: who it reaches (in range, nothing between) -> done */
+function tickRoar(room, b, players, now, sink) {
+    const s = b.roar;
+    if (now < s.until) return;
+    if (s.e === "swell") {
+        const dazed = [], covered = [];
+        for (const id in players) {
+            const p = players[id];
+            if (p.room !== room.code || !p.alive) continue;
+            if (Math.hypot(p.x - b.x, p.z - b.z) > DRAGON.roarRange) continue;
+            (nav.losClear(b.x, b.z, p.x, p.z) ? dazed : covered).push(id);
+        }
+        s.e = "roar"; s.until = now + DRAGON.roarAfterMs;
+        sink.roarAttacks.push({ e: "roar", ms: DRAGON.roarAfterMs, hit: dazed, safe: covered, daze: DRAGON.roarDazeMs });
+    } else {
+        b.roar = null;
+        b.abilityAt = Math.max(b.abilityAt || 0, now + DRAGON.roarGapMs);
+        b.emberAt = Math.max(b.emberAt || 0, now + DRAGON.roarGapMs);
+        b.tailAt = Math.max(b.tailAt || 0, now + DRAGON.roarGapMs);
+        b.roarAt = now + DRAGON.roarEveryMs;
+        b.lastShot = now + 300;
+        sink.roarAttacks.push({ e: "done" });
     }
 }
 
@@ -1515,6 +1575,12 @@ function tickAbility(room, b, players, near, now, dt, sink) {
            between swoops - never in the middle of one */
         if (b.ember) { tickEmber(room, b, players, now, sink); return; }
         if (b.tail) { tickTail(room, b, players, now, sink); return; }          // step 33c
+        if (b.roar) { tickRoar(room, b, players, now, sink); return; }          // step 33d
+        // step 33d: the ROAR, phase two only (roarAt is Infinity until it turns)
+        if (!(b.chargeUntil && now < b.chargeUntil) && now >= b.roarAt) {
+            if (roarDue(room, players, b)) { startRoar(b, now, sink); return; }
+            b.roarAt = now + 1000;                              // nobody near enough - look again in a second
+        }
         // step 33c: TAIL SWEEP for whoever comes too close - asked before the rain, which runs on a clock
         if (!(b.chargeUntil && now < b.chargeUntil) && now >= b.tailAt && tailDue(room, players, b)) {
             startTail(b, now, sink);
@@ -1532,6 +1598,7 @@ function tickAbility(room, b, players, near, now, dt, sink) {
             b.abilityAt = now + (b.phase === 2 ? DRAGON.p2.swoopEveryMs : DRAGON.swoopEveryMs);
             b.chargeUntil = now + DRAGON.swoopForMs;
             b.tailAt = Math.max(b.tailAt || 0, now + DRAGON.swoopForMs + DRAGON.tailGapMs);   // step 33c: not the tail straight after
+            b.roarAt = Math.max(b.roarAt || 0, now + DRAGON.swoopForMs + DRAGON.roarGapMs);   // step 33d: nor the roar
 
             sink.roars.push({ p: [round2(b.x), round2(b.z)] });
         }
@@ -1625,6 +1692,7 @@ function enterPhase2(room, b, players, now, sink) {
     if (b.type.id === "dragon") {
         summoned = bandits.summon(room, players, b.x, b.z, DRAGON.p2.summon);
         b.abilityAt = Math.min(b.abilityAt, now + 1500);   // and it comes for you
+        b.roarAt = now + DRAGON.roarFirstMs;               // step 33d: and from now on it roars
     }
     sink.bossPhase = { t: b.typeIndex, s: summoned };
     sink.roars.push({ p: [round2(b.x), round2(b.z)] });
@@ -1714,7 +1782,7 @@ function stepBoss(room, b, players, now, dt, sink) {
     // its gun for a SPECTRAL SHOT until it is down again (step 31b), and its hand for a GRAVE BURST (step 31c),
     // and all through a GHOST DASH (step 31d) - the charge itself is tickDash's, not the walking's;
     // the dragon from takeoff to landing in an EMBER RAIN (step 33b), and all through a TAIL SWEEP (step 33c)
-    const dueling = !!b.duel || (b.staggerUntil && now < b.staggerUntil) || !!b.scatter || !!b.harvest || !!b.spectral || !!b.grave || !!b.dash || !!b.ember || !!b.tail;
+    const dueling = !!b.duel || (b.staggerUntil && now < b.staggerUntil) || !!b.scatter || !!b.harvest || !!b.spectral || !!b.grave || !!b.dash || !!b.ember || !!b.tail || !!b.roar;
     const planted = b.gState === "spin" || b.gState === "fire" || dueling;
     const baseSpeed = b.type.speed * (b.phase === 2 ? PHASE2.speedScale : 1);
     const speed = b.state === "chase" ? baseSpeed : baseSpeed * 0.55;
@@ -1886,6 +1954,7 @@ function emptySink() {
         dashes: [],                                                 // step 31d: its GHOST DASH
         embers: [],                                                 // step 33b: the dragon's EMBER RAIN
         tails: [],                                                  // step 33c: its TAIL SWEEP
+        roarAttacks: [],                                            // step 33d: its ROAR (not `roars` - that is the old swoop/phase roar sound)
         bossSpawn: null, bossDied: null, bossPhase: null, wave: null,
         missionHits: [], missionEnd: null, missionState: null      // step 24, see missions.js
     };
@@ -1898,6 +1967,7 @@ const HARVEST_CODE = { summon: 7, spin: 8, tired: 9 };
 const DASH_CODE = { mist: 14, gone: 15, appear: 16, dash: 17, recover: 18 };
 const EMBER_CODE = { takeoff: 21, spit: 22, hover: 23, land: 24 };
 const TAIL_CODE = { charge: 25, sweep: 26, recover: 27 };
+const ROAR_CODE = { swell: 28, roar: 29 };
 function snapshot(room, now) {
     const b = room.boss;
     if (!b || !b.alive) return null;
@@ -1942,6 +2012,8 @@ function snapshot(room, now) {
     /* step 33c: TAIL SWEEP - 25 crouching, 26 sweeping, 27 getting up (ms left in that
        part), and which way it spins (field 11: 1 or -1) */
     else if (b.tail) snap.push(TAIL_CODE[b.tail.e], "", Math.max(0, Math.round(b.tail.until - t)), b.tail.dir);
+    /* step 33d: the ROAR - 28 swelling, 29 roaring (ms left in that part) */
+    else if (b.roar) snap.push(ROAR_CODE[b.roar.e], "", Math.max(0, Math.round(b.roar.until - t)));
     return snap;
 }
 

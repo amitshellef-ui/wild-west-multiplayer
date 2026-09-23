@@ -1810,6 +1810,7 @@ function initNetwork() {
     NET.socket.on('boss-spectral', onBossSpectral);     // step 31b: the ghost's SPECTRAL SHOT
     NET.socket.on('boss-grave', onBossGrave);           // step 31c: its GRAVE BURST
     NET.socket.on('boss-dash', onBossDash);             // step 31d: its GHOST DASH
+    NET.socket.on('boss-ember', onBossEmber);           // step 33b: the dragon's EMBER RAIN
 
     NET.socket.on('boss-died', function (m) {
         if (!m) return;
@@ -3804,7 +3805,14 @@ const BOSS_DRAGON = {
     poolRadius: 4.2, poolDamage: 8, poolLife: 4,
     swoopTrigger: 22, swoopEveryMs: 6000, swoopForMs: 1400, swoopSpeed: 16,
     swoopHitRange: 2.9, swoopDamage: 30,
-    p2: { summon: 4, breaths: 2, fanSpread: 0.35, swoopEveryMs: 3500 }
+    // step 33b - EMBER RAIN (online only - single player keeps the breath and the swoop)
+    emberFirstMs: 8000, emberEveryMs: 16000, emberRange: 35,
+    takeoffMs: 800, liftTo: 6, spitMs: 917, spitAtMs: 583,
+    warnMs: 1200, spreadMs: 400, hoverAfterMs: 300, landMs: 700, emberGapMs: 2000,
+    emberCount: 12, emberPerPlayer: 2, emberMax: 20, emberNear: 0.5, aroundR: 5, randomR: 16,
+    emberRadius: 1.6, emberDamage: 25,
+    emberPoolRadius: 1.5, emberPoolLife: 3, emberPoolTick: 0.6, emberPoolDamage: 3,
+    p2: { summon: 4, breaths: 2, fanSpread: 0.35, swoopEveryMs: 3500, emberEveryMs: 11200 }
 };
 
 /* The skeleton's duel, HIGH NOON (step 30b) - SKELETON in boss.js; online those are
@@ -5870,6 +5878,7 @@ function destroyNetBoss() {
     spectralClear();                                         // step 31b
     graveClear();                                            // step 31c
     dashClear();                                             // step 31d
+    emberClear(false);                                       // step 33b
     if (SCATTER.e || SCATTER.standAt || SCATTER.bones.length) scatterStep({ e: 'clear' });   // step 30c
     if (netBoss.mesh) {
         banditGroup.remove(netBoss.mesh);
@@ -5917,6 +5926,7 @@ function onBossState(m) {
         spectralFromSnapshot(r);             // step 31b: the ghost's SPECTRAL SHOT
         graveFromSnapshot(r);                // step 31c: its GRAVE BURST
         dashFromSnapshot(r);                 // step 31d: its GHOST DASH
+        emberFromSnapshot(r);                // step 33b: the dragon's EMBER RAIN
         netBoss.buf.push({ t: performance.now(), x: r[0], z: r[1], yaw: r[2] });
         if (netBoss.buf.length > 14) netBoss.buf.shift();
         netBoss.countdown = -1;
@@ -6508,6 +6518,7 @@ function startNetBossDeath() {
     spectralClear();                                                                         // step 31b
     graveClear();                                                                            // step 31c
     dashClear();                                                                             // step 31d
+    emberClear(true);                                                                        // step 33b: shot down in the air, it falls
     if (DUEL.on || DUEL.standAt) duelEnd('clear');
     netBoss.alive = false;
     netBoss.deathT = 0;
@@ -7369,6 +7380,265 @@ function updateDash(delta) {
     }
 }
 
+/* ---- EMBER RAIN - the dragon spits fire at the sky (step 33b) ----------------
+   The server owns all of it and says what part it is in (boss-ember): "takeoff" -
+   TakeOff, it rises `h` metres over `ms` (the same curve as liftOf in boss.js, so the
+   body is where the server's line of fire thinks it is); "spit" - SpitUp, and `lead`
+   ms in, a mouthful of embers thrown up out of its mouth; "rain" - where every ember
+   is going to land and in how many ms (`d`), and how wide (`r`): a ring opens on the
+   ground at each spot, with a ring inside it closing to the middle as the moment
+   comes, and the ember itself falls out of the sky onto it; "hit" - who one got;
+   "hover" - Hover, up there until they are all down; "land" - back down; "done". The
+   bang and the pool of fire where each lands are the server's boss-boom (k "fire",
+   e 1). "MOVE" in the middle of the screen for whoever is standing in a ring. */
+const EMBER = { e: null, t0: 0, ms: 1, h: 0, lead: 0, spitAt: 0, drops: [], sparks: [], told: false, hud: null,
+    fallT0: 0, fallFrom: 0, standAt: 0 };
+const EMBER_HEX = 0xff5a1a;
+let _emberRingGeo = null, _emberDiscGeo = null, _emberBallGeo = null, _emberTailGeo = null;
+let _emberBallMat = null, _emberTailMat = null;
+
+function emberRig() { return netBoss.rig && netBoss.rig.model && netBoss.rig.model.kind === 'model' ? netBoss.rig.model : null; }
+
+/* How high it is flying - the same curve as liftOf in boss.js. */
+function emberLift(now) {
+    if (!EMBER.e) return 0;
+    const k = Math.min(1, Math.max(0, (now - EMBER.t0) / EMBER.ms));
+    if (EMBER.e === 'takeoff') return EMBER.h * k * (2 - k);
+    if (EMBER.e === 'land') return EMBER.h * (1 - k * k);
+    return EMBER.h;
+}
+/* Shot down up there: it drops, the way a thing that heavy would. */
+function emberFallY(now) {
+    const t = (now - EMBER.fallT0) / 1000;
+    const y = EMBER.fallFrom - 0.5 * 18 * t * t;
+    if (y <= 0) { EMBER.fallT0 = 0; return 0; }
+    return y;
+}
+
+function emberRainParts() {
+    if (_emberRingGeo) return;
+    _emberRingGeo = new THREE.RingGeometry(0.9, 1, 40);
+    _emberRingGeo.rotateX(-Math.PI / 2);
+    _emberDiscGeo = new THREE.CircleGeometry(1, 32);
+    _emberDiscGeo.rotateX(-Math.PI / 2);
+    _emberBallGeo = new THREE.SphereGeometry(0.45, 10, 8);
+    // the streak behind it: a cone, point up, from the ball to 5 m above it
+    _emberTailGeo = new THREE.ConeGeometry(0.4, 5, 8, 1, true);
+    _emberTailGeo.rotateX(Math.PI);
+    _emberTailGeo.translate(0, 2.5, 0);
+    // not tone mapped: through ACES a bright orange comes out beige against the sky
+    _emberBallMat = new THREE.MeshBasicMaterial({ color: 0xffb040, fog: false, toneMapped: false });
+    _emberTailMat = new THREE.MeshBasicMaterial({ color: 0xff5a10, transparent: true, opacity: 0.75, depthWrite: false, blending: THREE.AdditiveBlending, fog: false, toneMapped: false });
+}
+/* One landing spot: its ring on the ground and the ember on its way down to it. */
+function makeEmberDrop(x, z, r, ms, now) {
+    emberRainParts();
+    const flat = { transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 };
+    const g = new THREE.Group();
+    const disc = new THREE.Mesh(_emberDiscGeo, new THREE.MeshBasicMaterial(Object.assign({ color: 0x5a1204, opacity: 0.15 }, flat)));
+    const edge = new THREE.Mesh(_emberRingGeo, new THREE.MeshBasicMaterial(Object.assign({ color: EMBER_HEX, opacity: 0.85, side: THREE.DoubleSide }, flat)));
+    const inner = new THREE.Mesh(_emberRingGeo, new THREE.MeshBasicMaterial(Object.assign({ color: 0xffd080, opacity: 0.9, side: THREE.DoubleSide }, flat)));
+    disc.position.y = 0.035; edge.position.y = 0.04; inner.position.y = 0.045;
+    disc.renderOrder = 2; edge.renderOrder = 3; inner.renderOrder = 3;
+    disc.scale.set(r, 1, r); edge.scale.set(r, 1, r); inner.scale.set(r, 1, r);
+    g.add(disc); g.add(edge); g.add(inner);
+    const ball = new THREE.Group();
+    ball.add(new THREE.Mesh(_emberBallGeo, _emberBallMat));
+    ball.add(new THREE.Mesh(_emberTailGeo, _emberTailMat));
+    ball.visible = false;
+    g.add(ball);
+    g.traverse(function (o) { o.raycast = function () { }; });
+    g.position.set(x, 0, z);
+    scene.add(g);
+    return { g: g, disc: disc, edge: edge, inner: inner, ball: ball, x: x, z: z, r: r, t0: now, T: now + Math.max(1, ms) };
+}
+function dropEmberDrop(D) {
+    scene.remove(D.g);
+    [D.disc, D.edge, D.inner].forEach(function (m) { m.material.dispose(); });
+}
+function emberHud() {
+    if (EMBER.hud) return EMBER.hud;
+    const d = document.createElement('div');
+    d.id = 'ember-hud';
+    d.style.cssText = 'position:fixed;top:40%;left:50%;transform:translate(-50%,-50%);z-index:40;pointer-events:none;display:none;' +
+        'text-align:center;font:bold 44px Georgia,serif;letter-spacing:4px;color:#ffb060;text-shadow:0 0 12px #8a2000,0 0 4px #000;white-space:nowrap';
+    document.body.appendChild(d);
+    return (EMBER.hud = d);
+}
+/* Where its mouth is: the muzzle point on the head bone, or up at the head of a cube rig. */
+function emberMouth(out) {
+    if (netBoss.rig && netBoss.rig.parts.muzzle) return netBoss.rig.parts.muzzle.getWorldPosition(out);
+    if (netBoss.mesh) return out.copy(netBoss.mesh.position).setY(netBoss.mesh.position.y + 2.8);
+    return out.set(0, 2.8, 0);
+}
+/* Three big beats of the wings. */
+function sfxWingBeats(pos) {
+    const d = chain(pos, 0.9, 60); if (!d) return;
+    for (let i = 0; i < 3; i++) {
+        noiseBurst(d, { type: 'lowpass', freq: 260, sweepTo: 120, dur: 0.22, vol: 0.9, delay: i * 0.26 });
+        tone(d, { type: 'sine', f0: 70, f1: 40, dur: 0.2, vol: 0.3, delay: i * 0.26 });
+    }
+}
+/* One ember coming down: a thump, and a crackle of fire. */
+function sfxEmberHit(pos) {
+    const d = chain(pos, 0.7, 45); if (!d) return;
+    tone(d, { type: 'sine', f0: 120, f1: 40, dur: 0.25, vol: 0.35 });
+    noiseBurst(d, { type: 'lowpass', freq: 1400, sweepTo: 220, dur: 0.3, vol: 0.45 });
+    for (let i = 0; i < 4; i++) noiseBurst(d, { type: 'bandpass', freq: 2200 + Math.random() * 2000, q: 5, dur: 0.03, vol: 0.25, delay: 0.05 + Math.random() * 0.25 });
+}
+
+/* Whole-body clips of its own; letting go of them lets Death play (rigDie). */
+function emberLetGo(rig) {
+    if (rig && (rig.full === 'TakeOff' || rig.full === 'SpitUp' || rig.full === 'Hover')) rig.full = null;
+}
+
+function emberClear(falling) {
+    const rig = emberRig();
+    if (falling && EMBER.e && netBoss.mesh) { EMBER.fallFrom = netBoss.mesh.position.y; EMBER.fallT0 = performance.now(); }
+    else EMBER.fallT0 = 0;
+    emberLetGo(rig);
+    EMBER.drops.forEach(dropEmberDrop);
+    EMBER.drops.length = 0;
+    EMBER.sparks.forEach(function (s) { scene.remove(s.m); });
+    EMBER.sparks.length = 0;
+    EMBER.e = null; EMBER.spitAt = 0; EMBER.standAt = 0;
+    if (EMBER.hud) EMBER.hud.style.display = 'none';
+}
+
+/* One part of it, from the event or (late) from the snapshot: `skip` ms already gone. */
+function emberStep(m, late) {
+    const now = performance.now();
+    const rig = emberRig();
+    const at = netBoss.mesh ? netBoss.mesh.position : null;
+    const part = function (e, ms, full) {
+        EMBER.e = e; EMBER.ms = Math.max(1, full); EMBER.t0 = now - Math.max(0, full - ms);
+    };
+    if (m.e === 'takeoff') {
+        const ms = typeof m.ms === 'number' ? m.ms : BOSS_DRAGON.takeoffMs;
+        EMBER.h = typeof m.h === 'number' ? m.h : BOSS_DRAGON.liftTo;
+        part('takeoff', ms, BOSS_DRAGON.takeoffMs);
+        EMBER.standAt = 0;
+        if (rig) rigFull(rig, 'TakeOff', { fade: 0.15 });
+        if (at && !late) sfxWingBeats(at);
+    } else if (m.e === 'spit') {
+        const ms = typeof m.ms === 'number' ? m.ms : BOSS_DRAGON.spitMs;
+        EMBER.h = EMBER.h || BOSS_DRAGON.liftTo;
+        part('spit', ms, BOSS_DRAGON.spitMs);
+        const lead = typeof m.lead === 'number' ? m.lead : BOSS_DRAGON.spitAtMs;
+        EMBER.spitAt = late ? 0 : now + lead;
+        if (rig) rigFull(rig, 'SpitUp', { fade: 0.12 });
+    } else if (m.e === 'rain') {
+        if (!Array.isArray(m.d)) return;
+        const r = typeof m.r === 'number' ? m.r : BOSS_DRAGON.emberRadius;
+        EMBER.drops.forEach(dropEmberDrop);
+        EMBER.drops.length = 0;
+        m.d.forEach(function (q) {
+            if (Array.isArray(q) && typeof q[0] === 'number' && typeof q[1] === 'number') EMBER.drops.push(makeEmberDrop(q[0], q[1], r, typeof q[2] === 'number' ? q[2] : BOSS_DRAGON.warnMs, now));
+        });
+        if (!EMBER.told) {
+            EMBER.told = true;
+            pushFeed('EMBER RAIN — WALK OUT OF THE RINGS BEFORE THEY LAND');
+        }
+    } else if (m.e === 'hit') {
+        if (Array.isArray(m.hit) && m.hit.indexOf(NET.id) >= 0) {
+            camShake = Math.min(0.9, camShake + 0.4);
+            pushFeed('THE EMBERS CAUGHT YOU — DON\'T STAND STILL');
+        }
+    } else if (m.e === 'hover') {
+        const ms = typeof m.ms === 'number' ? m.ms : 1500;
+        EMBER.h = EMBER.h || BOSS_DRAGON.liftTo;
+        part('hover', ms, ms);
+        if (rig) rigFull(rig, 'Hover', { loop: true, fade: 0.25 });
+    } else if (m.e === 'land') {
+        const ms = typeof m.ms === 'number' ? m.ms : BOSS_DRAGON.landMs;
+        EMBER.h = EMBER.h || BOSS_DRAGON.liftTo;
+        part('land', ms, BOSS_DRAGON.landMs);
+        if (rig) rigFull(rig, 'Hover', { loop: true, fade: 0.25 });
+    } else if (m.e === 'done') {
+        const was = !!EMBER.e;
+        EMBER.e = null; EMBER.spitAt = 0;
+        if (was && rig && netBoss.alive) EMBER.standAt = now + 30;
+    }
+}
+
+function onBossEmber(m) {
+    if (!m || typeof m.e !== 'string' || !netBoss.active || !netBoss.alive) return;
+    emberStep(m, false);
+}
+
+/* The snapshot's fields 8-10 with 21-24 in 8 (a latecomer, or a missed event): the
+   part and how long is left of it - enough for the height and the clip. The rings a
+   latecomer missed stay missed; the next rain has them. */
+const EMBER_PARTS = { 21: 'takeoff', 22: 'spit', 23: 'hover', 24: 'land' };
+function emberFromSnapshot(r) {
+    const e = EMBER_PARTS[r[8]];
+    if (e) {
+        if (EMBER.e !== e && typeof r[10] === 'number') emberStep({ e: e, ms: r[10] }, true);
+    } else if (EMBER.e && performance.now() > EMBER.t0 + EMBER.ms + 1500) {
+        emberStep({ e: 'done' });                                    // the ending never arrived
+    }
+}
+
+function updateEmber(delta) {
+    const now = performance.now();
+    if (EMBER.standAt && now >= EMBER.standAt) {
+        EMBER.standAt = 0;
+        const rig = emberRig();
+        if (rig && netBoss.alive && !EMBER.e && (rig.full === 'TakeOff' || rig.full === 'SpitUp' || rig.full === 'Hover')) rigStand(rig, 0.35);
+    }
+    // the mouthful leaving: sparks thrown up out of its mouth, and the roar of it
+    if (EMBER.spitAt && now >= EMBER.spitAt) {
+        EMBER.spitAt = 0;
+        emberRainParts();
+        const mouth = emberMouth(new THREE.Vector3());
+        sfxFireBreath(mouth);
+        spawnParticles(mouth.clone(), 0xff7a1a, 16, 4);
+        for (let i = 0; i < 10; i++) {
+            const m = new THREE.Mesh(_emberBallGeo, _emberBallMat);
+            m.raycast = function () { };
+            m.position.copy(mouth);
+            m.scale.setScalar(0.6 + Math.random() * 0.5);
+            scene.add(m);
+            EMBER.sparks.push({ m: m, vx: (Math.random() - 0.5) * 6, vy: 26 + Math.random() * 10, vz: (Math.random() - 0.5) * 6, life: 1.1 });
+        }
+    }
+    for (let i = EMBER.sparks.length - 1; i >= 0; i--) {
+        const s = EMBER.sparks[i];
+        s.life -= delta;
+        s.m.position.x += s.vx * delta; s.m.position.y += s.vy * delta; s.m.position.z += s.vz * delta;
+        if (s.life <= 0) { scene.remove(s.m); EMBER.sparks.splice(i, 1); }
+    }
+    // the rings, and each ember on its way down: 0.9 s out of the sky onto its spot
+    let say = false;
+    const me = camera.position;
+    for (let i = EMBER.drops.length - 1; i >= 0; i--) {
+        const D = EMBER.drops[i];
+        const left = D.T - now;
+        if (left <= 0) {
+            dropEmberDrop(D);                        // the bang and the pool are the server's boss-boom
+            EMBER.drops.splice(i, 1);
+            continue;
+        }
+        const k = Math.min(1, Math.max(0, (now - D.t0) / (D.T - D.t0)));
+        D.disc.material.opacity = 0.15 + 0.4 * k;
+        const pulse = 0.9 + 0.1 * Math.sin(now * 0.025);
+        D.edge.scale.set(D.r * pulse, 1, D.r * pulse);
+        D.edge.material.opacity = 0.65 + 0.3 * Math.sin(now * 0.02);
+        const s = Math.max(0.04, D.r * (1 - k));
+        D.inner.scale.set(s, 1, s);
+        if (left < 900) {
+            D.ball.visible = true;
+            D.ball.position.y = 0.3 + 40 * (left / 900);
+        }
+        if (playerHealth > 0 && Math.hypot(me.x - D.x, me.z - D.z) <= D.r + 0.2) say = true;
+    }
+    const hud = say ? emberHud() : EMBER.hud;
+    if (hud) {
+        if (say) { hud.style.display = 'block'; hud.textContent = '⚠ MOVE ⚠'; }
+        else hud.style.display = 'none';
+    }
+}
+
 function updateNetBoss(delta) {
     if (!netBoss.active || !netBoss.rig) return;
 
@@ -7386,6 +7656,8 @@ function updateNetBoss(delta) {
                 P.armL.rotation.x = -e * 0.9;
                 P.armR.rotation.x = -e * 1.2;
             }
+            // step 33b: shot down in the middle of an EMBER RAIN - it falls out of the sky
+            if (EMBER.fallT0 && netBoss.mesh) netBoss.mesh.position.y = emberFallY(performance.now());
             // the last boss stays where it fell until the next game (step 28)
             if (netBoss.deathT > 2.4 && !(netBoss.type && netBoss.type.final)) destroyNetBoss();
         }
@@ -7402,7 +7674,7 @@ function updateNetBoss(delta) {
     const shown = sampleAt(netBoss.buf, performance.now() - INTERP_DELAY);
     if (!shown) return;
     const m = netBoss.mesh;
-    m.position.set(shown.x, 0, shown.z);
+    m.position.set(shown.x, emberLift(performance.now()), shown.z);   // step 33b: up in the air in an EMBER RAIN
     m.rotation.y = shown.yaw;
 
     let inst = 0;
@@ -7515,7 +7787,7 @@ function spawnEmbers(point, color, count, spd) {
 
 const FIRE_COLORS = [0xff5a10, 0xff9a2a, 0xffd060];
 
-function spawnFirePool(x, z, radius, life) {
+function spawnFirePool(x, z, radius, life, small) {
     // normal blending: added on top of the bright sand it burned out to white
     const mat = new THREE.MeshBasicMaterial({ map: firePoolTexture(), transparent: true, depthWrite: false, opacity: 0 });
     const mesh = new THREE.Mesh(_firePoolGeo, mat);
@@ -7527,6 +7799,15 @@ function spawnFirePool(x, z, radius, life) {
     scene.add(mesh);
     firePools.push({ mesh: mesh, life: life, max: life, puff: 0, r: radius, x: x, z: z, seed: Math.random() * 10 });
     const p = new THREE.Vector3(x, 0.5, z);
+    if (small) {
+        // step 33b: up to twenty of these land in a second and a half - less of everything
+        spawnParticles(p, 0xff7a1a, 10, 5);
+        spawnDust(p.clone().setY(0.1), 5);
+        sfxEmberHit(p);
+        const ds = camera.position.distanceTo(p);
+        if (ds < 5) camShake = Math.min(0.5, camShake + 0.15 * (1 - ds / 5));
+        return;
+    }
     spawnParticles(p, 0xff7a1a, 26, 7);
     spawnEmbers(p, 0xffc050, 18, 3);
     spawnDust(p.clone().setY(0.1), 12);
@@ -7704,8 +7985,9 @@ function onBossBoom(m) {
         sfxSteam(p);
         netClouds.push({ pos: p.clone(), life: m.l || 3, puff: 0, steam: true, r: m.r || 3 });
     } else if (m.k === 'fire') {
-        // the dragon's breath came down (step 28) - the server does the burning
-        spawnFirePool(p.x, p.z, m.r || BOSS_DRAGON.poolRadius, m.l || BOSS_DRAGON.poolLife);
+        // the dragon's breath came down (step 28) - the server does the burning;
+        // `e`: one ember of an EMBER RAIN (step 33b), a small pool and a smaller bang
+        spawnFirePool(p.x, p.z, m.r || BOSS_DRAGON.poolRadius, m.l || BOSS_DRAGON.poolLife, !!m.e);
     } else {
         spawnParticles(p.clone(), 0x44ff66, 20, 3);
         sfxRevolver(p);
@@ -10123,6 +10405,7 @@ function animate() {
     updateSpectral(delta);
     updateGrave(delta);
     updateDash(delta);
+    updateEmber(delta);                  // step 33b
     updateNetHazards(delta);
     updateBanditBullets(delta);
     updateModelRigs(delta);

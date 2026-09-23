@@ -136,8 +136,40 @@ const DRAGON = {
     poolRadius: 4.2, poolDamage: 8, poolLife: 4,     // bites every BOSS.cloudTick like the poison
     swoopTrigger: 22, swoopEveryMs: 6000, swoopForMs: 1400, swoopSpeed: 16,
     swoopHitRange: 2.9, swoopDamage: 30,
-    p2: { summon: 4, breaths: 2, fanSpread: 0.35, swoopEveryMs: 3500 }
+    // step 33b - EMBER RAIN, see below
+    emberFirstMs: 8000, emberEveryMs: 16000, emberRange: 35,
+    takeoffMs: 800, liftTo: 6, spitMs: 917, spitAtMs: 583,
+    warnMs: 1200, spreadMs: 400, hoverAfterMs: 300, landMs: 700, emberGapMs: 2000,
+    emberCount: 12, emberPerPlayer: 2, emberMax: 20, emberNear: 0.5, aroundR: 5, randomR: 16,
+    emberRadius: 1.6, emberDamage: 25,
+    emberPoolRadius: 1.5, emberPoolLife: 3, emberPoolTick: 0.6, emberPoolDamage: 3,
+    p2: { summon: 4, breaths: 2, fanSpread: 0.35, swoopEveryMs: 3500, emberEveryMs: 11200 }
 };
+
+/* ---- The dragon's EMBER RAIN (step 33b) ---------------------------------------
+   Every emberEveryMs (the first emberFirstMs after it arrives; p2 30% sooner) it
+   picks everybody living within emberRange - no line needed, it comes down from the
+   sky - and goes:
+
+     takeoff  takeoffMs   TakeOff: it beats its wings and rises liftTo metres
+     spit     spitMs      SpitUp: head back, and at spitAtMs a mouthful of embers
+                          thrown at the sky. That is the moment every landing spot
+                          is picked and told (`rain`): emberNear of them round the
+                          players - the first one right where each of them is standing,
+                          the others within aroundR of one of them - and the rest
+                          anywhere within randomR of the dragon. Each lands warnMs
+                          (+ up to spreadMs) later, with a ring on the ground until then.
+     hover    ...         Hover, high up, until the last one is down and judged
+     land     landMs      back down to the ground
+
+   Where one lands: emberDamage to everybody within emberRadius, and a small pool of
+   fire (emberPool*) that burns for a while. It is judged the way the ghost's circle is
+   (SKELETON dodgeFromMs / dodgeToMs): any sample of where their feet were in that
+   window outside it, and it missed - what they saw arrived late, and so does their
+   step. Standing still is what it punishes; walking out of the ring is the answer.
+   All through it: planted, no breath and no swoop (the swoop waits emberGapMs after
+   it). It can be shot the whole time - up in the air, which the line of fire knows
+   (liftOf, server.js boss-hit). b.ember = { e, until, spitAt, drops, feet }. */
 
 /* ---- The skeleton's duel, HIGH NOON (step 30b) ------------------------------
    Every duelEveryMs (the first duelFirstMs after it arrives) it picks one player
@@ -385,6 +417,7 @@ function spawnBoss(room, players, now) {
         spectralAt: now + GHOST.spectralFirstMs,        // step 31b - read by the ghost only
         graveAt: now + GHOST.graveFirstMs,              // step 31c - read by the ghost only
         dashAt: now + GHOST.dashFirstMs,                // step 31d - read by the ghost only
+        emberAt: now + DRAGON.emberFirstMs,             // step 33b - read by the dragon only
         chargeUntil: 0
     };
     room.bossAlive = true;
@@ -580,7 +613,7 @@ function stepHazards(room, players, dt, sink) {
         const c = room.clouds[i];
         c.life -= dt;
         c.tick += dt;
-        if (c.tick > BOSS.cloudTick) {
+        if (c.tick > (c.every || BOSS.cloudTick)) {          // step 33b: an ember's pool bites at its own pace
             c.tick = 0;
             splash(room, players, c.x, c.z, c.r || BOSS.cloudRadius, c.dmg || BOSS.cloudDamage, false, sink);
         }
@@ -1218,6 +1251,149 @@ function tickDash(room, b, players, now, dt, sink) {
     }
 }
 
+/* EMBER RAIN (step 33b): everybody living within emberRange - a line is not needed. */
+function emberTargets(room, players, b) {
+    const out = [];
+    for (const id in players) {
+        const p = players[id];
+        if (p.room !== room.code || !p.alive) continue;
+        if (Math.hypot(p.x - b.x, p.z - b.z) <= DRAGON.emberRange) out.push(p);
+    }
+    return out;
+}
+
+/* How high it is flying at `now` - 0 on the ground. The clients draw the same curve. */
+function liftOf(b, now) {
+    const s = b && b.ember;
+    if (!s) return 0;
+    const t = now === undefined ? Date.now() : now;
+    if (s.e === "takeoff") {
+        const k = Math.min(1, Math.max(0, 1 - (s.until - t) / DRAGON.takeoffMs));
+        return DRAGON.liftTo * k * (2 - k);
+    }
+    if (s.e === "land") {
+        const k = Math.min(1, Math.max(0, 1 - (s.until - t) / DRAGON.landMs));
+        return DRAGON.liftTo * (1 - k * k);
+    }
+    return DRAGON.liftTo;
+}
+
+/* A spot an ember can land on: open ground within `r` of (x, z), `min` out at least. */
+function emberSpot(x, z, min, r) {
+    for (let k = 0; k < 10; k++) {
+        const a = Math.random() * Math.PI * 2, d = min + Math.random() * (r - min);
+        const px = x + Math.cos(a) * d, pz = z + Math.sin(a) * d;
+        if (Math.abs(px) < 98 && Math.abs(pz) < 98 && !nav.collidesAt(px, pz, 0.4)) return { x: px, z: pz };
+    }
+    return null;
+}
+
+function startEmber(b, now, sink) {
+    b.ember = { e: "takeoff", until: now + DRAGON.takeoffMs, drops: null, feet: null };
+    b.chargeUntil = 0;                                       // no swoop through it
+    sink.embers.push({ e: "takeoff", ms: DRAGON.takeoffMs, h: DRAGON.liftTo });
+}
+
+/* The mouthful leaves: every landing spot, picked now, and when it lands. */
+function throwEmbers(room, b, players, now, sink) {
+    const s = b.ember;
+    const who = emberTargets(room, players, b);
+    const n = Math.min(DRAGON.emberMax, DRAGON.emberCount + DRAGON.emberPerPlayer * Math.max(0, who.length - 1));
+    const nNear = who.length ? Math.round(n * DRAGON.emberNear) : 0;
+    const spots = [];
+    for (let i = 0; i < who.length && spots.length < nNear; i++) spots.push({ x: who[i].x, z: who[i].z });
+    for (let k = 0; spots.length < nNear && k < nNear * 4; k++) {
+        const p = who[Math.floor(Math.random() * who.length)];
+        const q = emberSpot(p.x, p.z, 1.5, DRAGON.aroundR);
+        if (q) spots.push(q);
+    }
+    for (let k = 0; spots.length < n && k < n * 4; k++) {
+        const q = emberSpot(b.x, b.z, 3, DRAGON.randomR);
+        if (q) spots.push(q);
+    }
+    s.drops = spots.map((q) => ({ x: q.x, z: q.z, T: now + DRAGON.warnMs + Math.random() * DRAGON.spreadMs, landed: false, judged: false }));
+    s.feet = {};
+    recordEmberFeet(room, s, players, now);
+    sink.embers.push({
+        e: "rain", r: DRAGON.emberRadius,
+        d: s.drops.map((q) => [round2(q.x), round2(q.z), Math.round(q.T - now)])
+    });
+}
+
+/* Where every player in the room was for the last second and a half - kept only
+   while embers are on their way down. */
+function recordEmberFeet(room, s, players, now) {
+    for (const id in players) {
+        const p = players[id];
+        if (p.room !== room.code) continue;
+        const hist = s.feet[id] || (s.feet[id] = []);
+        hist.push([now, p.x, p.z]);
+        while (hist.length && hist[0][0] < now - 1500) hist.shift();
+    }
+}
+
+/* Down on the ground: the pool now, the verdict dodgeToMs later. */
+function landEmbers(room, b, players, now, sink) {
+    const s = b.ember;
+    for (let i = 0; i < s.drops.length; i++) {
+        const q = s.drops[i];
+        if (!q.landed && now >= q.T) {
+            q.landed = true;
+            sink.booms.push({ i: room.nextHazardId++, k: "fire", p: [round2(q.x), 0.12, round2(q.z)], l: DRAGON.emberPoolLife, r: DRAGON.emberPoolRadius, e: 1 });
+            room.clouds.push({ x: q.x, z: q.z, life: DRAGON.emberPoolLife, tick: 0, every: DRAGON.emberPoolTick, r: DRAGON.emberPoolRadius, dmg: DRAGON.emberPoolDamage });
+        }
+        if (q.landed && !q.judged && now >= q.T + SKELETON.dodgeToMs) {
+            q.judged = true;
+            const hit = [];
+            for (const id in players) {
+                const p = players[id];
+                if (p.room !== room.code || !p.alive) continue;
+                const hist = (s.feet[id] || []).filter((f) => f[0] >= q.T + SKELETON.dodgeFromMs && f[0] <= q.T + SKELETON.dodgeToMs);
+                if (!hist.length) hist.push([now, p.x, p.z]);
+                const dodged = hist.some((f) => Math.hypot(f[1] - q.x, f[2] - q.z) > DRAGON.emberRadius);
+                if (dodged) continue;
+                hit.push(id);
+                sink.hits.push({ playerId: id, damage: DRAGON.emberDamage, from: "boss" });
+            }
+            if (hit.length) sink.embers.push({ e: "hit", p: [round2(q.x), round2(q.z)], hit: hit });
+        }
+    }
+}
+
+/* takeoff -> spit (the embers leave at spitAtMs) -> hover (until the last one is
+   judged) -> land -> back to the fight */
+function tickEmber(room, b, players, now, sink) {
+    const s = b.ember;
+    if (s.feet) recordEmberFeet(room, s, players, now);
+    if (s.drops) landEmbers(room, b, players, now, sink);
+
+    if (s.e === "spit" && !s.drops && now >= s.spitAt) throwEmbers(room, b, players, now, sink);
+    if (now < s.until) return;
+
+    if (s.e === "takeoff") {
+        s.e = "spit"; s.until = now + DRAGON.spitMs; s.spitAt = now + DRAGON.spitAtMs;
+        sink.embers.push({ e: "spit", ms: DRAGON.spitMs, lead: DRAGON.spitAtMs });
+    } else if (s.e === "spit") {
+        if (!s.drops) throwEmbers(room, b, players, now, sink);
+        let last = now;
+        for (let i = 0; i < s.drops.length; i++) last = Math.max(last, s.drops[i].T + SKELETON.dodgeToMs);
+        s.e = "hover"; s.until = last + DRAGON.hoverAfterMs;
+        sink.embers.push({ e: "hover", ms: Math.round(s.until - now) });
+    } else if (s.e === "hover") {
+        s.e = "land"; s.until = now + DRAGON.landMs;
+        sink.embers.push({ e: "land", ms: DRAGON.landMs });
+    } else if (s.e === "land") {
+        endEmber(b, now, sink);
+    }
+}
+
+function endEmber(b, now, sink) {
+    b.ember = null;
+    b.abilityAt = Math.max(b.abilityAt || 0, now + DRAGON.emberGapMs);   // no swoop straight after
+    b.lastShot = now + 300;                                             // a breath before the breath
+    sink.embers.push({ e: "done" });
+}
+
 /* ---- Abilities ---------------------------------------------------------- */
 function tickAbility(room, b, players, near, now, dt, sink) {
     const id = b.type.id;
@@ -1228,6 +1404,17 @@ function tickAbility(room, b, players, near, now, dt, sink) {
     /* The dragon's swoop (step 28): the charge, with its own numbers. It rides
        on chargeUntil so the walking stands aside and the clients see the flag. */
     if (id === "dragon") {
+        /* step 33b: EMBER RAIN owns it from takeoff to landing, and starts only
+           between swoops - never in the middle of one */
+        if (b.ember) { tickEmber(room, b, players, now, sink); return; }
+        if (!(b.chargeUntil && now < b.chargeUntil) && now >= b.emberAt) {
+            if (emberTargets(room, players, b).length) {
+                b.emberAt = now + (b.phase === 2 ? DRAGON.p2.emberEveryMs : DRAGON.emberEveryMs);
+                startEmber(b, now, sink);
+                return;
+            }
+            b.emberAt = now + 1000;                             // nobody near enough - look again in a second
+        }
         if (b.hasLos && near && near.dist < DRAGON.swoopTrigger && now >= b.abilityAt) {
             b.abilityAt = now + (b.phase === 2 ? DRAGON.p2.swoopEveryMs : DRAGON.swoopEveryMs);
             b.chargeUntil = now + DRAGON.swoopForMs;
@@ -1410,8 +1597,9 @@ function stepBoss(room, b, players, now, dt, sink) {
     // all through BONE SCATTER (step 30c) - no walking (only its leap, tickScatter) and no revolver -
     // and all through BONE HARVEST (step 30d); the ghost from the moment it raises
     // its gun for a SPECTRAL SHOT until it is down again (step 31b), and its hand for a GRAVE BURST (step 31c),
-    // and all through a GHOST DASH (step 31d) - the charge itself is tickDash's, not the walking's
-    const dueling = !!b.duel || (b.staggerUntil && now < b.staggerUntil) || !!b.scatter || !!b.harvest || !!b.spectral || !!b.grave || !!b.dash;
+    // and all through a GHOST DASH (step 31d) - the charge itself is tickDash's, not the walking's;
+    // the dragon from takeoff to landing in an EMBER RAIN (step 33b)
+    const dueling = !!b.duel || (b.staggerUntil && now < b.staggerUntil) || !!b.scatter || !!b.harvest || !!b.spectral || !!b.grave || !!b.dash || !!b.ember;
     const planted = b.gState === "spin" || b.gState === "fire" || dueling;
     const baseSpeed = b.type.speed * (b.phase === 2 ? PHASE2.speedScale : 1);
     const speed = b.state === "chase" ? baseSpeed : baseSpeed * 0.55;
@@ -1580,6 +1768,7 @@ function emptySink() {
         spectrals: [],                                              // step 31b: the ghost's SPECTRAL SHOT
         graves: [],                                                 // step 31c: its GRAVE BURST
         dashes: [],                                                 // step 31d: its GHOST DASH
+        embers: [],                                                 // step 33b: the dragon's EMBER RAIN
         bossSpawn: null, bossDied: null, bossPhase: null, wave: null,
         missionHits: [], missionEnd: null, missionState: null      // step 24, see missions.js
     };
@@ -1590,6 +1779,7 @@ function emptySink() {
 const SCATTER_CODE = { collapse: 3, gone: 4, rise: 5, strike: 6 };
 const HARVEST_CODE = { summon: 7, spin: 8, tired: 9 };
 const DASH_CODE = { mist: 14, gone: 15, appear: 16, dash: 17, recover: 18 };
+const EMBER_CODE = { takeoff: 21, spit: 22, hover: 23, land: 24 };
 function snapshot(room, now) {
     const b = room.boss;
     if (!b || !b.alive) return null;
@@ -1628,6 +1818,9 @@ function snapshot(room, now) {
        open, so a latecomer sees it too), 16 coming out, 17 charging, 18 recovering */
     else if (b.dash && b.dash.e === "gone" && b.dash.mx !== undefined) snap.push(15, b.dash.target || "", Math.max(0, Math.round(b.dash.until - t)), round2(b.dash.mx), round2(b.dash.mz));
     else if (b.dash) snap.push(DASH_CODE[b.dash.e], b.dash.target || "", Math.max(0, Math.round(b.dash.until - t)));
+    /* step 33b: the dragon's EMBER RAIN - 21 taking off, 22 spitting, 23 hovering,
+       24 landing (ms left in that part). Its codes are 21-29. */
+    else if (b.ember) snap.push(EMBER_CODE[b.ember.e], "", Math.max(0, Math.round(b.ember.until - t)));
     return snap;
 }
 
@@ -1663,5 +1856,5 @@ function clearBoss(room) {
 
 module.exports = {
     BOSS, BOSS_TYPES, PHASE2, ROBOT, DRAGON, SKELETON, GHOST, GUN, initRoom, stepRoom, snapshot, hurt,
-    secondsToBoss, clearBoss, emptySink, duelHeadshot
+    secondsToBoss, clearBoss, emptySink, duelHeadshot, liftOf
 };

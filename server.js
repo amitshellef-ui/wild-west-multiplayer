@@ -1077,7 +1077,9 @@ function registerHandlers(socket) {
 
         const b = room.boss;
         if (Math.hypot(shooter.x - b.x, shooter.z - b.z) > w.range * 1.15 + 3) return;
-        if (!inLineOfFire(shooter, b, 1.75)) return;
+        // step 33b: the dragon up in the air in an EMBER RAIN is seen over walls it would be behind on the ground
+        const lift = boss.liftOf(b, now);
+        if (!inLineOfFire(shooter, b, 1.75, lift > 0 ? 1.62 * 1.75 + lift : undefined)) return;
 
         shooter.lastBossHitAt = now;
         const typeIndex = b.typeIndex;
@@ -1338,6 +1340,8 @@ setInterval(() => {
         for (let i = 0; i < sink.graves.length; i++) io.to(code).emit("boss-grave", sink.graves[i]);
         // step 31d: its GHOST DASH - mist, gone, mark (the whirl), appear, dash, hit, recover, done
         for (let i = 0; i < sink.dashes.length; i++) io.to(code).emit("boss-dash", sink.dashes[i]);
+        // step 33b: the dragon's EMBER RAIN - takeoff, spit, rain (where and when each lands), hit, hover, land, done
+        for (let i = 0; i < sink.embers.length; i++) io.to(code).emit("boss-ember", sink.embers[i]);
 
         /* A bullet reached a player. This is where the last piece of trust
            goes away: the server no longer has to believe a client that says it

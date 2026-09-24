@@ -3533,7 +3533,8 @@ function mergeTownForDrawing() {
     const list = [];
     world.traverse(function (o) {
         if (!o.isMesh || Array.isArray(o.material) || !staysPut(o)) return;
-        if (Object.prototype.hasOwnProperty.call(o.material, 'onBeforeCompile')) return;
+        // a shader of its own may lean on the mesh's own matrix - unless it says it works in world space
+        if (Object.prototype.hasOwnProperty.call(o.material, 'onBeforeCompile') && !o.material.userData.mergeOK) return;
         const g = o.geometry;
         if (!g.attributes.position || !g.attributes.normal || !g.attributes.uv) return;
         list.push(o);
@@ -3563,6 +3564,8 @@ function mergeMeshesByLook(list) {
         });
         const pos = new Float32Array(nv * 3), nor = new Float32Array(nv * 3), uv = new Float32Array(nv * 2);
         const idx = nv > 65535 ? new Uint32Array(ni) : new Uint16Array(ni);
+        const colored = list.every(function (o) { return o.geometry.attributes.color && o.geometry.attributes.color.itemSize === 3; });
+        const col = colored ? new Float32Array(nv * 3) : null;   // vertex colours come along when every piece has them
         let vo = 0, io = 0;
         list.forEach(function (o) {
             const g = o.geometry, P = g.attributes.position, N = g.attributes.normal, U = g.attributes.uv;
@@ -3573,6 +3576,7 @@ function mergeMeshesByLook(list) {
                 v.fromBufferAttribute(N, i).applyMatrix3(nm).normalize();
                 nor[(vo + i) * 3] = v.x; nor[(vo + i) * 3 + 1] = v.y; nor[(vo + i) * 3 + 2] = v.z;
                 uv[(vo + i) * 2] = U.getX(i); uv[(vo + i) * 2 + 1] = U.getY(i);
+                if (col) { const C = g.attributes.color; col[(vo + i) * 3] = C.getX(i); col[(vo + i) * 3 + 1] = C.getY(i); col[(vo + i) * 3 + 2] = C.getZ(i); }
             }
             if (g.index) for (let i = 0; i < g.index.count; i++) idx[io++] = g.index.getX(i) + vo;
             else for (let i = 0; i < P.count; i++) idx[io++] = i + vo;
@@ -3582,6 +3586,7 @@ function mergeMeshesByLook(list) {
         geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
         geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
         geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+        if (col) geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
         geo.setIndex(new THREE.BufferAttribute(idx, 1));
         geo.computeBoundingSphere();
         const first = list[0];
@@ -4253,9 +4258,162 @@ function groundLook() {
     });
 }
 
+/* ---- M6: the mesas ---------------------------------------------------------------
+   The ring round the town was 96 plain boxes wearing the props' rock texture, stretched
+   over each face. Each box's collider strips are worked out from its numbers (w, d, ry,
+   h - mesaColliders, in the seeded code), not from its mesh, so the mesh can change
+   shape without the server's map moving - as long as it keeps to the box. So: every
+   mesa becomes two or three tiers stepping in (about a third end in a spire), with
+   broken faces and a darker cap - and it stays inside its box, and below 2.5 m it
+   stands on the box's own footprint (at most 0.1 m in), so what you walk into is what
+   you see. The same mesh is what bullets hit. Rock bands are painted by the world
+   height in the shader (the same band at the same height all round the ring, as rock
+   would be) over a rock texture with vertical joints, laid by the metre. */
+const MESA_LOOK = { tile: 6, band0: -1.5, bandSpan: 24, cap: [0.72, 0.6, 0.52] };
+function makeMesaRock(rand) {                // light, near grey: the bands give the colour
+    const [c, x] = cv(512);
+    x.fillStyle = '#dccbb8'; x.fillRect(0, 0, 512, 512);
+    const nine = function (draw) { for (let dx = -512; dx <= 512; dx += 512) for (let dy = -512; dy <= 512; dy += 512) { x.save(); x.translate(dx, dy); draw(); x.restore(); } };
+    for (let i = 0; i < 60; i++) {           // weathered blotches
+        const px = rand() * 512, py = rand() * 512, r = 20 + rand() * 70, v = rand() > 0.5 ? '255,245,230' : '120,90,70', a = 0.12 + rand() * 0.18;
+        nine(function () {
+            const g = x.createRadialGradient(px, py, 0, px, py, r);
+            g.addColorStop(0, 'rgba(' + v + ',' + a + ')'); g.addColorStop(1, 'rgba(' + v + ',0)');
+            x.fillStyle = g; x.fillRect(px - r, py - r, r * 2, r * 2);
+        });
+    }
+    for (let i = 0; i < 26; i++) {           // fine bedding lines
+        const y = rand() * 512, a = 0.08 + rand() * 0.12, dark = rand() > 0.4;
+        nine(function () {
+            x.strokeStyle = dark ? 'rgba(90,60,40,' + a + ')' : 'rgba(255,240,220,' + a + ')';
+            x.lineWidth = 1 + rand() * 2;
+            x.beginPath(); x.moveTo(0, y);
+            for (let px = 0; px <= 512; px += 32) x.lineTo(px, y + Math.sin(px / 512 * 6.283 * 2 + y) * 3);
+            x.stroke();
+        });
+    }
+    for (let i = 0; i < 9; i++) {            // vertical joints: a soft dark stain running down, a faint crack in it
+        let px = rand() * 512, py = rand() * 512;
+        const len = 160 + rand() * 300, pts = [[px, py]];
+        for (let k = 0; k < 10; k++) { px += (rand() - 0.5) * 8; py += len / 10; pts.push([px, py]); }
+        const w = 2 + rand() * 2;
+        nine(function () {
+            x.lineCap = 'round';
+            x.beginPath(); pts.forEach(function (p, k) { if (k) x.lineTo(p[0], p[1]); else x.moveTo(p[0], p[1]); });
+            x.strokeStyle = 'rgba(70,45,30,0.07)'; x.lineWidth = w * 12; x.stroke();
+            x.strokeStyle = 'rgba(70,45,30,0.08)'; x.lineWidth = w * 5; x.stroke();
+            x.strokeStyle = 'rgba(50,32,22,0.22)'; x.lineWidth = w * 0.7; x.stroke();
+        });
+    }
+    for (let i = 0; i < 16000; i++) { x.fillStyle = 'rgba(0,0,0,' + rand() * 0.12 + ')'; x.fillRect(rand() * 512, rand() * 512, 2, 2); }
+    for (let i = 0; i < 5000; i++) { x.fillStyle = 'rgba(255,250,240,' + rand() * 0.12 + ')'; x.fillRect(rand() * 512, rand() * 512, 1.5, 1.5); }
+    return c;
+}
+function makeMesaBands(rand) {               // one column, bottom row = MESA_LOOK.band0 m, 512 rows over bandSpan m
+    const [c, x] = cv(4, 512), L = MESA_LOOK;
+    const palette = ['#a0603f', '#b86a40', '#c9834e', '#d49a64', '#dcae7e', '#955a3c', '#c47a48', '#cf9260'];
+    let y = 0, last = -1;
+    while (y < 512) {
+        const th = (0.5 + rand() * 1.7) * 512 / L.bandSpan;
+        let k; do { k = rand() * palette.length | 0; } while (k === last);
+        last = k;
+        x.fillStyle = palette[k]; x.fillRect(0, y, 4, th + 1);
+        y += th;
+    }
+    const t = new THREE.CanvasTexture(c);
+    t.flipY = false;
+    t.magFilter = THREE.LinearFilter;
+    return t;
+}
+function mesaNoise(x, y, z) {                // the same answer for the same place: copies of a corner move together
+    const s = Math.sin(Math.round(x * 1000) * 0.0129898 + Math.round(y * 1000) * 0.078233 + Math.round(z * 1000) * 0.037719) * 43758.5453;
+    return s - Math.floor(s);
+}
+function mesaGeometry(w, h, d, seed, rand) { // in the box's own frame: y from -h/2 (1 m underground) to h/2
+    const bottom = -h / 2, top = h / 2, groundY = bottom + 1;
+    const t0 = bottom + h * (0.45 + rand() * 0.15), tiers = [{ y0: bottom, y1: t0, s0: 1.0, s1: 0.93, jag: 0 }];
+    if (rand() < 0.3) {                      // a spire
+        const t1 = t0 + (top - t0) * (0.5 + rand() * 0.15);
+        tiers.push({ y0: t0, y1: t1, s0: 0.86, s1: 0.7, jag: 0 });
+        tiers.push({ y0: t1, y1: top, s0: 0.5, s1: 0.22 + rand() * 0.1, jag: 1.0 });
+    } else {                                 // a flat top under a harder cap
+        tiers.push({ y0: t0, y1: top - 0.7, s0: 0.88, s1: 0.78, jag: 0 });
+        tiers.push({ y0: top - 0.7, y1: top, s0: 0.81, s1: 0.8, jag: 0.5, cap: true });
+    }
+    const pos = [], nor = [], uv = [], col = [];
+    const half = Math.min(w, d) / 2;
+    tiers.forEach(function (t) {
+        const th = t.y1 - t.y0;
+        let g = new THREE.BoxGeometry(w, th, d, Math.max(2, Math.round(w / 4.5)), Math.max(1, Math.round(th / 2.4)), Math.max(2, Math.round(d / 4.5)));
+        g.translate(0, (t.y0 + t.y1) / 2, 0);
+        g = g.toNonIndexed();
+        const P = g.attributes.position;
+        for (let i = 0; i < P.count; i++) {
+            let px = P.getX(i), py = P.getY(i), pz = P.getZ(i);
+            // the lowest tier stands straight up to 3 m (its collider does), and leans in only above
+            const from = t.y0 === bottom ? Math.min(groundY + 3, t.y1 - 0.01) : t.y0;
+            const f = Math.max(0, (py - from) / (t.y1 - from));
+            // in from the box: a little by the ground, more higher up - never out of it
+            const deep = (py < groundY + 2.5 ? 0.1 : 0.55) * mesaNoise(px + seed, py, pz);
+            const k = (t.s0 + (t.s1 - t.s0) * f) - deep / half;
+            px *= k; pz *= k;
+            if (t.jag && py > t.y1 - 1e-4) py -= t.jag * mesaNoise(px - seed, py, pz + 7.1);
+            P.setXYZ(i, px, py, pz);
+        }
+        g.computeVertexNormals();
+        const N = g.attributes.normal, U = g.attributes.uv, c = t.cap ? MESA_LOOK.cap : [1, 1, 1];
+        for (let i = 0; i < P.count; i++) {
+            if (i % 3 === 0 && N.getY(i) < -0.9) { i += 2; continue; }   // an underside: never seen
+            pos.push(P.getX(i), P.getY(i), P.getZ(i));
+            nor.push(N.getX(i), N.getY(i), N.getZ(i));
+            uv.push(U.getX(i), U.getY(i));
+            col.push(c[0], c[1], c[2]);
+        }
+        g.dispose();
+    });
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    geo.computeBoundingBox();
+    geo.computeBoundingSphere();
+    return geo;
+}
+function mesaLook() {
+    const L = MESA_LOOK, rand = makeSeededRandom(VISUAL_SEED + 6);
+    const map = tex(makeMesaRock(rand), 1, 1), bands = makeMesaBands(rand), patch = groundShader.shared.patch;
+    const mat = new THREE.MeshStandardMaterial({ map: map, vertexColors: true, roughness: 1, flatShading: true });
+    mat.onBeforeCompile = function (shader) {
+        shader.uniforms.mBands = { value: bands };
+        shader.uniforms.mPatch = { value: patch };
+        shader.vertexShader = 'varying vec3 vMesaW;\n' + shader.vertexShader.replace('#include <begin_vertex>',
+            '#include <begin_vertex>\n\tvMesaW = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+        shader.fragmentShader = 'uniform sampler2D mBands;\nuniform sampler2D mPatch;\nvarying vec3 vMesaW;\n' +
+            shader.fragmentShader.replace('#include <map_fragment>', '#include <map_fragment>\n' +
+                '\tfloat mWave = texture2D(mPatch, vMesaW.xz / 45.0).r * 2.2 - 1.1;   // the bands wander a little\n' +
+                '\tdiffuseColor.rgb *= texture2D(mBands, vec2(0.5, clamp((vMesaW.y + mWave - (' + L.band0.toFixed(1) + ')) / ' + L.bandSpan.toFixed(1) + ', 0.0, 1.0))).rgb;\n' +
+                '\tdiffuseColor.rgb *= mix(0.78, 1.0, smoothstep(-1.0, 3.0, vMesaW.y));   // darker where it meets the sand');
+    };
+    mat.customProgramCacheKey = function () { return 'mesa-bands'; };
+    mat.userData.mergeOK = true;             // world space throughout: fine to merge (M2)
+    const mesas = [];
+    world.traverse(function (o) { if (o.isMesh && o.material === MAT.rock && o.geometry.type === 'BoxGeometry') mesas.push(o); });
+    world.updateMatrixWorld(true);
+    mesas.forEach(function (o, i) {
+        const p = o.geometry.parameters;
+        o.geometry.dispose();
+        o.geometry = mesaGeometry(p.width, p.height, p.depth, i * 17.3, rand);
+        o.material = mat;
+        worldUV(o, L.tile);
+    });
+    return mesas.length;
+}
+
 function buildVisualLayer() {
     // (the steps that change the town's looks go here, before the merge)
     groundLook();                            // M5
+    mesaLook();                              // M6 - after M5 (uses its patches)
     skyAndSun();                             // M4
     mendRocks();                             // M3
     dressMine();                             // M3

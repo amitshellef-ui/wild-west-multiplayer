@@ -3500,8 +3500,96 @@ function bakeSunShadows() {
     renderer.render(scene, camera);          // the one time they are drawn - before any character exists
 }
 
+/* ---- M2: the town drawn in a few pieces -----------------------------------------
+   The town is ~1,290 separate meshes, and each one cost the card a draw of its own -
+   the frame on the UHD 620 was paying for the number of pieces, not for what is in
+   them (31 thousand triangles in all). Here everything in `world` that stands still
+   is copied, already in its place, into one mesh per look (material, and whether it
+   casts / takes the sun's shadow) - about fifty. The copies go in `decor` and bullets
+   pass through them; the originals stay where they were, in `world`, hidden: r128's
+   raycaster does not look at `visible`, so shots, decals and everything else that
+   asks the town where it is get exactly the answers they always did. What moves
+   (animatedProps - the windmill, the swinging signs) is left as it was.
+   Materials that are copies of each other with the same settings (a cactus each had
+   its own) are drawn as one. So anything that changes a town material or mesh has to
+   happen BEFORE this runs (buildVisualLayer: the later steps go above it). */
+function townMaterialKey(m) {
+    const tex = function (t) { return t ? t.uuid : ''; };
+    const hex = function (c) { return c ? c.getHex() : ''; };
+    return [m.type, hex(m.color), hex(m.emissive), m.emissiveIntensity, m.roughness, m.metalness,
+        tex(m.map), tex(m.normalMap), tex(m.emissiveMap), tex(m.roughnessMap), tex(m.metalnessMap),
+        tex(m.bumpMap), tex(m.aoMap), tex(m.alphaMap), tex(m.lightMap), tex(m.envMap),
+        m.side, m.transparent, m.opacity, m.alphaTest, m.depthTest, m.depthWrite, m.wireframe,
+        m.flatShading, m.vertexColors, m.fog, m.toneMapped, m.blending,
+        m.polygonOffset, m.polygonOffsetFactor, m.polygonOffsetUnits].join('|');
+}
+function mergeTownForDrawing() {
+    const moves = new Set(animatedProps.map(function (a) { return a.obj; }));
+    const staysPut = function (o) {
+        for (let p = o; p && p !== scene; p = p.parent) if (moves.has(p) || !p.visible) return false;
+        return true;
+    };
+    world.updateMatrixWorld(true);
+    const groups = new Map();
+    world.traverse(function (o) {
+        if (!o.isMesh || Array.isArray(o.material) || !staysPut(o)) return;
+        if (Object.prototype.hasOwnProperty.call(o.material, 'onBeforeCompile')) return;
+        const g = o.geometry;
+        if (!g.attributes.position || !g.attributes.normal || !g.attributes.uv) return;
+        const key = townMaterialKey(o.material) + '#' + o.castShadow + o.receiveShadow + o.renderOrder;
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(o);
+    });
+    const drawn = new THREE.Group();
+    drawn.name = 'town-drawn';
+    const v = new THREE.Vector3(), nm = new THREE.Matrix3();
+    groups.forEach(function (list) {
+        let nv = 0, ni = 0;
+        list.forEach(function (o) {
+            const g = o.geometry;
+            nv += g.attributes.position.count;
+            ni += g.index ? g.index.count : g.attributes.position.count;
+        });
+        const pos = new Float32Array(nv * 3), nor = new Float32Array(nv * 3), uv = new Float32Array(nv * 2);
+        const idx = nv > 65535 ? new Uint32Array(ni) : new Uint16Array(ni);
+        let vo = 0, io = 0;
+        list.forEach(function (o) {
+            const g = o.geometry, P = g.attributes.position, N = g.attributes.normal, U = g.attributes.uv;
+            nm.getNormalMatrix(o.matrixWorld);
+            for (let i = 0; i < P.count; i++) {
+                v.fromBufferAttribute(P, i).applyMatrix4(o.matrixWorld);
+                pos[(vo + i) * 3] = v.x; pos[(vo + i) * 3 + 1] = v.y; pos[(vo + i) * 3 + 2] = v.z;
+                v.fromBufferAttribute(N, i).applyMatrix3(nm).normalize();
+                nor[(vo + i) * 3] = v.x; nor[(vo + i) * 3 + 1] = v.y; nor[(vo + i) * 3 + 2] = v.z;
+                uv[(vo + i) * 2] = U.getX(i); uv[(vo + i) * 2 + 1] = U.getY(i);
+            }
+            if (g.index) for (let i = 0; i < g.index.count; i++) idx[io++] = g.index.getX(i) + vo;
+            else for (let i = 0; i < P.count; i++) idx[io++] = i + vo;
+            vo += P.count;
+            o.visible = false;                   // still in `world`, still what bullets hit
+        });
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+        geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+        geo.setIndex(new THREE.BufferAttribute(idx, 1));
+        geo.computeBoundingSphere();
+        const first = list[0];
+        const m = new THREE.Mesh(geo, first.material);
+        m.castShadow = first.castShadow;
+        m.receiveShadow = first.receiveShadow;
+        m.renderOrder = first.renderOrder;
+        m.raycast = function () { };
+        drawn.add(m);
+    });
+    decor.add(drawn);
+    return drawn;
+}
+
 function buildVisualLayer() {
-    bakeSunShadows();                        // M1
+    // (the steps that change the town's looks go here, before the merge)
+    mergeTownForDrawing();                   // M2 - after every change to the town, before the shadows
+    bakeSunShadows();                        // M1 - last: it draws the shadows of whatever is there
 }
 buildVisualLayer();
 

@@ -833,7 +833,8 @@ function makeWagon() {
         wh.position.set(w[0], 0.55, w[1]);
         g.add(wh); g.userData.wheels.push(wh);
     });
-    g.traverse(function (c) { if (c.isMesh) c.castShadow = true; });
+    // map M1: the sun's shadows are drawn once for the town - what moves gets a soft round one
+    g.add(newBlobShadow(3.8, 2.4));
     return msAdd(g);
 }
 
@@ -3424,8 +3425,83 @@ const decor = new THREE.Group();
 decor.name = 'decor';
 scene.add(decor);
 
+const visualUpdaters = [];                  // what the visual layer moves every frame (animate)
+
+/* A soft round shadow on the ground, w x d metres - the same picture as the characters'
+   (blobShadowMaterial), but a material of its own every time: the mission wagon and the
+   cube rig let go of theirs, texture and all, when they are cleared away. */
+function newBlobShadow(w, d) {
+    const c = document.createElement('canvas');
+    c.width = c.height = 64;
+    const x = c.getContext('2d');
+    const g = x.createRadialGradient(32, 32, 2, 32, 32, 31);
+    g.addColorStop(0, 'rgba(0,0,0,0.55)');
+    g.addColorStop(0.6, 'rgba(0,0,0,0.3)');
+    g.addColorStop(1, 'rgba(0,0,0,0)');
+    x.fillStyle = g;
+    x.fillRect(0, 0, 64, 64);
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, d).rotateX(-Math.PI / 2),
+        new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(c), transparent: true, depthWrite: false }));
+    m.position.y = 0.03;
+    m.renderOrder = 1;
+    m.raycast = function () { };
+    return m;
+}
+
+/* ---- M1: the sun's shadows, drawn once ----------------------------------------
+   Until M1 the sun's shadow box (124 m square) followed the player, and every shadow
+   in it was drawn again every frame: about a thousand extra draws, a quarter to a half
+   of the frame on the UHD 620. The town does not move, so its shadows are drawn once,
+   here, over all of it, and never again (renderer.shadowMap.autoUpdate off). What moves
+   casts no real shadow any more - it would stay painted where it stood: the tumbleweeds
+   and the mission wagon get a soft round one, the windmill's blades none, the cube rig
+   a round one (makeWagon, createBoxRig); the models always had theirs (MODEL_SHADOW).
+   The light comes from where it always did: `dir` is the offset the loop kept. */
+const SUN_BAKE = {
+    dir: [-60, 58, -66],                    // ground -> sun
+    box: [-78, 0, -96, 78, 26, 78],         // what the shadows cover: the town, the mesas, the mine
+    size: 4096                              // 2048 where the card cannot
+};
+function bakeSunShadows() {
+    animatedProps.forEach(function (a) {
+        if (a.type === 'tumble') {
+            a.obj.castShadow = false;
+            const blob = newBlobShadow(1.2, 1.2);
+            decor.add(blob);
+            visualUpdaters.push(function () { blob.position.set(a.obj.position.x, 0.03, a.obj.position.z); });
+        } else if (a.type === 'spin') {
+            a.obj.traverse(function (o) { o.castShadow = false; });
+        }
+    });
+    const B = SUN_BAKE.box, D = SUN_BAKE.dir;
+    const cx = (B[0] + B[3]) / 2, cz = (B[2] + B[5]) / 2;
+    sun.target.position.set(cx, 0, cz);
+    sun.position.set(cx + D[0], D[1], cz + D[2]);
+    sun.target.updateMatrixWorld();
+    sun.updateMatrixWorld();
+    // the shadow camera looks from the sun at the middle of the town: its box fitted round the corners
+    const cam = sun.shadow.camera, p = new THREE.Vector3();
+    cam.position.copy(sun.position);
+    cam.lookAt(sun.target.position);
+    cam.updateMatrixWorld();
+    let l = Infinity, r = -Infinity, b = Infinity, t = -Infinity, n = Infinity, f = -Infinity;
+    for (let i = 0; i < 8; i++) {
+        p.set(i & 1 ? B[3] : B[0], i & 2 ? B[4] : B[1], i & 4 ? B[5] : B[2]).applyMatrix4(cam.matrixWorldInverse);
+        l = Math.min(l, p.x); r = Math.max(r, p.x); b = Math.min(b, p.y); t = Math.max(t, p.y);
+        n = Math.min(n, -p.z); f = Math.max(f, -p.z);
+    }
+    cam.left = l; cam.right = r; cam.bottom = b; cam.top = t;
+    cam.near = Math.max(0.5, n - 5); cam.far = f + 5;
+    cam.updateProjectionMatrix();
+    const size = renderer.capabilities.maxTextureSize >= SUN_BAKE.size ? SUN_BAKE.size : 2048;
+    sun.shadow.mapSize.set(size, size);
+    renderer.shadowMap.autoUpdate = false;
+    renderer.shadowMap.needsUpdate = true;
+    renderer.render(scene, camera);          // the one time they are drawn - before any character exists
+}
+
 function buildVisualLayer() {
-    // the steps M1 onwards fill this in, each one its own block
+    bakeSunShadows();                        // M1
 }
 buildVisualLayer();
 
@@ -5060,6 +5136,9 @@ function createBoxRig(isBoss, bt) {
     // Bars must never block bullets
     barBg.raycast = function () { };
     barFill.raycast = function () { };
+    // map M1: the sun's shadows are drawn once for the town, so a body gets the soft round one
+    const blob = newBlobShadow(1.2 * s, 1.2 * s);
+    root.add(blob);
 
     const HITBOX_MUL = 1.2;
     const hbMat = new THREE.MeshBasicMaterial({
@@ -11019,6 +11098,7 @@ function animate() {
 
     updateVFX(delta);
     updateProps(delta, now);
+    for (let i = 0; i < visualUpdaters.length; i++) visualUpdaters[i](delta, now);     // map M1+
     updateCaveLighting(delta);
     sendMyState(now);
     updateRemoteBodies(delta);
@@ -11059,10 +11139,7 @@ function animate() {
         }
     }
 
-    // Sun shadow follows the player so shadows stay crisp
-    sun.position.set(camera.position.x - 60, 58, camera.position.z - 66);
-    sun.target.position.set(camera.position.x, 0, camera.position.z);
-    sun.target.updateMatrixWorld();
+    // map M1: the sun no longer follows the player - its shadows were drawn once (bakeSunShadows)
 
     skyMesh.position.copy(camera.position);
 

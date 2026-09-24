@@ -3977,8 +3977,129 @@ function dressMine() {
     return drawn;
 }
 
+/* ---- M4: sky and sun --------------------------------------------------------------
+   The sun's disc hung at 7 degrees, behind the mesas, while its light came from 33 -
+   so the sun was never seen and the shadows came from nowhere. Now the disc (and a soft
+   halo) sits on SUN_BAKE.dir, the direction the shadows were baked from, and rides with
+   the camera like the sky, so it is always at "infinity". The sky gets a fuller
+   gradient and thin painted cirrus; the light that fills the shadows (hemisphere sky,
+   ambient) turns cool, so the shade reads blue against the warm sun; the windows stop
+   glowing orange at noon; and the two streets, 1 mm apart where they cross, stop
+   fighting over the crossing (the main street drawn on top). */
+function makeDaySky(rand) {
+    const W = 1024, H = 512, [c, x] = cv(W, H);
+    const g = x.createLinearGradient(0, 0, 0, H);
+    g.addColorStop(0.00, '#2c5a92');         // zenith
+    g.addColorStop(0.14, '#4a7bb0');
+    g.addColorStop(0.28, '#86a8c8');
+    g.addColorStop(0.39, '#bcc3c2');
+    g.addColorStop(0.46, '#e2c196');
+    g.addColorStop(0.50, '#d8a870');         // horizon - close to the fog, so the far mesas melt into it
+    g.addColorStop(0.60, '#d2a074');
+    g.addColorStop(1.00, '#c8986c');
+    x.fillStyle = g; x.fillRect(0, 0, W, H);
+    // cirrus: wisps of thin streaks, 7-30 degrees up (higher, the sphere bends them into rings
+    // round the zenith); drawn again either side of the seam
+    for (let w = 0; w < 30; w++) {
+        const cx0 = rand() * W, cy0 = H * (0.333 + rand() * 0.128), len = 70 + rand() * 200, tilt = (rand() - 0.5) * 0.08;
+        const high = 1 - (cy0 / H - 0.333) / 0.128;  // higher up = thinner and whiter
+        for (let s = 0; s < 7 + (rand() * 8 | 0); s++) {
+            const sx = cx0 + (rand() - 0.5) * len * 0.6, sy = cy0 + (rand() - 0.5) * 14, sl = len * (0.3 + rand() * 0.7);
+            const th = 1.5 + rand() * (4 + 4 * (1 - high)), a = 0.05 + rand() * 0.14;
+            [-W, 0, W].forEach(function (dx) {
+                const gr = x.createLinearGradient(sx + dx - sl / 2, 0, sx + dx + sl / 2, 0);
+                gr.addColorStop(0, 'rgba(255,246,232,0)');
+                gr.addColorStop(0.5, 'rgba(255,246,232,' + a + ')');
+                gr.addColorStop(1, 'rgba(255,246,232,0)');
+                x.fillStyle = gr;
+                x.beginPath(); x.ellipse(sx + dx, sy, sl / 2, th, tilt, 0, 6.283); x.fill();
+            });
+        }
+    }
+    const t = new THREE.CanvasTexture(c);
+    t.magFilter = THREE.LinearFilter;
+    return t;
+}
+function makeGlow(stops) {                   // a round soft spot, for the sun's halo
+    const [c, x] = cv(256);
+    const g = x.createRadialGradient(128, 128, 0, 128, 128, 128);
+    stops.forEach(function (s) { g.addColorStop(s[0], s[1]); });
+    x.fillStyle = g; x.fillRect(0, 0, 256, 256);
+    return new THREE.CanvasTexture(c);
+}
+function makeWindowGlass() {                 // the sky and the street across, caught in the pane
+    const [c, x] = cv(64, 128);
+    const g = x.createLinearGradient(0, 0, 0, 128);
+    g.addColorStop(0, '#9db4c8'); g.addColorStop(0.45, '#5d7086'); g.addColorStop(0.55, '#3a3a38'); g.addColorStop(1, '#2a2622');
+    x.fillStyle = g; x.fillRect(0, 0, 64, 128);
+    x.fillStyle = 'rgba(255,255,255,0.18)';
+    x.beginPath(); x.moveTo(10, 0); x.lineTo(26, 0); x.lineTo(0, 44); x.lineTo(0, 17); x.fill();
+    x.beginPath(); x.moveTo(40, 0); x.lineTo(46, 0); x.lineTo(14, 56); x.lineTo(8, 56); x.fill();
+    return new THREE.CanvasTexture(c);
+}
+const SUN_SKY = { dist: 380, disc: 9, halo: 70, glow: 190 };
+function skyAndSun() {
+    const rand = makeSeededRandom(VISUAL_SEED + 4);
+    const old = skyMesh.material.map;
+    skyMesh.material.map = makeDaySky(rand);
+    skyMesh.material.needsUpdate = true;
+    old.dispose();
+
+    // the disc and its halo, on the line the light comes along
+    const dir = new THREE.Vector3(SUN_BAKE.dir[0], SUN_BAKE.dir[1], SUN_BAKE.dir[2]).normalize();
+    sunDisc.geometry.dispose();
+    sunDisc.geometry = new THREE.CircleGeometry(SUN_SKY.disc, 32);
+    sunDisc.material.color.setHex(0xfff6dc);
+    sunDisc.material.opacity = 1;
+    sunDisc.material.depthWrite = false;
+    sunDisc.material.toneMapped = false;     // tone mapping greys it below its own halo...
+    sunDisc.material.blending = THREE.AdditiveBlending;   // ...and on top of it, it must add, not cover
+    sunDisc.material.needsUpdate = true;
+    const glowOf = function (size, stops, order) {
+        const m = new THREE.Mesh(new THREE.PlaneGeometry(size, size), new THREE.MeshBasicMaterial({
+            map: makeGlow(stops), transparent: true, depthWrite: false, fog: false, blending: THREE.AdditiveBlending
+        }));
+        m.renderOrder = order;
+        scene.add(m);
+        return m;
+    };
+    // falloffs close to 1/r^2 - a straight ramp shows its corner as a ring
+    const glow = glowOf(SUN_SKY.glow * 2, [[0, 'rgba(255,214,150,0.28)'], [0.1, 'rgba(255,210,145,0.2)'], [0.25, 'rgba(255,204,135,0.1)'],
+        [0.45, 'rgba(255,198,125,0.04)'], [0.7, 'rgba(255,194,118,0.012)'], [1, 'rgba(255,190,110,0)']], 1);
+    const halo = glowOf(SUN_SKY.halo * 2, [[0, 'rgba(255,248,225,0.9)'], [0.08, 'rgba(255,242,210,0.7)'], [0.18, 'rgba(255,232,185,0.38)'],
+        [0.32, 'rgba(255,222,165,0.16)'], [0.55, 'rgba(255,214,150,0.05)'], [0.8, 'rgba(255,210,140,0.012)'], [1, 'rgba(255,210,140,0)']], 2);
+    sunDisc.renderOrder = 3;
+    const place = function () {
+        [glow, halo, sunDisc].forEach(function (m, i) {
+            m.position.copy(camera.position).addScaledVector(dir, SUN_SKY.dist - i * 2);
+            m.quaternion.copy(camera.quaternion);
+        });
+    };
+    place();
+    visualUpdaters.push(place);
+
+    // shade: filled by a cool sky, not a second warm sun
+    hemiLight.color.setHex(0xaec4dc);
+    ambientLight.color.setHex(0xe8dccb);
+
+    // windows by day
+    MAT.glass.map = makeWindowGlass();
+    MAT.glass.color.setHex(0xffffff);
+    MAT.glass.emissive.setHex(0x000000);
+    MAT.glass.emissiveIntensity = 0;
+    MAT.glass.roughness = 0.2;
+    MAT.glass.metalness = 0.1;
+    MAT.glass.needsUpdate = true;
+
+    // the crossing: the main street wins
+    MAT.road.polygonOffset = true; MAT.road.polygonOffsetFactor = -2; MAT.road.polygonOffsetUnits = -2;
+    MAT.road2.polygonOffset = true; MAT.road2.polygonOffsetFactor = -1; MAT.road2.polygonOffsetUnits = -1;
+    MAT.road.needsUpdate = MAT.road2.needsUpdate = true;
+}
+
 function buildVisualLayer() {
     // (the steps that change the town's looks go here, before the merge)
+    skyAndSun();                             // M4
     mendRocks();                             // M3
     dressMine();                             // M3
     mergeTownForDrawing();                   // M2 - after every change to the town, before the shadows

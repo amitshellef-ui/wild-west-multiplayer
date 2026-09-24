@@ -4410,10 +4410,148 @@ function mesaLook() {
     return mesas.length;
 }
 
+/* ---- M7: beyond the mesas ----------------------------------------------------------
+   Past the ring there was nothing: the 200 x 200 sand plane stopped in a straight line
+   (seen from above) and over the mesa tops only sky. Now the sand carries on to the sky
+   sphere, and three rings of hills stand out there - buttes, a ridge, a far range - each
+   a little higher in the view than the one in front, so from the street they peep over
+   the mesas in layers. All of it is decor, past the boundary walls (68 m): nothing to
+   walk on or shoot at. They take the scene's own fog, only thinner the higher they rise
+   (their feet melt into the sand's haze, their tops stand out), so the cave and the duel
+   still dim them with everything else.
+   Kept low towards the sun: no hill may cover it from anywhere in town. And all of it
+   inside the sky sphere (420 m round the camera), which would hide anything further. */
+const HORIZON_LOOK = {
+    sandTo: 430,                             // the sand, out to (the sky sphere hides the rest)
+    haze: 0.45,                              // the fog on a hill top, x the scene's
+    layers: [                                // R: ring radius, W: half its width, h: peak heights, n: segments
+        { R: 116, W: 13, h: [15, 29], n: 300, rings: 8, butte: true, lo: [0.6, 0.34, 0.22], hi: [0.74, 0.46, 0.31] },
+        { R: 172, W: 22, h: [32, 60], n: 260, rings: 8, lo: [0.54, 0.37, 0.3], hi: [0.68, 0.51, 0.42] },
+        { R: 245, W: 30, h: [58, 104], n: 230, rings: 7, lo: [0.5, 0.41, 0.41], hi: [0.62, 0.54, 0.53] }
+    ],
+    sunLow: [0.55, 0.8]                      // hills straight under the sun: this much of their height (per layer 1..3 below)
+};
+function ringWave(rand, terms) {             // periodic round the ring: whole-number frequencies
+    const t = terms.map(function (q) { return [q[0], q[1], rand() * Math.PI * 2]; });
+    const sum = t.reduce(function (s, q) { return s + q[1]; }, 0);
+    return function (a) {                    // 0..1, ridged (sharp crests, soft valleys)
+        let v = 0;
+        for (let i = 0; i < t.length; i++) v += t[i][1] * (1 - Math.abs(Math.sin(t[i][0] * a + t[i][2])));
+        return v / sum;
+    };
+}
+function horizonHills(rand) {
+    const L = HORIZON_LOOK, sunA = Math.atan2(SUN_BAKE.dir[2], SUN_BAKE.dir[0]);
+    const pos = [], col = [];
+    L.layers.forEach(function (ly, li) {
+        // (nothing finer than ~6 segments a wave: finer comes out as spikes and columns)
+        const peak = ringWave(rand, [[2, 1], [3, 0.9], [5, 0.7], [8, 0.5], [13, 0.35], [21, 0.22]]);
+        const wander = ringWave(rand, [[2, 1], [5, 0.6], [9, 0.3]]);
+        const rough = ringWave(rand, [[17, 1], [27, 0.7], [37, 0.5]]);
+        const plateau = ringWave(rand, [[7, 1], [11, 0.7]]);
+        const sunK = li === 0 ? 1 : L.sunLow[li - 1];
+        const grid = [];
+        for (let i = 0; i <= ly.n; i++) {
+            const a = i / ly.n * Math.PI * 2;
+            // how far round from the sun: straight under it the hills keep only sunK of their height
+            let da = Math.abs(a - sunA) % (Math.PI * 2); if (da > Math.PI) da = Math.PI * 2 - da;
+            const under = sunK + (1 - sunK) * THREE.MathUtils.smoothstep(da, 0.25, 0.75);
+            const H = (ly.h[0] + (ly.h[1] - ly.h[0]) * Math.pow(peak(a), 1.8)) * under;
+            const Rc = ly.R + ly.W * 0.45 * (wander(a) * 2 - 1);
+            const row = [];
+            for (let j = 0; j <= ly.rings; j++) {
+                const u = j / ly.rings * 2 - 1;  // -1 inner edge .. 1 outer edge
+                let h;
+                if (ly.butte) {                  // flat tops (a harder layer), steep sides
+                    const top = H * (0.8 + 0.2 * plateau(a));
+                    h = Math.min(top, H * 1.25 * THREE.MathUtils.smoothstep(1 - Math.abs(u), 0.0, 0.55));
+                } else {
+                    h = H * Math.pow(Math.max(0, 1 - u * u), 1.3) * (0.82 + 0.3 * rough(a + u * 0.05));
+                }
+                if (j === 0 || j === ly.rings) h = -3;   // the edges go under the sand
+                const r = Rc + u * ly.W;
+                row.push([Math.cos(a) * r, h, Math.sin(a) * r]);
+            }
+            grid.push(row);
+        }
+        const tint = function (y) {          // darker at the foot, lighter up top
+            const k = THREE.MathUtils.clamp(y / ly.h[1], 0, 1);
+            return [ly.lo[0] + (ly.hi[0] - ly.lo[0]) * k, ly.lo[1] + (ly.hi[1] - ly.lo[1]) * k, ly.lo[2] + (ly.hi[2] - ly.lo[2]) * k];
+        };
+        const tri = function (p, q, s) {     // wound so the face looks up / towards the town
+            pos.push(p[0], p[1], p[2], q[0], q[1], q[2], s[0], s[1], s[2]);
+            const c = tint((p[1] + q[1] + s[1]) / 3), v = 0.94 + 0.12 * rand();
+            for (let k = 0; k < 3; k++) col.push(c[0] * v, c[1] * v, c[2] * v);
+        };
+        for (let i = 0; i < ly.n; i++) {
+            for (let j = 0; j < ly.rings; j++) {
+                const a = grid[i][j], b = grid[i + 1][j], c = grid[i + 1][j + 1], d = grid[i][j + 1];
+                tri(a, b, d); tri(b, c, d);
+            }
+        }
+    });
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    geo.computeVertexNormals();
+    geo.computeBoundingSphere();
+    const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 1, flatShading: true });
+    mat.onBeforeCompile = function (shader) {
+        shader.vertexShader = 'varying float vHillY;\n' + shader.vertexShader.replace('#include <begin_vertex>',
+            '#include <begin_vertex>\n\tvHillY = (modelMatrix * vec4(transformed, 1.0)).y;');
+        shader.fragmentShader = 'varying float vHillY;\n' + shader.fragmentShader.replace('#include <fog_fragment>',
+            '#ifdef USE_FOG\n' +
+            '\tfloat hK = smoothstep(1.0, 22.0, vHillY);           // the foot takes the sand\'s haze, the top less\n' +
+            '\tfloat hD = fogDensity * mix(1.0, ' + L.haze.toFixed(2) + ', hK);\n' +
+            '\tfloat fogFactor = 1.0 - exp(-hD * hD * fogDepth * fogDepth);\n' +
+            '\tvec3 hCol = mix(fogColor, fogColor * vec3(0.9, 0.98, 1.12), hK * smoothstep(120.0, 280.0, fogDepth));   // far = bluer\n' +
+            '\tgl_FragColor.rgb = mix(gl_FragColor.rgb, hCol, fogFactor);\n' +
+            '#endif');
+    };
+    mat.customProgramCacheKey = function () { return 'horizon-hills'; };
+    const hills = new THREE.Mesh(geo, mat);
+    hills.name = 'horizon-hills';
+    hills.raycast = function () {};
+    hills.frustumCulled = false;             // it rings the camera: always in view
+    hills.renderOrder = 1;                   // after the town: its hidden pixels are never shaded
+    return hills;
+}
+function horizonSand() {                     // the sand plane's own picture carried on: same material, same UVs
+    const G = GROUND_LOOK, S = HORIZON_LOOK.sandTo, h = G.half;
+    const rects = [[-S, -S, S, -h], [-S, h, S, S], [-S, -h, -h, h], [h, -h, S, h]];   // x0, z0, x1, z1 round the plane
+    const pos = [], uv = [], nor = [];
+    rects.forEach(function (r) {
+        const P = [[r[0], r[1]], [r[0], r[3]], [r[2], r[3]], [r[0], r[1]], [r[2], r[3]], [r[2], r[1]]];
+        P.forEach(function (p) {
+            pos.push(p[0], 0, p[1]);
+            nor.push(0, 1, 0);
+            uv.push(p[0] / (h * 2) + 0.5, 0.5 - p[1] / (h * 2));   // as PlaneGeometry(200, 200) laid flat
+        });
+    });
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+    geo.computeBoundingSphere();
+    const sand = new THREE.Mesh(geo, MAT.sand);
+    sand.name = 'horizon-sand';
+    sand.receiveShadow = true;               // same program as the plane (out here the shadow map has nothing)
+    sand.raycast = function () {};
+    sand.frustumCulled = false;
+    sand.renderOrder = 1;                    // (sorted as if at the centre, it would go first and shade under the whole town)
+    return sand;
+}
+function horizonLook() {
+    const rand = makeSeededRandom(VISUAL_SEED + 7);
+    decor.add(horizonSand());
+    decor.add(horizonHills(rand));
+}
+
 function buildVisualLayer() {
     // (the steps that change the town's looks go here, before the merge)
     groundLook();                            // M5
     mesaLook();                              // M6 - after M5 (uses its patches)
+    horizonLook();                           // M7 - after M5 (the sand's material)
     skyAndSun();                             // M4
     mendRocks();                             // M3
     dressMine();                             // M3

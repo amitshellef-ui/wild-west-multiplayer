@@ -3530,18 +3530,29 @@ function mergeTownForDrawing() {
         return true;
     };
     world.updateMatrixWorld(true);
-    const groups = new Map();
+    const list = [];
     world.traverse(function (o) {
         if (!o.isMesh || Array.isArray(o.material) || !staysPut(o)) return;
         if (Object.prototype.hasOwnProperty.call(o.material, 'onBeforeCompile')) return;
         const g = o.geometry;
         if (!g.attributes.position || !g.attributes.normal || !g.attributes.uv) return;
+        list.push(o);
+    });
+    const drawn = mergeMeshesByLook(list);
+    list.forEach(function (o) { o.visible = false; });   // still in `world`, still what bullets hit
+    drawn.name = 'town-drawn';
+    decor.add(drawn);
+    return drawn;
+}
+/* Meshes (matrixWorld up to date) -> one mesh per look, already in place, that bullets pass through. */
+function mergeMeshesByLook(list) {
+    const groups = new Map();
+    list.forEach(function (o) {
         const key = townMaterialKey(o.material) + '#' + o.castShadow + o.receiveShadow + o.renderOrder;
         if (!groups.has(key)) groups.set(key, []);
         groups.get(key).push(o);
     });
     const drawn = new THREE.Group();
-    drawn.name = 'town-drawn';
     const v = new THREE.Vector3(), nm = new THREE.Matrix3();
     groups.forEach(function (list) {
         let nv = 0, ni = 0;
@@ -3566,7 +3577,6 @@ function mergeTownForDrawing() {
             if (g.index) for (let i = 0; i < g.index.count; i++) idx[io++] = g.index.getX(i) + vo;
             else for (let i = 0; i < P.count; i++) idx[io++] = i + vo;
             vo += P.count;
-            o.visible = false;                   // still in `world`, still what bullets hit
         });
         const geo = new THREE.BufferGeometry();
         geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
@@ -3582,12 +3592,395 @@ function mergeTownForDrawing() {
         m.raycast = function () { };
         drawn.add(m);
     });
+    return drawn;
+}
+
+/* ---- M3: whole rocks, one mine sign ----------------------------------------------
+   rockProp stretches every corner of its dodecahedron by its own random amount - but
+   r128's dodecahedron is a triangle soup (each corner is repeated once for every
+   triangle that meets there), so the copies of one corner went different ways and a
+   rock came apart into loose shards with sky between them. Here every corner takes the
+   stretch its first copy got: the same rock, the same size and place, closed again.
+   The stretch is read back by setting a fresh dodecahedron of the same radius (the
+   same corners in the same order) next to the stretched one. The colliders are boxes
+   made from the radius alone, so they do not change; bullets hit the mended shape.
+   The mine had two signs: createEnterableBuilding's (the width of the front, like every
+   building's) and a smaller one hung over it. The small one goes. */
+function mendRocks() {
+    const rocks = [];
+    world.traverse(function (o) {
+        if (o.isMesh && o.material === MAT.rock && o.geometry.type === 'DodecahedronGeometry') rocks.push(o);
+    });
+    rocks.forEach(function (o) {
+        const g = o.geometry, P = g.attributes.position;
+        const fresh = new THREE.DodecahedronGeometry(g.parameters.radius, 0), F = fresh.attributes.position;
+        if (F.count !== P.count) { fresh.dispose(); return; }
+        const stretch = new Map();
+        const k = function (i) {
+            return [F.getX(i), F.getY(i), F.getZ(i)].map(function (c) { return c.toFixed(4); }).join(',');
+        };
+        const by = function (p, f, fallback) { return Math.abs(f) > 1e-6 ? p / f : fallback; };
+        for (let i = 0; i < P.count; i++) {
+            const key = k(i);
+            let s = stretch.get(key);
+            if (!s) {
+                s = [by(P.getX(i), F.getX(i), 1), by(P.getY(i), F.getY(i), 1), by(P.getZ(i), F.getZ(i), 1)];
+                stretch.set(key, s);
+            }
+            P.setXYZ(i, F.getX(i) * s[0], F.getY(i) * s[1], F.getZ(i) * s[2]);
+        }
+        fresh.dispose();
+        P.needsUpdate = true;
+        g.computeVertexNormals();
+        g.computeBoundingBox();
+        g.computeBoundingSphere();
+    });
+    if (mineSign.parent) mineSign.parent.remove(mineSign);
+    return rocks.length;
+}
+
+/* ---- M3: the gold mine made to look like one ---------------------------------------
+   The mine was a room: box walls under a brick-like rock texture stretched 3.6 times
+   along the tunnel, the town's bright sand for a floor, and ten flat octahedrons
+   floating in the air in front of the walls. Now: a rock texture of its own laid by
+   the metre (so it is never stretched), a dirt floor, timber frames holding the roof,
+   rock bulging out of the walls, crystal clusters growing out of the rock, gold veins
+   in the walls, rails with a cart full of gold, pickaxes, and cages round the lanterns.
+   All of it is decoration: bullets and players pass through (no colliders - the
+   server's map is untouched), so what stands on the floor keeps to the walls, and
+   nothing sticks out of a wall more than ~0.3 m. The old octahedrons (no collider)
+   are taken away. Drawn as ~11 merged pieces; it casts no sun shadow (under a roof). */
+const MINE_LOOK = {
+    houseX: [1.15, 14.85],                   // inside faces of the side walls: the building...
+    tunnelX: [1.325, 14.675],                // ...and the tunnel behind it
+    tunnelZ: -66, front: -54, back: -83.65,  // where the tunnel starts, the doorway, the chamber's back wall
+    roofY: 5.05, railX: 4.0
+};
+function makeCaveRock(rand) {
+    const [c, x] = cv(512);
+    x.fillStyle = '#8c6443'; x.fillRect(0, 0, 512, 512);
+    const wrap = function (draw) {           // drawn nine times, so the tile has no seam
+        for (let dx = -512; dx <= 512; dx += 512) for (let dy = -512; dy <= 512; dy += 512) {
+            x.save(); x.translate(dx, dy); draw(); x.restore();
+        }
+    };
+    const path = function (pts) { x.beginPath(); pts.forEach(function (p, k) { if (k) x.lineTo(p[0], p[1]); else x.moveTo(p[0], p[1]); }); };
+    for (let b = 0; b < 9; b++) {            // strata: soft bands, whole waves across the tile
+        const y0 = rand() * 512, amp = 6 + rand() * 18, k = 1 + (rand() * 3 | 0), ph = rand() * 6.28, th = 8 + rand() * 30, s = (rand() - 0.5) * 50;
+        const pts = [];
+        for (let px = 0; px <= 512; px += 16) pts.push([px, y0 + Math.sin(px / 512 * 6.283 * k + ph) * amp]);
+        for (let px = 512; px >= 0; px -= 16) pts.push([px, y0 + th + Math.sin(px / 512 * 6.283 * k + ph + 0.8) * amp]);
+        const fill = 'rgba(' + (140 + s | 0) + ',' + (98 + s | 0) + ',' + (64 + s | 0) + ',0.45)';
+        wrap(function () { path(pts); x.closePath(); x.fillStyle = fill; x.fill(); });
+    }
+    for (let i = 0; i < 90; i++) {           // broken faces of rock, lighter and darker
+        const cx0 = rand() * 512, cy0 = rand() * 512, r = 14 + rand() * 46, sides = 5 + (rand() * 4 | 0), s = (rand() - 0.5) * 70;
+        const pts = [];
+        for (let k = 0; k < sides; k++) {
+            const a = k / sides * 6.283 + rand() * 0.6, rr = r * (0.6 + rand() * 0.5);
+            pts.push([cx0 + Math.cos(a) * rr, cy0 + Math.sin(a) * rr * 0.7]);
+        }
+        const fill = 'rgba(' + (150 + s | 0) + ',' + (108 + s | 0) + ',' + (72 + s | 0) + ',' + (0.35 + rand() * 0.35) + ')';
+        wrap(function () {
+            path(pts); x.closePath(); x.fillStyle = fill; x.fill();
+            x.strokeStyle = 'rgba(30,18,10,0.35)'; x.lineWidth = 1.5; x.stroke();
+        });
+    }
+    for (let i = 0; i < 26; i++) {           // cracks
+        let px = rand() * 512, py = rand() * 512, a = rand() * 6.283;
+        const pts = [[px, py]], w = 1 + rand() * 2.2;
+        for (let k = 0; k < 7; k++) { a += (rand() - 0.5) * 1.2; px += Math.cos(a) * 14; py += Math.sin(a) * 14; pts.push([px, py]); }
+        wrap(function () { path(pts); x.strokeStyle = 'rgba(20,12,6,0.55)'; x.lineWidth = w; x.stroke(); });
+    }
+    for (let i = 0; i < 16000; i++) { x.fillStyle = 'rgba(0,0,0,' + rand() * 0.14 + ')'; x.fillRect(rand() * 512, rand() * 512, 2, 2); }
+    for (let i = 0; i < 4000; i++) { x.fillStyle = 'rgba(255,230,190,' + rand() * 0.08 + ')'; x.fillRect(rand() * 512, rand() * 512, 1.5, 1.5); }
+    return c;
+}
+function makeMineDirt(rand) {
+    const [c, x] = cv(512);
+    x.fillStyle = '#4b3726'; x.fillRect(0, 0, 512, 512);
+    const blob = function (px, py, r, fill) {
+        for (let dx = -512; dx <= 512; dx += 512) for (let dy = -512; dy <= 512; dy += 512) {
+            x.beginPath(); x.ellipse(px + dx, py + dy, r, r * (0.5 + rand() * 0.4), rand() * 3.14, 0, 6.283); x.fillStyle = fill; x.fill();
+        }
+    };
+    for (let i = 0; i < 60; i++) {
+        const s = (rand() - 0.5) * 40;
+        blob(rand() * 512, rand() * 512, 20 + rand() * 70, 'rgba(' + (75 + s | 0) + ',' + (55 + s | 0) + ',' + (38 + s | 0) + ',0.35)');
+    }
+    for (let i = 0; i < 300; i++) {          // pebbles: a dark underside, a lit top
+        const px = rand() * 512, py = rand() * 512, r = 1.2 + rand() * 3.2, s = rand() * 30;
+        x.beginPath(); x.ellipse(px + 0.8, py + 1.2, r, r * 0.7, 0, 0, 6.283); x.fillStyle = 'rgba(15,9,5,0.5)'; x.fill();
+        x.beginPath(); x.ellipse(px, py, r, r * 0.7, 0, 0, 6.283); x.fillStyle = 'rgb(' + (88 + s | 0) + ',' + (70 + s | 0) + ',' + (52 + s | 0) + ')'; x.fill();
+    }
+    for (let i = 0; i < 14000; i++) { x.fillStyle = 'rgba(0,0,0,' + rand() * 0.18 + ')'; x.fillRect(rand() * 512, rand() * 512, 2, 2); }
+    return c;
+}
+/* UVs from the world position, `metres` to a tile, each face projected along its main axis:
+   one texel size everywhere, whatever the size of the box. (matrixWorld must be current.) */
+function worldUV(mesh, metres) {
+    const P = mesh.geometry.attributes.position, N = mesh.geometry.attributes.normal, U = mesh.geometry.attributes.uv;
+    const v = new THREE.Vector3(), n = new THREE.Vector3(), nm = new THREE.Matrix3().getNormalMatrix(mesh.matrixWorld);
+    for (let i = 0; i < P.count; i++) {
+        v.fromBufferAttribute(P, i).applyMatrix4(mesh.matrixWorld);
+        n.fromBufferAttribute(N, i).applyMatrix3(nm);
+        const ax = Math.abs(n.x), ay = Math.abs(n.y), az = Math.abs(n.z);
+        if (ax >= ay && ax >= az) U.setXY(i, v.z / metres, v.y / metres);
+        else if (ay >= az) U.setXY(i, v.x / metres, v.z / metres);
+        else U.setXY(i, v.x / metres, v.y / metres);
+    }
+    U.needsUpdate = true;
+}
+/* A lump of rock (or gold): an icosahedron whose corners move out or in together - every copy
+   of a corner the same amount, so it stays closed (the bug M3 mends in rockProp). */
+function lumpGeometry(rand, r, sx, sy, sz) {
+    const g = new THREE.IcosahedronGeometry(r, 0), P = g.attributes.position, bump = new Map();
+    for (let i = 0; i < P.count; i++) {
+        const key = P.getX(i).toFixed(4) + ',' + P.getY(i).toFixed(4) + ',' + P.getZ(i).toFixed(4);
+        if (!bump.has(key)) bump.set(key, 0.72 + rand() * 0.5);
+        const b = bump.get(key);
+        P.setXYZ(i, P.getX(i) * b * sx, P.getY(i) * b * sy, P.getZ(i) * b * sz);
+    }
+    g.computeVertexNormals();
+    return g;
+}
+function dressMine() {
+    const rand = makeSeededRandom(VISUAL_SEED + 3), L = MINE_LOOK, UP = new THREE.Vector3(0, 1, 0);
+    const V = function (x, y, z) { return new THREE.Vector3(x, y, z); };
+    const faceX = function (z, side) { const f = z < L.tunnelZ ? L.tunnelX : L.houseX; return side < 0 ? f[0] : f[1]; };
+    const randomTurn = function () { return new THREE.Quaternion().setFromEuler(new THREE.Euler(rand() * 6.28, rand() * 6.28, rand() * 6.28)); };
+    const MM = {
+        dirt: new THREE.MeshStandardMaterial({ roughness: 1, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }),
+        crystal: new THREE.MeshStandardMaterial({ color: 0xc8f4ff, emissive: 0x2aa9df, emissiveIntensity: 0.75, roughness: 0.1, metalness: 0.1, flatShading: true }),
+        crystalDeep: new THREE.MeshStandardMaterial({ color: 0x8fdcff, emissive: 0x1478c8, emissiveIntensity: 0.9, roughness: 0.1, metalness: 0.1, flatShading: true }),
+        gold: new THREE.MeshStandardMaterial({ color: 0xffcd3c, emissive: 0x7a4a00, emissiveIntensity: 0.8, metalness: 0.6, roughness: 0.3, flatShading: true }),
+        steel: new THREE.MeshStandardMaterial({ color: 0x8a8f96, metalness: 0.6, roughness: 0.4 }),
+        flame: new THREE.MeshBasicMaterial({ color: 0xffa64a })
+    };
+    const kit = new THREE.Group(), rocky = [];
+    const put = function (geo, mat, x, y, z, q) {
+        const m = new THREE.Mesh(geo, mat);
+        m.position.set(x, y, z);
+        if (q) m.quaternion.copy(q);
+        kit.add(m);
+        if (mat === MAT.rockDark) rocky.push(m);
+        return m;
+    };
+    const lump = function (r, sx, sy, sz, mat, x, y, z, q) { return put(lumpGeometry(rand, r, sx, sy, sz), mat, x, y, z, q); };
+
+    // the floating octahedrons go
+    const gems = [];
+    world.traverse(function (o) { if (o.isMesh && o.material === gemMat) gems.push(o); });
+    gems.forEach(function (o) { o.parent.remove(o); });
+
+    // walls: cave rock, laid by the metre (the mine's walls, the rock front and the tunnel are all rockDark)
+    const caveTex = new THREE.CanvasTexture(makeCaveRock(rand));
+    caveTex.wrapS = caveTex.wrapT = THREE.RepeatWrapping;
+    caveTex.anisotropy = 4;
+    MAT.rockDark.map = caveTex;              // its old map is MAT.rock's too - kept
+    MAT.rockDark.needsUpdate = true;
+    world.updateMatrixWorld(true);
+    world.traverse(function (o) { if (o.isMesh && o.material === MAT.rockDark) worldUV(o, 3.5); });
+
+    // floor: dirt over the sand, doorway to back wall
+    const dirtTex = new THREE.CanvasTexture(makeMineDirt(rand));
+    dirtTex.wrapS = dirtTex.wrapT = THREE.RepeatWrapping;
+    dirtTex.anisotropy = 4;
+    MM.dirt.map = dirtTex;
+    const floor = put(new THREE.PlaneGeometry(L.houseX[1] - L.houseX[0], L.front - L.back).rotateX(-Math.PI / 2), MM.dirt,
+        (L.houseX[0] + L.houseX[1]) / 2, 0.004, (L.front + L.back) / 2);
+
+    // timber frames holding the tunnel roof
+    [-66.3, -71, -75, -79].forEach(function (z) {
+        const xl = faceX(z, -1) + 0.17, xr = faceX(z, 1) - 0.17, top = L.roofY - 0.3;
+        put(new THREE.BoxGeometry(0.32, top, 0.32), MAT.beam, xl, top / 2, z);
+        put(new THREE.BoxGeometry(0.32, top, 0.32), MAT.beam, xr, top / 2, z);
+        put(new THREE.BoxGeometry(xr - xl + 0.4, 0.34, 0.36), MAT.beam, (xl + xr) / 2, top + 0.15, z);
+        put(new THREE.BoxGeometry(0.16, 1.13, 0.16), MAT.beam, xl + 0.42, top - 0.42, z).rotation.z = -Math.PI / 4;
+        put(new THREE.BoxGeometry(0.16, 1.13, 0.16), MAT.beam, xr - 0.42, top - 0.42, z).rotation.z = Math.PI / 4;
+    });
+
+    // under the building's roof (shingles seen from below): rock, crossed by beams
+    put(new THREE.PlaneGeometry(L.houseX[1] - L.houseX[0], L.front - L.tunnelZ).rotateX(Math.PI / 2), MAT.rockDark,
+        (L.houseX[0] + L.houseX[1]) / 2, 4.99, (L.front + L.tunnelZ) / 2);
+    [-56.5, -60, -63.5].forEach(function (z) {
+        put(new THREE.BoxGeometry(L.houseX[1] - L.houseX[0], 0.3, 0.32), MAT.beam, (L.houseX[0] + L.houseX[1]) / 2, 4.84, z);
+    });
+
+    // the crystals' own light reaches a little further, and the tunnel lamps (in the middle, 7 m) reach the walls
+    world.traverse(function (o) {
+        if (o.isPointLight && o.color.getHex() === 0x36cfff) { o.intensity = 1.5; o.distance = 13; }
+        if (o.isPointLight && o.color.getHex() === 0xffa85a) o.distance = 10;
+    });
+
+    // rails on sleepers, from the doorway to a buffer by the back wall
+    const r0 = L.front - 0.6, r1 = L.back + 1.3;
+    [-0.42, 0.42].forEach(function (s) { put(new THREE.BoxGeometry(0.07, 0.09, r0 - r1), MM.steel, L.railX + s, 0.115, (r0 + r1) / 2); });
+    for (let z = r0 - 0.3; z > r1; z -= 0.75) {
+        put(new THREE.BoxGeometry(1.25, 0.07, 0.2), MAT.beam, L.railX + (rand() - 0.5) * 0.06, 0.035, z).rotation.y = (rand() - 0.5) * 0.08;
+    }
+    put(new THREE.BoxGeometry(1.3, 0.35, 0.3), MAT.beam, L.railX, 0.18, r1 - 0.2);
+
+    // rock bulging out of the walls: along the foot of both side walls and the back wall, and where wall meets roof
+    [-1, 1].forEach(function (side) {
+        for (let z = L.front - 1.4; z > L.back + 0.6; z -= 1.3 + rand() * 1.2) {
+            const r = 0.45 + rand() * 0.5;
+            lump(r, 0.5, 0.8, 1.3, MAT.rockDark, faceX(z, side) + side * (r * 0.5 * 1.22 - 0.26), r * 0.25, z);
+        }
+        for (let z = L.tunnelZ - 1.2; z > L.back + 0.6; z -= 1.8 + rand() * 1.4) {
+            const r = 0.4 + rand() * 0.4;
+            lump(r, 0.5, 0.6, 1.3, MAT.rockDark, faceX(z, side) + side * (r * 0.5 * 1.22 - 0.3), L.roofY + (r * 0.6 * 1.22 - 0.35), z);
+        }
+    });
+    for (let x = L.tunnelX[0] + 0.9; x < L.tunnelX[1] - 0.5; x += 1.2 + rand() * 1.0) {
+        const r = 0.45 + rand() * 0.45;
+        lump(r, 1.3, 0.8, 0.5, MAT.rockDark, x, r * 0.25, L.back - (r * 0.5 * 1.22 - 0.26));
+    }
+
+    // crystals: clusters growing out of a knot of rock
+    const crystal = function (p, dir, len, r, mat) {
+        const q = new THREE.Quaternion().setFromUnitVectors(UP, dir), twist = rand() * 6.28;
+        put(new THREE.CylinderGeometry(r * 0.92, r, len, 6).rotateY(twist).translate(0, len * 0.3, 0), mat, p.x, p.y, p.z, q);
+        put(new THREE.ConeGeometry(r * 0.92, r * 2.6, 6).rotateY(twist).translate(0, len * 0.8 + r * 1.3, 0), mat, p.x, p.y, p.z, q);
+    };
+    const cluster = function (p, n, size, count) {
+        n = n.normalize();
+        const knot = p.clone().addScaledVector(n, -size * 0.15);            // mostly in the rock it grows from
+        lump(size * 0.36, 1, 0.8, 1, MAT.rockDark, knot.x, knot.y, knot.z, new THREE.Quaternion().setFromUnitVectors(UP, n));
+        for (let i = 0; i < count; i++) {
+            const d = i === 0 ? n.clone() : n.clone().add(V(rand() - 0.5, rand() - 0.5, rand() - 0.5).multiplyScalar(0.9)).normalize();
+            if (d.dot(n) < 0.45) d.add(n).normalize();
+            const len = size * (i === 0 ? 1.1 : 0.35 + rand() * 0.6);
+            const off = V(rand() - 0.5, rand() - 0.5, rand() - 0.5).multiplyScalar(size * 0.5);
+            off.addScaledVector(n, -off.dot(n));  // spread over the knot, not out of it
+            crystal(p.clone().add(off), d, len, len * (0.17 + rand() * 0.07), rand() < 0.3 ? MM.crystalDeep : MM.crystal);
+        }
+    };
+    cluster(V(8, 1.5, L.back), V(0, 0.6, 1), 2.0, 14);                  // the seam in the back wall
+    cluster(V(4.6, 3.5, L.back), V(0.2, 0.1, 1), 0.8, 6);
+    cluster(V(11.6, 3.2, L.back), V(-0.2, 0.2, 1), 0.9, 7);
+    cluster(V(9.6, 0, L.back + 2.2), V(0.1, 1, 0.3), 0.7, 5);
+    cluster(V(2.3, 0, L.back + 0.8), V(0.4, 1, 0.4), 0.8, 6);            // back corners
+    cluster(V(13.8, 0, L.back + 1.0), V(-0.4, 1, 0.5), 0.9, 7);
+    cluster(V(L.tunnelX[1], 2.6, -77.5), V(-1, 0.2, 0), 0.7, 6);         // walls
+    cluster(V(L.tunnelX[0], 3.4, -75.8), V(1, -0.1, 0), 0.55, 5);
+    cluster(V(10.5, L.roofY, -81.2), V(0, -1, 0.2), 0.6, 5);             // roof
+    cluster(V(L.houseX[1], 1.0, -64.5), V(-1, 0.3, 0), 0.5, 4);          // a first glimpse from the building
+
+    // gold: veins of nuggets, mostly still in the rock
+    const vein = function (a, b, n, clumps, size) {                     // clumps of nuggets along a line
+        const along = b.clone().sub(a).normalize();
+        for (let c = 0; c < clumps; c++) {
+            const centre = a.clone().lerp(b, (c + 0.2 + rand() * 0.6) / clumps);
+            centre.y += (rand() - 0.5) * 0.3;
+            const count = 5 + (rand() * 5 | 0);
+            for (let i = 0; i < count; i++) {
+                const p = centre.clone();
+                p.y += (rand() - 0.5) * 0.34;
+                p.addScaledVector(along, (rand() - 0.5) * 0.45);
+                const r = size * (i === 0 ? 1.5 : 0.4 + rand() * 0.8);
+                p.addScaledVector(n, -r * 0.3);
+                lump(r, 1, 0.75, 1.1, MM.gold, p.x, p.y, p.z, randomTurn());
+            }
+        }
+    };
+    const inL = V(1, 0, 0), inR = V(-1, 0, 0), outB = V(0, 0, 1);
+    vein(V(L.tunnelX[0], 1.1, -68.2), V(L.tunnelX[0], 2.2, -73.5), inL, 4, 0.13);
+    vein(V(L.tunnelX[1], 0.8, -73.2), V(L.tunnelX[1], 1.9, -79.8), inR, 5, 0.13);
+    vein(V(3.6, 0.8, L.back), V(6.0, 2.6, L.back), outB, 3, 0.13);
+    vein(V(10.2, 2.8, L.back), V(12.6, 0.9, L.back), outB, 3, 0.13);
+    vein(V(L.houseX[0], 1.4, -61.0), V(L.houseX[0], 2.0, -64.0), inL, 2, 0.11);
+    for (let i = 0; i < 9; i++) {            // loose nuggets by the back wall
+        const r = 0.05 + rand() * 0.07;
+        lump(r, 1, 0.7, 1, MM.gold, 5.2 + rand() * 5.6, r * 0.4, L.back + 0.5 + rand() * 1.6, randomTurn());
+    }
+
+    // the cart on the rails, loaded with gold
+    const cart = new THREE.Group();
+    cart.position.set(L.railX, 0, -80.2);
+    kit.add(cart);
+    const cartPart = function (geo, mat, x, y, z) { const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); cart.add(m); return m; };
+    cartPart(new THREE.BoxGeometry(1.0, 0.08, 1.5), MAT.rust, 0, 0.5, 0);
+    [-1, 1].forEach(function (s) {
+        cartPart(new THREE.BoxGeometry(0.07, 0.62, 1.5), MAT.rust, s * 0.5, 0.83, 0);
+        cartPart(new THREE.BoxGeometry(1.07, 0.62, 0.07), MAT.rust, 0, 0.83, s * 0.75);
+        cartPart(new THREE.BoxGeometry(0.1, 0.07, 1.62), MAT.metal, s * 0.52, 1.15, 0);
+        cartPart(new THREE.BoxGeometry(1.14, 0.07, 0.1), MAT.metal, 0, 1.15, s * 0.78);
+        [-0.45, 0.45].forEach(function (z) { cartPart(new THREE.BoxGeometry(0.09, 0.62, 0.08), MAT.metal, s * 0.54, 0.83, z); });
+        [-0.5, 0.5].forEach(function (z) { cartPart(new THREE.CylinderGeometry(0.19, 0.19, 0.08, 12).rotateZ(Math.PI / 2), MAT.metal, s * 0.42, 0.35, z); });
+        cartPart(new THREE.BoxGeometry(0.9, 0.05, 0.05), MAT.metal, 0, 0.35, s * 0.5);
+    });
+    const load = new THREE.Mesh(lumpGeometry(rand, 0.45, 1.0, 0.35, 1.45), MM.gold);
+    load.position.set(0, 1.08, 0);
+    cart.add(load);
+    for (let i = 0; i < 12; i++) {
+        const n = new THREE.Mesh(lumpGeometry(rand, 0.07 + rand() * 0.08, 1, 0.75, 1.1), MM.gold);
+        n.position.set((rand() - 0.5) * 0.7, 1.14 + rand() * 0.14, (rand() - 0.5) * 1.2);
+        n.quaternion.copy(randomTurn());
+        cart.add(n);
+    }
+
+    // pickaxes: one stuck in the gold, two against the walls, one dropped by the cart
+    const pickaxe = function (x, y, z, q) {
+        const g = new THREE.Group();
+        g.position.set(x, y, z);
+        g.quaternion.copy(q);
+        kit.add(g);
+        g.add(new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.032, 0.95, 6).translate(0, 0.475, 0), MAT.gunWood));
+        g.add(new THREE.Mesh(new THREE.TorusGeometry(0.3, 0.034, 5, 12, 1.9).rotateZ(Math.PI / 2 - 0.95).translate(0, 0.67, 0), MM.steel));
+        g.add(new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.12, 0.08).translate(0, 0.93, 0), MAT.metal));
+    };
+    const stuck = V(-0.9, 0.45, 0.1).normalize(), wallHit = V(L.tunnelX[0], 1.55, -70.6);
+    pickaxe(wallHit.x - stuck.x * 0.9, wallHit.y - stuck.y * 0.9, wallHit.z - stuck.z * 0.9, new THREE.Quaternion().setFromUnitVectors(UP, stuck));
+    pickaxe(L.tunnelX[1] - 0.42, 0, -71.8, new THREE.Quaternion().setFromEuler(new THREE.Euler(0, Math.PI / 2, -0.42, 'ZYX')));
+    pickaxe(L.houseX[1] - 0.42, 0, -57.2, new THREE.Quaternion().setFromEuler(new THREE.Euler(0, Math.PI / 2 + 0.3, -0.42, 'ZYX')));
+    pickaxe(5.6, 0.035, -78.4, new THREE.Quaternion().setFromEuler(new THREE.Euler(-Math.PI / 2, 0.6, 0, 'YXZ')));
+
+    // lanterns: a cage round each glowing box on the tunnel wall, and two hung from the building's roof
+    const cage = function (x, y, z) {
+        put(new THREE.BoxGeometry(0.3, 0.05, 0.3), MAT.metal, x, y + 0.19, z);
+        put(new THREE.ConeGeometry(0.2, 0.12, 4).rotateY(Math.PI / 4), MAT.metal, x, y + 0.27, z);
+        put(new THREE.BoxGeometry(0.28, 0.04, 0.28), MAT.metal, x, y - 0.18, z);
+        [-1, 1].forEach(function (a) { [-1, 1].forEach(function (b) { put(new THREE.BoxGeometry(0.03, 0.36, 0.03), MAT.metal, x + a * 0.13, y, z + b * 0.13); }); });
+        put(new THREE.TorusGeometry(0.05, 0.012, 4, 8), MAT.metal, x, y + 0.37, z);
+    };
+    const lamps = [];
+    world.traverse(function (o) { if (o.isMesh && o.material.isMeshBasicMaterial && o.material.color.getHex() === 0xffce85) lamps.push(o); });
+    lamps.forEach(function (o) {
+        const p = o.getWorldPosition(V(0, 0, 0));
+        if (p.x < L.houseX[0] || p.x > L.houseX[1] || p.z < L.back || p.z > L.front) return;   // (MINE_VOL is not declared yet)
+        o.material.color.setHex(MM.flame.color.getHex());   // a flame, not a white box
+        cage(p.x, p.y, p.z);
+        put(new THREE.BoxGeometry(p.x - L.tunnelX[0], 0.035, 0.035), MAT.metal, (p.x + L.tunnelX[0]) / 2, p.y + 0.42, p.z);   // bracket
+        put(new THREE.BoxGeometry(0.03, 0.06, 0.03), MAT.metal, p.x, p.y + 0.39, p.z);
+    });
+    [-58.5, -63.6].forEach(function (z) {    // where mineLight / mineDeepLight shine from
+        put(new THREE.BoxGeometry(0.22, 0.32, 0.22), MM.flame, 8, 3.0, z);
+        cage(8, 3.0, z);
+        put(new THREE.BoxGeometry(0.025, 5.0 - 3.4, 0.025), MAT.metal, 8, (5.0 + 3.4) / 2, z);                              // chain to the roof
+    });
+
+    kit.updateMatrixWorld(true);
+    worldUV(floor, 4);
+    rocky.forEach(function (m) { worldUV(m, 3.5); });
+    const meshes = [];
+    kit.traverse(function (o) { if (o.isMesh) { o.castShadow = false; o.receiveShadow = true; meshes.push(o); } });
+    const drawn = mergeMeshesByLook(meshes);
+    drawn.name = 'mine-dressing';
     decor.add(drawn);
+    // ~11 draws the rest of the town need not pay for: from 60 m off the doorway nothing inside can be made out
+    visualUpdaters.push(function () {
+        const dx = camera.position.x - (L.houseX[0] + L.houseX[1]) / 2, dz = camera.position.z - L.front;
+        drawn.visible = dx * dx + dz * dz < 60 * 60;
+    });
+    meshes.forEach(function (o) { o.geometry.dispose(); });
     return drawn;
 }
 
 function buildVisualLayer() {
     // (the steps that change the town's looks go here, before the merge)
+    mendRocks();                             // M3
+    dressMine();                             // M3
     mergeTownForDrawing();                   // M2 - after every change to the town, before the shadows
     bakeSunShadows();                        // M1 - last: it draws the shadows of whatever is there
 }

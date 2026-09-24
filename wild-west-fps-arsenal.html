@@ -3399,6 +3399,36 @@ function mapFingerprint() {
     return ((h >>> 0).toString(16) + '-' + colliders.length);
 }
 
+/* =========================================================================
+   THE VISUAL LAYER (map upgrade, step M0 - PLAN-MAP.md)
+
+   Everything the map upgrade adds or changes on screen is built here: after
+   the town is built and Math.random is the system's again, never inside it.
+   The town is scattered from a seeded generator, and in r128 every new Three
+   object - mesh, material, geometry, texture - draws four numbers from
+   Math.random for its uuid. One extra object in there moves ~825 of the 909
+   colliders, and the server's copy of them (map-data.js) is no longer the
+   town the player is standing in. So:
+     - new things are made here, their randoms from their own generator
+       (makeSeededRandom(VISUAL_SEED + step)), and the old code's results are
+       replaced rather than the old code edited (MAT.sand.map = a new texture,
+       not a change inside makeSand)
+     - decorations go in `decor`, outside `world`: shots and bullets do not
+       stop on them
+     - nothing that has a collider is hidden or moved
+   tests/map-audit/replay/sim.js rebuilds the seeded town from this file and
+   says whether a single collider moved: 94b46e8e-909, 0 moved.
+   ========================================================================= */
+const VISUAL_SEED = 20260924;
+const decor = new THREE.Group();
+decor.name = 'decor';
+scene.add(decor);
+
+function buildVisualLayer() {
+    // the steps M1 onwards fill this in, each one its own block
+}
+buildVisualLayer();
+
 /* ---------- Cave lighting: the shaft genuinely goes dark ---------- */
 const MINE_VOL = { x0: 0.6, x1: 15.4, z0: -86, z1: -52.5 };
 const LIGHT_SURFACE = { amb: 0.30, hemi: 0.38, sun: 1.75, bounce: 0.22, fogD: 0.0105 };
@@ -10955,8 +10985,14 @@ function updateWaves(now) {
 
 /* ?fps in the address: a frame counter in the corner, for measuring (step 26a).
    Averaged over 5 seconds, with how many bandit bodies are standing. */
-const FPS_METER = /[?&]fps\b/.test(location.search) ? { el: null, frames: [] } : null;
+const FPS_METER = /[?&]fps\b/.test(location.search) ? { el: null, frames: [], calls: 0, tris: 0 } : null;
+// map M0: the draw calls and triangles of a whole frame - the world, the gun and the
+// shadow pass - so the counter is reset by hand once a frame instead of at every render
+if (FPS_METER) renderer.info.autoReset = false;
 function tickFpsMeter(now) {
+    FPS_METER.calls = renderer.info.render.calls;
+    FPS_METER.tris = renderer.info.render.triangles;
+    renderer.info.reset();
     if (!FPS_METER.el) {
         FPS_METER.el = document.createElement('div');
         FPS_METER.el.style.cssText = 'position:fixed;left:8px;bottom:8px;z-index:50;background:rgba(0,0,0,.6);color:#9f9;font:14px monospace;padding:4px 8px;pointer-events:none';
@@ -10971,7 +11007,8 @@ function tickFpsMeter(now) {
     Object.keys(serverBandits).forEach(function (id) { if (serverBandits[id].alive) n++; });
     if (!onlineBandits()) bots.forEach(function (b) { if (b.alive) n++; });
     FPS_METER.el.textContent = fps.toFixed(1) + ' fps · ' + n + ' bandits · ' +
-        (modelReady('cowboy') ? 'models' : 'cubes');
+        (modelReady('cowboy') ? 'models' : 'cubes') + ' · ' + FPS_METER.calls + ' draws · ' +
+        Math.round(FPS_METER.tris / 1000) + 'k tris';
 }
 
 function animate() {

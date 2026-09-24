@@ -4773,12 +4773,105 @@ function woodLook() {
     return { planked: planked, bodies: bodies.length, doors: doors.length, porches: porchRoofs.length, buildings: looks.size };
 }
 
+/* ---- M9a: boardwalks and railings ---------------------------------------------------
+   Every porch was an island of boards with sand either side. Along the main street the
+   porches of neighbours are now joined into one boardwalk (not across the cross street),
+   and a porch end that joins nothing gets a railing - the row ends, the outposts, the
+   walk-in buildings. Where the boards stop at the cross street, a step down.
+   All decor, found from the porch decks themselves (plankV, 0.18 x 2.6): nothing to walk
+   into, as with the porches and hitching rails before - bullets and players pass. */
+const WALK_LOOK = { join: 5, railH: 1.0, baluster: 0.22, roadMargin: 1.0 };
+function boardwalkLook() {
+    const L = WALK_LOOK, S = GROUND_LOOK.streets, deckColour = [0.95, 0.95, 0.93];
+    const stats = boardwalkLook.stats = {};
+    world.updateMatrixWorld(true);
+    const decks = [];
+    world.traverse(function (o) {
+        if (!o.isMesh || o.material !== MAT.plankV || o.geometry.type !== 'BoxGeometry') return;
+        const p = o.geometry.parameters;
+        if (Math.abs(p.height - 0.18) > 1e-3 || Math.abs(p.depth - 2.6) > 1e-3) return;
+        decks.push({ o: o, box: new THREE.Box3().setFromObject(o), open: [false, false] });   // open[0]: the -x end, [1]: +x (deck's own)
+    });
+    const onRoad = function (x, z) {         // on the cross street (and a margin): leave that end open. (The main
+        const s = S[1];                      // street's box reaches under the porch fronts, so it cannot be the test.)
+        return Math.abs(x - s[0]) < s[2] + L.roadMargin && Math.abs(z - s[1]) < s[3] + L.roadMargin;
+    };
+    const kit = [];
+    const put = function (geo, mat, matrix) {
+        const m = new THREE.Mesh(geo, mat);
+        m.matrixAutoUpdate = false;
+        m.matrix.copy(matrix); m.matrixWorld.copy(matrix);
+        m.castShadow = true; m.receiveShadow = true;
+        kit.push(m);
+        return m;
+    };
+    const at = function (x, y, z) { return new THREE.Matrix4().makeTranslation(x, y, z); };
+
+    // the rows along the main street run along x (their decks do not turn): join neighbours
+    const rows = new Map();
+    decks.forEach(function (d) {
+        if (Math.abs(Math.sin(d.o.parent.rotation.y)) > 0.01) return;
+        const key = Math.round(d.o.parent.position.z);
+        if (!rows.has(key)) rows.set(key, []);
+        rows.get(key).push(d);
+    });
+    let joined = 0, steps = 0, rails = 0;
+    rows.forEach(function (row) {
+        row.sort(function (a, b) { return a.box.min.x - b.box.min.x; });
+        for (let i = 0; i + 1 < row.length; i++) {
+            const A = row[i], B = row[i + 1], x0 = A.box.max.x, x1 = B.box.min.x;
+            const z0 = Math.max(A.box.min.z, B.box.min.z), z1 = Math.min(A.box.max.z, B.box.max.z);
+            if (x1 - x0 > L.join || z1 - z0 < 1.5 || onRoad((x0 + x1) / 2, (z0 + z1) / 2)) continue;
+            const seg = put(new THREE.BoxGeometry(x1 - x0 - 0.01, 0.18, z1 - z0), MAT.plankV, at((x0 + x1) / 2, 0.09, (z0 + z1) / 2));
+            worldUV(seg, WOOD_LOOK.tile);
+            paint(seg, deckColour);
+            // which end of each deck that is, in the deck's own frame (a building turned round has its -x on the right)
+            const flipA = Math.cos(A.o.parent.rotation.y) < 0, flipB = Math.cos(B.o.parent.rotation.y) < 0;
+            A.open[flipA ? 0 : 1] = true; B.open[flipB ? 1 : 0] = true;
+            joined++;
+        }
+    });
+
+    // each deck end: a step down to a road, a railing to the open sand, nothing where the boardwalk goes on
+    const beam = MAT.beam, top = 0.18;
+    decks.forEach(function (d) {
+        const p = d.o.geometry.parameters, M = d.o.matrixWorld, wall = -p.depth / 2, front = p.depth / 2;
+        [-1, 1].forEach(function (s, k) {
+            if (d.open[k]) return;
+            const endX = s * p.width / 2, end = new THREE.Vector3(endX, 0, 0).applyMatrix4(M);
+            if (onRoad(end.x, end.z)) {      // a step, the whole depth of the deck
+                const st = put(new THREE.BoxGeometry(0.45, 0.09, p.depth), MAT.plankV, M.clone().multiply(at(endX + s * 0.225, -0.045, 0)));   // half the deck's height
+                worldUV(st, WOOD_LOOK.tile); paint(st, deckColour);
+                steps++;
+                return;
+            }
+            const x = endX - s * 0.1, y0 = top - 0.09, len = (front - 0.25) - wall;
+            const zc = (wall + front - 0.25) / 2;
+            const piece = function (w, h, dd, px, py, pz) { put(new THREE.BoxGeometry(w, h, dd), beam, M.clone().multiply(at(px, py, pz))); };
+            piece(0.1, L.railH, 0.1, x, y0 + L.railH / 2, wall + 0.08);                // post by the wall
+            piece(0.1, L.railH, 0.1, x, y0 + L.railH / 2, front - 0.25);               // post at the front
+            piece(0.08, 0.07, len, x, y0 + L.railH - 0.05, zc);                          // top rail
+            piece(0.06, 0.06, len, x, y0 + 0.16, zc);                                    // bottom rail
+            const n = Math.floor(len / L.baluster);
+            for (let i = 1; i < n; i++) piece(0.035, L.railH - 0.24, 0.035, x, y0 + 0.16 + (L.railH - 0.24) / 2, wall + len * i / n);
+            rails++;
+        });
+    });
+    const drawn = mergeMeshesByLook(kit);
+    drawn.name = 'boardwalks';
+    decor.add(drawn);
+    kit.forEach(function (m) { m.geometry.dispose(); });
+    Object.assign(stats, { decks: decks.length, joined: joined, rails: rails, steps: steps });
+    return stats;
+}
+
 function buildVisualLayer() {
     // (the steps that change the town's looks go here, before the merge)
     groundLook();                            // M5
     mesaLook();                              // M6 - after M5 (uses its patches)
     horizonLook();                           // M7 - after M5 (the sand's material)
     woodLook();                              // M8
+    boardwalkLook();                         // M9a - after M8 (plankV takes colours now)
     skyAndSun();                             // M4
     mendRocks();                             // M3
     dressMine();                             // M3

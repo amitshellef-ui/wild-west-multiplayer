@@ -4547,11 +4547,238 @@ function horizonLook() {
     decor.add(horizonHills(rand));
 }
 
+/* ---- M8: the buildings' wood --------------------------------------------------------
+   Every wall wore one picture of 9 planks stretched over each face, so a board was
+   0.4 m on one wall and 1.4 m on the next (the porch decks: 1.5 m), and all sixteen
+   buildings came in four identical colours. Now:
+     - the planks are clapboard drawn to wrap, laid on by the metre (worldUV): every
+       board 0.22 m wherever it is, a lap shadow under each, butt joints with nails,
+       and every building starts its boards at its own height
+     - each building its own weathering (vertex colours: no extra draws - the four wall
+       materials take vertexColors, and every mesh of theirs gets the colour)
+     - panel doors, painted, one colour each
+     - a board ceiling under each porch roof, where the shingles showed from below
+     - a low stone foundation along the sides and back, standing out 0.16 m (the
+       player keeps 0.42 m from the wall; it has no collider, bullets pass it)
+   The foundation and ceilings are decor; the rest changes the town's own materials
+   and meshes, so it runs before the M2 merge. Nothing moves: only uvs and colours. */
+const WOOD_LOOK = {
+    tile: 2.4, boards: 11,                   // one picture = 2.4 m, 11 boards of 0.22 m
+    tints: [[1, 1, 1], [1.08, 1.04, 0.96], [0.88, 0.86, 0.84], [0.96, 0.99, 1.05], [1.05, 0.95, 0.9],
+        [0.94, 0.97, 0.9], [1.1, 1.07, 1.02], [0.92, 0.9, 0.95]],
+    doors: [[0.5, 0.36, 0.26], [0.42, 0.55, 0.42], [0.72, 0.33, 0.26], [0.46, 0.55, 0.64], [0.86, 0.76, 0.62], [0.36, 0.3, 0.26]],
+    stoneTile: 2.0, footH: 0.36, footOut: 0.16
+};
+function makeSiding(rand, base, dark, deck) {
+    const L = WOOD_LOOK, W = deck ? 512 : 1024, [c, x] = cv(W, 512), n = L.boards, h = 512 / n;   // walls: 4.8 m across (texture repeat 0.5), so a joint comes back only every 4.8 m
+    const rgb = function (a, k) { return 'rgb(' + a.map(function (v) { return Math.max(0, Math.min(255, v * k | 0)); }) + ')'; };
+    x.fillStyle = rgb(dark, 1); x.fillRect(0, 0, W, 512);
+    for (let i = 0; i < n; i++) {
+        const y0 = i * h;
+        x.fillStyle = rgb(base, 0.9 + rand() * 0.2);
+        x.fillRect(0, y0 + (deck ? 2 : 0.5), W, h - (deck ? 4 : 1));
+        for (let g = 0; g < 14; g++) {       // grain: whole waves across the picture, so a board runs on into the next picture
+            const gy = y0 + 3 + rand() * (h - 7), k = 1 + (rand() * 4 | 0), ph = rand() * 6.28, amp = 0.5 + rand() * 1.2;
+            x.strokeStyle = 'rgba(' + dark + ',' + (0.1 + rand() * 0.2) + ')';
+            x.lineWidth = 0.5 + rand() * 0.9;
+            x.beginPath();
+            for (let px = 0; px <= W; px += 8) {
+                const yy = gy + Math.sin(px / W * Math.PI * 2 * k + ph) * amp;
+                if (px) x.lineTo(px, yy); else x.moveTo(px, yy);
+            }
+            x.stroke();
+        }
+        if (!deck) {                         // the board above laps over this one: its shadow on top, a lit lip at the bottom
+            const sh = x.createLinearGradient(0, y0, 0, y0 + 9);
+            sh.addColorStop(0, 'rgba(20,12,4,0.55)'); sh.addColorStop(1, 'rgba(20,12,4,0)');
+            x.fillStyle = sh; x.fillRect(0, y0, W, 9);
+            x.fillStyle = 'rgba(255,240,215,0.16)'; x.fillRect(0, y0 + h - 3, W, 2);
+        }
+        if (rand() < 0.4) {                  // now and then a butt joint (boards run long), nailed either side
+            const bx = 20 + rand() * (W - 40);
+            x.fillStyle = 'rgba(' + dark + ',0.75)'; x.fillRect(bx, y0, 1.5, h);
+            x.fillStyle = 'rgba(40,30,20,0.6)';
+            [bx - 6, bx + 7].forEach(function (nx) { x.beginPath(); x.arc(nx, y0 + h * (deck ? 0.5 : 0.7), 1.4, 0, 7); x.fill(); });
+        }
+        if (rand() > 0.5) {                  // a knot, drawn twice when it sits on the edge
+            const kx = rand() * W, ky = y0 + h * (0.35 + rand() * 0.3), kr = 5 + rand() * 5;
+            [kx - W, kx, kx + W].forEach(function (cx) {
+                const grd = x.createRadialGradient(cx, ky, 0, cx, ky, kr);
+                grd.addColorStop(0, 'rgba(48,28,10,0.8)'); grd.addColorStop(1, 'rgba(48,28,10,0)');
+                x.fillStyle = grd; x.beginPath(); x.arc(cx, ky, kr, 0, 7); x.fill();
+            });
+        }
+    }
+    for (let i = 0; i < 9000 * W / 512; i++) {
+        x.fillStyle = 'rgba(30,18,6,' + (rand() * 0.13) + ')';
+        x.fillRect(rand() * W, rand() * 512, 2, 2);
+    }
+    if (!deck) return c;
+    const [c2, x2] = cv(512);                // deck boards run the other way
+    x2.translate(256, 256); x2.rotate(Math.PI / 2); x2.drawImage(c, -256, -256);
+    return c2;
+}
+function makePanelDoor(rand) {               // light and neutral: each door's paint is its vertex colour
+    const [c, x] = cv(256, 512);
+    x.fillStyle = '#e4d6c0'; x.fillRect(0, 0, 256, 512);
+    for (let i = 0; i < 3000; i++) {         // worn paint
+        x.fillStyle = 'rgba(' + (rand() < 0.5 ? '90,64,40,' : '255,250,235,') + (rand() * 0.12) + ')';
+        x.fillRect(rand() * 256, rand() * 512, 1 + rand() * 3, 1 + rand() * 6);
+    }
+    const panel = function (x0, y0, w, h) {  // sunk: shadow along the top and left, light along the bottom and right
+        x.fillStyle = 'rgba(60,40,22,0.22)'; x.fillRect(x0, y0, w, h);
+        x.fillStyle = 'rgba(40,26,12,0.55)'; x.fillRect(x0, y0, w, 6); x.fillRect(x0, y0, 6, h);
+        x.fillStyle = 'rgba(255,248,230,0.45)'; x.fillRect(x0, y0 + h - 5, w, 5); x.fillRect(x0 + w - 5, y0, 5, h);
+        x.fillStyle = 'rgba(255,248,230,0.12)'; x.fillRect(x0 + 16, y0 + 16, w - 32, h - 32);
+    };
+    panel(34, 34, 82, 180); panel(140, 34, 82, 180);
+    panel(34, 262, 82, 214); panel(140, 262, 82, 214);
+    x.strokeStyle = 'rgba(40,26,12,0.7)'; x.lineWidth = 6; x.strokeRect(3, 3, 250, 506);   // the edge of the leaf
+    x.fillStyle = 'rgba(30,20,10,0.35)'; x.fillRect(0, 490, 256, 22);                       // scuffed by boots
+    return c;
+}
+function makeFoundationStone(rand) {
+    const [c, x] = cv(512);
+    x.fillStyle = '#3e342b'; x.fillRect(0, 0, 512, 512);   // mortar
+    const rows = []; let sum = 0;
+    while (sum < 512) { const r = 44 + rand() * 20; rows.push(r); sum += r; }
+    const k = 512 / sum;
+    let y = 0;
+    rows.forEach(function (rh) {
+        rh *= k;
+        let bx = rand() * 60;
+        const start = bx;
+        while (bx < start + 512) {
+            const bw = Math.min(70 + rand() * 80, start + 512 - bx);
+            const s = 0.8 + rand() * 0.35, col = [124 * s, 100 * s, 80 * s].map(function (v) { return v | 0; });   // the mesas' sandstone, darker
+            [bx - 512, bx].forEach(function (sx) {       // wraps: drawn again one picture to the left
+                x.fillStyle = 'rgb(' + col + ')';
+                x.fillRect(sx + 3, y + 3, bw - 6, rh - 6);
+                x.fillStyle = 'rgba(255,245,225,0.22)'; x.fillRect(sx + 3, y + 3, bw - 6, 4);
+                x.fillStyle = 'rgba(30,24,18,0.35)'; x.fillRect(sx + 3, y + rh - 7, bw - 6, 4);
+            });
+            bx += bw;
+        }
+        y += rh;
+    });
+    for (let i = 0; i < 7000; i++) {
+        x.fillStyle = 'rgba(' + (rand() < 0.5 ? '40,34,28,' : '230,220,200,') + (rand() * 0.15) + ')';
+        x.fillRect(rand() * 512, rand() * 512, 2, 2);
+    }
+    return c;
+}
+function paint(mesh, rgb) {                  // one colour on every vertex
+    const n = mesh.geometry.attributes.position.count, a = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) { a[i * 3] = rgb[0]; a[i * 3 + 1] = rgb[1]; a[i * 3 + 2] = rgb[2]; }
+    mesh.geometry.setAttribute('color', new THREE.BufferAttribute(a, 3));
+}
+function woodLook() {
+    const L = WOOD_LOOK, rand = makeSeededRandom(VISUAL_SEED + 8);
+    const walls = [MAT.plank, MAT.plankGrey, MAT.plankRed, MAT.plankPale];
+    const colours = [[[148, 104, 60], [74, 48, 24]], [[134, 120, 100], [62, 54, 42]], [[146, 76, 50], [66, 30, 18]], [[186, 162, 124], [96, 78, 54]]];
+    walls.forEach(function (m, i) {
+        const old = m.map;
+        m.map = tex(makeSiding(rand, colours[i][0], colours[i][1], false), 0.5, 1);
+        old.dispose();
+        m.vertexColors = true;
+        m.defaultAttributeValues = { color: [1, 1, 1] };   // a mesh without colours (none today) draws as it was
+        m.needsUpdate = true;
+    });
+    const oldV = MAT.plankV.map;
+    MAT.plankV.map = tex(makeSiding(rand, colours[0][0], colours[0][1], true), 1, 1);
+    oldV.dispose();
+    MAT.plankV.vertexColors = true;
+    MAT.plankV.defaultAttributeValues = { color: [1, 1, 1] };
+    MAT.plankV.needsUpdate = true;
+    const doorMat = new THREE.MeshStandardMaterial({ map: tex(makePanelDoor(rand), 1, 1), vertexColors: true, roughness: 0.8 });
+    const ceilMat = new THREE.MeshStandardMaterial({ map: MAT.plank.map, color: 0xb09a80, roughness: 0.95 });
+    const stoneMat = new THREE.MeshStandardMaterial({ map: tex(makeFoundationStone(rand), 1, 1), roughness: 1 });
+
+    world.updateMatrixWorld(true);
+    const isBox = function (o, m) { return o.isMesh && o.material === m && o.geometry.type === 'BoxGeometry'; };
+    const near = function (a, b) { return Math.abs(a - b) < 1e-3; };
+    const looks = new Map();                 // building group -> { tint, deck, v, u }
+    const lookOf = function (g) {
+        if (!looks.has(g)) {
+            looks.set(g, {
+                tint: L.tints[(rand() * L.tints.length) | 0].map(function (v) { return v * (0.97 + rand() * 0.06); }),
+                deck: 0.88 + rand() * 0.17,
+                u: rand() * L.tile, v: rand() * L.tile
+            });
+        }
+        return looks.get(g);
+    };
+    const laid = function (o, look) {        // by the metre, from this building's own starting board
+        worldUV(o, L.tile);
+        const U = o.geometry.attributes.uv;
+        for (let i = 0; i < U.count; i++) U.setXY(i, U.getX(i) + look.u / L.tile, U.getY(i) + look.v / L.tile);
+    };
+    const bodies = [], doors = [], porchRoofs = [];
+    let planked = 0;
+    world.traverse(function (o) {
+        if (!o.isMesh) return;
+        if (o.geometry.type !== 'BoxGeometry') {   // (plankV on a few cylinders) - the merge keeps colours only if every piece has them
+            if (walls.indexOf(o.material) >= 0 || o.material === MAT.plankV) paint(o, [1, 1, 1]);
+            return;
+        }
+        const p = o.geometry.parameters;
+        if (walls.indexOf(o.material) >= 0) {
+            const look = lookOf(o.parent);
+            laid(o, look); paint(o, look.tint); planked++;
+            if (p.width > 3 && p.height > 3 && p.depth > 3) bodies.push(o);   // a whole building, not a walk-in's wall
+        } else if (o.material === MAT.plankV) {
+            const look = lookOf(o.parent);
+            laid(o, look); paint(o, [look.deck, look.deck, look.deck * 0.97]); planked++;
+        } else if (o.material === MAT.darkWood && near(p.width, 1.3) && near(p.height, 2.3) && near(p.depth, 0.12)) {
+            doors.push(o);
+        } else if (o.material === MAT.shingle && near(p.height, 0.16) && near(p.depth, 3.1)) {
+            porchRoofs.push(o);
+        }
+    });
+    doors.forEach(function (o) {
+        o.material = doorMat;
+        paint(o, L.doors[(rand() * L.doors.length) | 0]);
+    });
+
+    // decor: ceilings under the porch roofs, foundations along the sides and back
+    const kit = [];
+    const put = function (geo, mat, matrix) {
+        const m = new THREE.Mesh(geo, mat);
+        m.matrixAutoUpdate = false;
+        m.matrix.copy(matrix); m.matrixWorld.copy(matrix);
+        m.castShadow = false; m.receiveShadow = true;
+        kit.push(m);
+        return m;
+    };
+    porchRoofs.forEach(function (o) {
+        const p = o.geometry.parameters;
+        const under = new THREE.Matrix4().makeTranslation(0, -p.height / 2 - 0.01, 0)
+            .multiply(new THREE.Matrix4().makeRotationX(Math.PI / 2));         // facing down
+        worldUV(put(new THREE.PlaneGeometry(p.width, p.depth), ceilMat, o.matrixWorld.clone().multiply(under)), L.tile);
+    });
+    bodies.forEach(function (o) {
+        const p = o.geometry.parameters, w = p.width, d = p.depth, out = L.footOut, fh = L.footH + 0.05;
+        const y = -p.height / 2 + fh / 2 - 0.05;
+        const strip = function (sw, sd, x, z) {
+            worldUV(put(new THREE.BoxGeometry(sw, fh, sd), stoneMat,
+                o.matrixWorld.clone().multiply(new THREE.Matrix4().makeTranslation(x, y, z))), L.stoneTile);
+        };
+        strip(w + 2 * out, 2 * out, 0, -d / 2);                      // the back
+        [-1, 1].forEach(function (s) { strip(2 * out, d + out, s * w / 2, -out / 2); });   // the sides, up to the front
+    });
+    const drawn = mergeMeshesByLook(kit);
+    drawn.name = 'wood-dressing';
+    decor.add(drawn);
+    kit.forEach(function (m) { m.geometry.dispose(); });
+    return { planked: planked, bodies: bodies.length, doors: doors.length, porches: porchRoofs.length, buildings: looks.size };
+}
+
 function buildVisualLayer() {
     // (the steps that change the town's looks go here, before the merge)
     groundLook();                            // M5
     mesaLook();                              // M6 - after M5 (uses its patches)
     horizonLook();                           // M7 - after M5 (the sand's material)
+    woodLook();                              // M8
     skyAndSun();                             // M4
     mendRocks();                             // M3
     dressMine();                             // M3

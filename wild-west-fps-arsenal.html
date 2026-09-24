@@ -4097,8 +4097,165 @@ function skyAndSun() {
     MAT.road.needsUpdate = MAT.road2.needsUpdate = true;
 }
 
+/* ---- M5: the ground ------------------------------------------------------------
+   The sand tiled every 6.7 m and its patches were not drawn to wrap, so every tile
+   edge was a straight seam; nothing darkened the ground where a wall or a barrel met
+   it, so the town seemed to hover; and the streets ended in ruler lines. All three are
+   done in the ground's and the streets' shaders (nothing new in the scene, no extra
+   draw): a sand tile that wraps, sampled twice at scales that never line up (the second
+   turned 37 degrees); big soft patches over the whole map; a soft contact shadow painted
+   from the colliders' footprints (every wall, prop, rock and mesa strip - not the five
+   invisible boundary walls); and a ragged street edge with trodden sand beside it. */
+const GROUND_LOOK = {
+    half: 100,                               // the ground plane is 200 x 200, centred
+    aoSize: 1024, aoBlurPx: 6, aoDark: 0.42, // contact shadow: ~0.2 m a pixel, ~1.2 m soft
+    second: 1 / 17.3,                        // the second sand sample, per metre
+    patch: 1 / 70,                           // the big patches, per metre
+    streets: [[0, 0, 44, 7.5], [-4, 0, 1.8, 31]]   // [x, z, half x, half z]: street, cross street
+};
+function makeSandWrapped(rand) {
+    const [c, x] = cv(512);
+    x.fillStyle = '#c29a5c'; x.fillRect(0, 0, 512, 512);
+    const nine = function (draw) { for (let dx = -512; dx <= 512; dx += 512) for (let dy = -512; dy <= 512; dy += 512) draw(dx, dy); };
+    for (let i = 0; i < 90; i++) {
+        const px = rand() * 512, py = rand() * 512, r = 25 + rand() * 95, tint = rand() > 0.5 ? '160,124,74' : '210,180,130';
+        nine(function (dx, dy) {
+            const grd = x.createRadialGradient(px + dx, py + dy, 0, px + dx, py + dy, r);
+            grd.addColorStop(0, 'rgba(' + tint + ',0.30)');
+            grd.addColorStop(1, 'rgba(' + tint + ',0)');
+            x.fillStyle = grd; x.beginPath(); x.arc(px + dx, py + dy, r, 0, 7); x.fill();
+        });
+    }
+    for (let i = 0; i < 34000; i++) {
+        const v = Math.floor(rand() * 70);
+        x.fillStyle = 'rgba(' + (v + 40) + ',' + (v + 24) + ',' + v + ',' + (0.10 + rand() * 0.12) + ')';
+        x.fillRect(rand() * 512, rand() * 512, 1.6, 1.6);
+    }
+    for (let i = 0; i < 300; i++) {
+        const px = rand() * 512, py = rand() * 512, r = 1 + rand() * 2.4, a = 0.2 + rand() * 0.3;
+        nine(function (dx, dy) { x.fillStyle = 'rgba(92,70,45,' + a + ')'; x.beginPath(); x.arc(px + dx, py + dy, r, 0, 7); x.fill(); });
+    }
+    return c;
+}
+function makeDirtRoadWrapped(rand) {         // makeDirtRoad, drawn so the tile has no seam
+    const [c, x] = cv(512);
+    x.fillStyle = '#a8814c'; x.fillRect(0, 0, 512, 512);
+    for (let i = 0; i < 70; i++) {
+        const px = rand() * 512, py = rand() * 512, r = 30 + rand() * 110;
+        for (let dx = -512; dx <= 512; dx += 512) for (let dy = -512; dy <= 512; dy += 512) {
+            const grd = x.createRadialGradient(px + dx, py + dy, 0, px + dx, py + dy, r);
+            grd.addColorStop(0, 'rgba(126,94,52,0.42)'); grd.addColorStop(1, 'rgba(126,94,52,0)');
+            x.fillStyle = grd; x.beginPath(); x.arc(px + dx, py + dy, r, 0, 7); x.fill();
+        }
+    }
+    x.strokeStyle = 'rgba(92,66,34,0.5)'; x.lineWidth = 13;
+    [120, 178, 330, 392].forEach(function (y, k) {   // the ruts: whole waves across the tile
+        x.beginPath(); x.moveTo(0, y);
+        for (let px = 0; px <= 512; px += 16) x.lineTo(px, y + Math.sin(px / 512 * 6.283 * 3 + k) * 7);
+        x.stroke();
+    });
+    for (let i = 0; i < 24000; i++) {
+        const v = Math.floor(rand() * 60);
+        x.fillStyle = 'rgba(' + (v + 30) + ',' + (v + 18) + ',' + v + ',0.16)';
+        x.fillRect(rand() * 512, rand() * 512, 2, 2);
+    }
+    return c;
+}
+function makePatches(rand) {                 // grey soft blobs that wrap: big patches, and (sampled fine) noise
+    const [c, x] = cv(256);
+    x.fillStyle = '#808080'; x.fillRect(0, 0, 256, 256);
+    for (let i = 0; i < 70; i++) {
+        const px = rand() * 256, py = rand() * 256, r = 10 + rand() * 50, v = rand() > 0.5 ? 255 : 0, a = 0.15 + rand() * 0.25;
+        for (let dx = -256; dx <= 256; dx += 256) for (let dy = -256; dy <= 256; dy += 256) {
+            const g = x.createRadialGradient(px + dx, py + dy, 0, px + dx, py + dy, r);
+            g.addColorStop(0, 'rgba(' + v + ',' + v + ',' + v + ',' + a + ')');
+            g.addColorStop(1, 'rgba(' + v + ',' + v + ',' + v + ',0)');
+            x.fillStyle = g; x.fillRect(px + dx - r, py + dy - r, r * 2, r * 2);
+        }
+    }
+    const t = new THREE.CanvasTexture(c);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    return t;
+}
+function makeContactShadows() {              // white ground, black footprints, blurred; row = z, not flipped
+    const G = GROUND_LOOK, N = G.aoSize, k = N / (G.half * 2);
+    const [c, x] = cv(N);
+    x.fillStyle = '#fff'; x.fillRect(0, 0, N, N);
+    x.fillStyle = '#000';
+    colliders.forEach(function (b) {
+        const w = b.max.x - b.min.x, d = b.max.z - b.min.z;
+        if (w * d > 150 || b.min.y > 0.3) return;     // the boundary walls; anything not on the ground
+        x.fillRect((b.min.x + G.half) * k, (b.min.z + G.half) * k, w * k, d * k);
+    });
+    const [c2, x2] = cv(N);
+    if ('filter' in x2) {
+        x2.filter = 'blur(' + G.aoBlurPx + 'px)';
+        x2.drawImage(c, 0, 0);
+    } else {                                 // no canvas filter: blur by shrinking and stretching back
+        const [c3, x3] = cv(N / 8);
+        x3.drawImage(c, 0, 0, N / 8, N / 8);
+        x2.imageSmoothingEnabled = true;
+        x2.drawImage(c3, 0, 0, N, N);
+    }
+    const t = new THREE.CanvasTexture(c2);
+    t.flipY = false;
+    return t;
+}
+function groundShader(mat, key, fragment) {
+    const G = GROUND_LOOK, shared = groundShader.shared;
+    mat.onBeforeCompile = function (shader) {
+        shader.uniforms.gPatch = { value: shared.patch };
+        shader.uniforms.gShade = { value: shared.shade };
+        shader.vertexShader = 'varying vec2 vGroundXZ;\n' + shader.vertexShader.replace('#include <begin_vertex>',
+            '#include <begin_vertex>\n\tvGroundXZ = (modelMatrix * vec4(transformed, 1.0)).xz;');
+        shader.fragmentShader = 'uniform sampler2D gPatch;\nuniform sampler2D gShade;\nvarying vec2 vGroundXZ;\n' +
+            'float groundBox(vec4 s) { vec2 d = abs(vGroundXZ - s.xy) - s.zw; return max(d.x, d.y); }\n' +
+            shader.fragmentShader.replace('#include <map_fragment>', fragment +
+                '\n\tfloat gPatchK = texture2D(gPatch, vGroundXZ * ' + G.patch.toFixed(5) + ').r;' +
+                '\n\tdiffuseColor.rgb *= mix(0.88, 1.08, gPatchK);' +
+                '\n\tfloat gShadeK = texture2D(gShade, vGroundXZ / ' + (G.half * 2).toFixed(1) + ' + 0.5).r;' +
+                '\n\tdiffuseColor.rgb *= mix(' + (1 - G.aoDark).toFixed(3) + ', 1.0, gShadeK);');
+    };
+    mat.customProgramCacheKey = function () { return key; };   // the three share one function body
+    mat.needsUpdate = true;
+}
+function groundLook() {
+    const G = GROUND_LOOK, rand = makeSeededRandom(VISUAL_SEED + 5);
+    const old = MAT.sand.map;
+    MAT.sand.map = tex(makeSandWrapped(rand), old.repeat.x, old.repeat.y);
+    old.dispose();
+    const road = makeDirtRoadWrapped(rand);
+    [MAT.road, MAT.road2].forEach(function (m) {
+        const o = m.map;
+        m.map = tex(road, o.repeat.x, o.repeat.y);
+        o.dispose();
+    });
+    groundShader.shared = { patch: makePatches(rand), shade: makeContactShadows() };
+    const box = function (s) { return 'vec4(' + s.map(function (v) { return v.toFixed(2); }).join(', ') + ')'; };
+    const streetDist = 'min(groundBox(' + box(G.streets[0]) + '), groundBox(' + box(G.streets[1]) + '))';
+    // sand: two samples that never line up, and the trodden strip along the street edges
+    groundShader(MAT.sand, 'ground-sand',
+        '#ifdef USE_MAP\n' +
+        '\tvec4 gA = texture2D(map, vUv);\n' +
+        '\tvec2 gQ = vGroundXZ * ' + G.second.toFixed(5) + ';\n' +
+        '\tvec4 gB = texture2D(map, vec2(gQ.x * 0.8 - gQ.y * 0.6, gQ.x * 0.6 + gQ.y * 0.8));\n' +
+        '\tdiffuseColor *= mapTexelToLinear(mix(gA, gB, 0.45));\n' +
+        '#endif\n' +
+        '\tfloat gEdge = ' + streetDist + ' + texture2D(gPatch, vGroundXZ * 0.35).r * 0.6;\n' +
+        '\tdiffuseColor.rgb *= mix(vec3(0.85, 0.79, 0.71), vec3(1.0), smoothstep(0.0, 1.4, gEdge));');
+    // the streets: their own map, and an edge the sand breaks into (up to ~0.7 m)
+    [[MAT.road, 0], [MAT.road2, 1]].forEach(function (r) {
+        groundShader(r[0], 'ground-road' + r[1],
+            '\tif (groundBox(' + box(G.streets[r[1]]) + ') > -0.7 * texture2D(gPatch, vGroundXZ * 0.35).r) discard;\n' +
+            '#ifdef USE_MAP\n' +
+            '\tdiffuseColor *= mapTexelToLinear(texture2D(map, vUv));\n' +
+            '#endif');
+    });
+}
+
 function buildVisualLayer() {
     // (the steps that change the town's looks go here, before the merge)
+    groundLook();                            // M5
     skyAndSun();                             // M4
     mendRocks();                             // M3
     dressMine();                             // M3

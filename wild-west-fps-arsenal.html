@@ -5543,6 +5543,193 @@ function mineGlow() {
     return stats;
 }
 
+/* ---- M12a: hay bales -----------------------------------------------------------------------
+   The four bales were plain yellow boxes. Each gets a bale drawn over it: rounded edges, the
+   sides bulging a little, straw running along the sides and cut stalks on the ends (one
+   picture, two halves), two twine loops, a fringe of loose stalks along the top edges and
+   straw strewn on the ground round it. The old box (and its two rods, which poked out where
+   two bales overlap) stays where it was, hidden: it is still
+   what shots hit (the new bale is bigger than it everywhere, so a bullet hole never floats
+   in the air) and its collider is untouched. Four draws for all of it. */
+const HAY_LOOK = {
+    size: [1.6, 1.02, 1.1], round: 0.09,           // the old box is 1.5 x 0.95 x 1.0 - every corner of it stays inside
+    bulge: 0.035, lump: 0.012,                     // lumps only outward (the old corners are 1.6 cm inside the round)
+    twineAt: 0.42, twineR: 0.011, twineColor: 0x6b5332,
+    fringe: 0.08, fringeTile: 0.45,                 // loose stalks along the top edges: height, metres per picture
+    strewn: [3.0, 2.6]                             // straw on the ground round a bale
+};
+function hayLook() {
+    const L = HAY_LOOK, rand = makeSeededRandom(VISUAL_SEED + 12), stats = hayLook.stats = {};
+    const bales = [];
+    world.updateMatrixWorld(true);
+    world.traverse(function (o) { if (o.isMesh && o.material === MAT.hay) bales.push(o); });
+
+    // the straw: sides on the left three quarters, cut ends on the right quarter
+    const [c, x] = cv(1024, 512);
+    const straw = ['#e8cc7c', '#d9b560', '#c9a04a', '#b58c3c', '#f2dc98', '#a67c34'];
+    x.fillStyle = '#c29a4a'; x.fillRect(0, 0, 1024, 512);
+    x.lineCap = 'round';
+    for (let i = 0; i < 9000; i++) {                // sides: stalks lying along the bale
+        const px = rand() * 768, py = rand() * 512, len = 14 + rand() * 50, a = (rand() - 0.5) * 0.5;
+        x.strokeStyle = straw[Math.floor(rand() * straw.length)];
+        x.globalAlpha = 0.35 + rand() * 0.45; x.lineWidth = 1 + rand() * 2.2;
+        x.beginPath(); x.moveTo(px, py); x.lineTo(Math.min(767, px + Math.cos(a) * len), py + Math.sin(a) * len); x.stroke();
+    }
+    x.strokeStyle = '#7a5a26';
+    for (let fx = 20 + rand() * 30; fx < 760; fx += 55 + rand() * 45) {   // the flakes the baler packed it in: soft, broken
+        x.globalAlpha = 0.07 + rand() * 0.08; x.lineWidth = 3 + rand() * 4;
+        for (let fy = 0; fy < 512; fy += 24 + rand() * 40) {
+            if (rand() < 0.3) continue;
+            x.beginPath(); x.moveTo(fx + (rand() - 0.5) * 10, fy); x.lineTo(fx + (rand() - 0.5) * 10, fy + 20 + rand() * 40); x.stroke();
+        }
+    }
+    x.globalAlpha = 1; x.fillStyle = '#a88240'; x.fillRect(768, 0, 256, 512);
+    for (let i = 0; i < 5000; i++) {                // ends: cut stalks, every way
+        const px = 768 + rand() * 256, py = rand() * 512, len = 3 + rand() * 12, a = rand() * 6.283;
+        x.strokeStyle = straw[Math.floor(rand() * straw.length)];
+        x.globalAlpha = 0.5 + rand() * 0.5; x.lineWidth = 1 + rand() * 2;
+        x.beginPath(); x.moveTo(px, py); x.lineTo(Math.max(768, Math.min(1023, px + Math.cos(a) * len)), py + Math.sin(a) * len); x.stroke();
+    }
+    x.globalAlpha = 1;
+    const strawTex = new THREE.CanvasTexture(c);
+    strawTex.anisotropy = 4;
+    const baleMat = new THREE.MeshLambertMaterial({ map: strawTex, vertexColors: true });   // Lambert: looks the same on straw, costs less up close
+
+    // loose stalks, on a clear ground: the fringe along the top edges and the straw on the ground
+    const stalks = function (w, h, n, fromBottom) {
+        const [c2, y] = cv(w, h);
+        y.lineCap = 'round';
+        for (let i = 0; i < n; i++) {
+            const len = (fromBottom ? 0.5 + rand() * 0.5 : 0.3 + rand() * 0.7) * (fromBottom ? h : 26), a = fromBottom ? -Math.PI / 2 + (rand() - 0.5) * 1.3 : rand() * 6.283;
+            let px = rand() * w, py = fromBottom ? h : rand() * h;
+            if (!fromBottom) {                      // thinner the farther out
+                const dx = px / w - 0.5, dy = py / h - 0.5, d = Math.sqrt(dx * dx + dy * dy) * 2;
+                if (d > 1 || rand() < d * d) continue;
+            }
+            y.strokeStyle = straw[Math.floor(rand() * straw.length)]; y.lineWidth = fromBottom ? 1.5 + rand() * 1.5 : 0.8 + rand() * 1.0;
+            y.beginPath(); y.moveTo(px, py); y.lineTo(px + Math.cos(a) * len, py + Math.sin(a) * len); y.stroke();
+        }
+        const t = new THREE.CanvasTexture(c2);
+        t.anisotropy = 4;
+        return t;
+    };
+    const fringeTex = stalks(256, 48, 260, true);
+    fringeTex.wrapS = THREE.RepeatWrapping;
+    const fringeMat = new THREE.MeshLambertMaterial({ map: fringeTex, alphaTest: 0.4, side: THREE.DoubleSide });
+    const strewnMat = new THREE.MeshLambertMaterial({ map: stalks(512, 512, 1500, false), color: 0xb89a6c, transparent: true,   // (Standard here: +0.8 ms from 3 m)
+        depthWrite: false, polygonOffset: true, polygonOffsetFactor: -4, polygonOffsetUnits: -4 });
+    const twineMat = new THREE.MeshLambertMaterial({ color: L.twineColor });
+
+    // the bale's shape: a box pushed onto a rounded box, bulged, a little lumpy (same lump for the same point)
+    const H = new THREE.Vector3(L.size[0] / 2, L.size[1] / 2, L.size[2] / 2);
+    const I = H.clone().subScalar(L.round);
+    const hash = function (p) {
+        let h = Math.imul(Math.round(p.x * 997) | 0, 73856093) ^ Math.imul(Math.round(p.y * 997) | 0, 19349663) ^ Math.imul(Math.round(p.z * 997) | 0, 83492791);
+        h = Math.imul(h ^ (h >>> 13), 1274126177);
+        return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+    };
+    const shape = function (p, n, out) {          // p on the box -> out on the bale (centred on the origin), n its normal
+        const cl = new THREE.Vector3(Math.max(-I.x, Math.min(I.x, p.x)), Math.max(-I.y, Math.min(I.y, p.y)), Math.max(-I.z, Math.min(I.z, p.z)));
+        n.subVectors(p, cl).normalize();
+        let f = 1;
+        ['x', 'y', 'z'].forEach(function (k) { f *= 1 - (cl[k] / I[k]) * (cl[k] / I[k]) * (1 - n[k] * n[k]); });
+        const push = n.y < -0.5 ? 0 : L.bulge * f + L.lump * hash(p);
+        return out.copy(cl).addScaledVector(n, L.round + push);
+    };
+    const baleGeo = function (flip) {
+        const g = new THREE.BoxGeometry(L.size[0], L.size[1], L.size[2], 12, 7, 8);
+        const P = g.attributes.position, N = g.attributes.normal, U = g.attributes.uv;
+        const col = new Float32Array(P.count * 3), p = new THREE.Vector3(), n = new THREE.Vector3(), q = new THREE.Vector3();
+        for (let i = 0; i < P.count; i++) {
+            p.fromBufferAttribute(P, i);
+            const end = Math.abs(N.getX(i)) > 0.5;
+            let u = U.getX(i);
+            if (flip) u = 1 - u;
+            U.setX(i, end ? 0.75 + u * 0.25 : u * 0.75);
+            shape(p, n, q);
+            P.setXYZ(i, q.x, q.y + H.y, q.z);   // standing on the ground
+            N.setXYZ(i, n.x, n.y, n.z);
+            const k = 0.72 + 0.28 * Math.min(1, (q.y + H.y) / 0.35);   // darker where it meets the ground
+            col.set([k, k, k], i * 3);
+        }
+        g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+        return g;
+    };
+
+    const kit = [], strewn = [], M = new THREE.Matrix4(), T = new THREE.Matrix4();
+    const put = function (geo, mat, matrix, list) {
+        const m = new THREE.Mesh(geo, mat);
+        m.matrixAutoUpdate = false;
+        m.matrix.copy(matrix); m.matrixWorld.copy(matrix);
+        m.castShadow = mat !== strewnMat && mat !== fringeMat; m.receiveShadow = true;
+        (list || kit).push(m);
+        return m;
+    };
+    let twines = 0, fringes = 0;
+    bales.forEach(function (box) {
+        // the bale's own frame: the old box's group, on the ground (the box itself sits 0.48 up in it)
+        const base = box.parent.matrixWorld.clone();
+        const tint = 0.9 + rand() * 0.14, grey = rand() < 0.35 ? 0.1 + rand() * 0.12 : 0;   // some are older and greyer
+        const g = baleGeo(rand() < 0.5), C = g.attributes.color;
+        for (let i = 0; i < C.count; i++) {
+            const k = C.getX(i) * tint;
+            C.setXYZ(i, k * (1 - grey * 0.2), k * (1 - grey * 0.35), k * (1 - grey * 0.2) + grey * 0.1);
+        }
+        put(g, baleMat, base);
+        // twine: two loops round the short way, on the surface
+        [-L.twineAt, L.twineAt].forEach(function (tx) {
+            const pts = [], p = new THREE.Vector3(), n = new THREE.Vector3(), q = new THREE.Vector3(), S = 10;
+            const corners = [[H.y, H.z], [H.y, -H.z], [-H.y, -H.z], [-H.y, H.z]];
+            for (let e = 0; e < 4; e++) {
+                const a = corners[e], b = corners[(e + 1) % 4];
+                for (let s = 0; s < S; s++) {
+                    p.set(tx, a[0] + (b[0] - a[0]) * s / S, a[1] + (b[1] - a[1]) * s / S);
+                    shape(p, n, q);
+                    q.addScaledVector(n, L.lump + L.twineR * 0.4);
+                    pts.push(new THREE.Vector3(q.x, q.y + H.y, q.z));
+                }
+            }
+            put(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts, true), 48, L.twineR, 4, true), twineMat, base);
+            twines++;
+        });
+        // fringe: two cards along each top edge, leaning out
+        [[1, 0, 0, L.size[2]], [-1, 0, 0, L.size[2]], [0, 0, 1, L.size[0]], [0, 0, -1, L.size[0]]].forEach(function (e) {
+            const out = new THREE.Vector3(e[0], 0, e[2]), along = new THREE.Vector3(e[2], 0, -e[0]);
+            const len = e[3] - L.round * 1.2, reach = e[0] ? H.x : H.z;
+            for (let layer = 0; layer < 2; layer++) {
+                const up = new THREE.Vector3(0, 1, 0).addScaledVector(out, 0.35 + layer * 0.5 + rand() * 0.2).normalize();
+                const edge = out.clone().multiplyScalar(reach - L.round * 0.55 + layer * 0.02).setY(L.size[1] - L.round * 0.45 + L.bulge * 0.3);
+                const h = L.fringe * (0.8 + rand() * 0.5);
+                const b0 = edge.clone().addScaledVector(along, -len / 2).addScaledVector(up, -0.03);
+                const b1 = edge.clone().addScaledVector(along, len / 2).addScaledVector(up, -0.03);
+                const t0 = b0.clone().addScaledVector(up, h), t1 = b1.clone().addScaledVector(up, h);
+                const nrm = out.clone().multiplyScalar(0.6).setY(0.8).normalize();
+                const u0 = rand(), u1 = u0 + len / L.fringeTile;
+                const geo = new THREE.BufferGeometry();
+                geo.setAttribute('position', new THREE.Float32BufferAttribute([b0.x, b0.y, b0.z, b1.x, b1.y, b1.z, t1.x, t1.y, t1.z, t0.x, t0.y, t0.z], 3));
+                geo.setAttribute('normal', new THREE.Float32BufferAttribute([].concat(nrm.toArray(), nrm.toArray(), nrm.toArray(), nrm.toArray()), 3));
+                geo.setAttribute('uv', new THREE.Float32BufferAttribute([u0, 0, u1, 0, u1, 1, u0, 1], 2));
+                geo.setIndex([0, 1, 2, 0, 2, 3]);
+                put(geo, fringeMat, base);
+                fringes++;
+            }
+        });
+        // straw on the ground, turned a little off the bale
+        T.makeRotationY(rand() * 6.283).setPosition(0, 0.025, 0);
+        M.multiplyMatrices(base, T);
+        put(new THREE.PlaneGeometry(L.strewn[0], L.strewn[1]).rotateX(-Math.PI / 2), strewnMat, M, strewn);
+        box.parent.children.forEach(function (o) { o.visible = false; });   // the box and its two rods: still in `world`, what shots hit, under the new bale
+    });
+    const drawn = mergeMeshesByLook(kit.concat(strewn));
+    drawn.children.forEach(function (m) { if (m.material === strewnMat) m.renderOrder = 1; });
+    drawn.name = 'hay';
+    decor.add(drawn);
+    kit.concat(strewn).forEach(function (m) { m.geometry.dispose(); });
+    Object.assign(stats, { bales: bales.length, twines: twines, fringes: fringes, parts: drawn.children.length,
+        tris: drawn.children.reduce(function (s, m) { return s + m.geometry.index.count / 3; }, 0) });
+    return stats;
+}
+
 function buildVisualLayer() {
     // (the steps that change the town's looks go here, before the merge)
     groundLook();                            // M5
@@ -5558,6 +5745,7 @@ function buildVisualLayer() {
     mendRocks();                             // M3
     dressMine();                             // M3
     mineGlow();                              // M11 - after M3 (dressMine says where the lamps and crystals are)
+    hayLook();                               // M12a - before the merge (it hides the old bales)
     mergeTownForDrawing();                   // M2 - after every change to the town, before the shadows
     bakeSunShadows();                        // M1 - last: it draws the shadows of whatever is there
 }

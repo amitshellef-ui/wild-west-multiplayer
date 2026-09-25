@@ -174,8 +174,7 @@
     #net-status.net-wait { color: #e0a83c; border-color: #6b451f; }
     #net-status.net-off { color: #b8734e; border-color: #5a3020; }
 
-    /* Temporary network readout - proves position/rotation sync before any
-       remote body exists in the world. Goes away in step 5. */
+    /* Network readout for netcode work - shown only with ?net in the address. */
     #net-debug {
         top: 152px; left: 18px; min-width: 210px; display: none;
         font-family: 'Segoe UI', Tahoma, sans-serif; font-size: 10px;
@@ -1270,12 +1269,13 @@ function playRemoteShot(m) {
     NET.shotsRecv++;
 }
 
-/* Temporary: shows what the network layer currently believes about everyone.
-   This is the only visible proof of steps 3 and 4 - remote bodies arrive in
-   step 5, and this panel disappears then. */
+/* What the network layer currently believes about everyone - for whoever is
+   working on the netcode, so only with ?net in the address (code review
+   2026-09-25: players no longer see it). */
+const NET_DEBUG = /[?&]net\b/.test(location.search);
 let netDebugTimer = 0;
 function refreshNetDebug(now) {
-    if (!netDebugEl) return;
+    if (!netDebugEl || !NET_DEBUG) return;
     if (now - netDebugTimer < 150) return;
     netDebugTimer = now;
 

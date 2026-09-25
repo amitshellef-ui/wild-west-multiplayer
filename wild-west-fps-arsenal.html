@@ -5053,6 +5053,194 @@ function windowLook() {
     return stats;
 }
 
+/* ---- M9c: false-front crowns and chimneys -------------------------------------------
+   Sixteen false fronts cut the sky with the same flat line. Each now gets a crown on top of
+   the old front - stepped, arched, a gable, or flat with finials; never the same as the one
+   before it in the row - and corbels under its cornice. The old front stays exactly as it
+   was (bullets hit it as before); the crown is decor in the front's own planks and tint.
+   Behind, a brick chimney or a tin stovepipe on some roofs; HOMESTEAD's stove gets a pipe
+   up through the ceiling and out of the roof, CANTEEN a stovepipe on its roof. */
+const ROOFLINE_LOOK = {
+    crowns: ['stepped', 'arched', 'gable', 'flat'],
+    brick: 0.45, pipe: 0.3,                  // chimneys: brick, stovepipe (the rest: none)
+    corbelEvery: 0.9, brickTile: 1.0
+};
+function makeBrick(rand) {
+    const [c, x] = cv(256);
+    x.fillStyle = '#5a4a3e'; x.fillRect(0, 0, 256, 256);   // mortar
+    const rows = 8, bh = 256 / rows, bw = 64;
+    for (let r = 0; r < rows; r++) {
+        const off = r % 2 ? bw / 2 : 0;
+        for (let b = -1; b < 256 / bw + 1; b++) {
+            const s = 0.8 + rand() * 0.3, col = [150 * s, 82 * s, 58 * s].map(function (v) { return v | 0; });
+            x.fillStyle = 'rgb(' + col + ')';
+            x.fillRect(b * bw + off + 3, r * bh + 3, bw - 6, bh - 6);
+            x.fillStyle = 'rgba(255,235,210,0.15)'; x.fillRect(b * bw + off + 3, r * bh + 3, bw - 6, 3);
+        }
+    }
+    for (let i = 0; i < 4000; i++) {        // soot and dust
+        x.fillStyle = 'rgba(' + (rand() < 0.6 ? '30,22,18,' : '230,215,195,') + (rand() * 0.15) + ')';
+        x.fillRect(rand() * 256, rand() * 256, 2, 2);
+    }
+    return c;
+}
+function roofLineLook() {
+    const L = ROOFLINE_LOOK, T = WOOD_LOOK.tile, rand = makeSeededRandom(VISUAL_SEED + 10);
+    const stats = roofLineLook.stats = {};
+    const walls = [MAT.plank, MAT.plankGrey, MAT.plankRed, MAT.plankPale];
+    const brickMat = new THREE.MeshStandardMaterial({ map: tex(makeBrick(rand), 1, 1), roughness: 0.95 });
+    const capMat = new THREE.MeshStandardMaterial({ color: 0x6a5e52, roughness: 1 });
+    const flueMat = new THREE.MeshBasicMaterial({ color: 0x140f0c });
+    const near = function (a, b) { return Math.abs(a - b) < 1e-3; };
+    world.updateMatrixWorld(true);
+
+    // each building: its body, its false front (a wall-material box 0.3 deep, w + 0.35 wide) and the front's cornice
+    const houses = [];
+    world.traverse(function (o) {
+        if (!o.isMesh || o.geometry.type !== 'BoxGeometry' || walls.indexOf(o.material) < 0) return;
+        const p = o.geometry.parameters;
+        if (!(p.width > 3 && p.height > 3 && p.depth > 3)) return;
+        const g = o.parent, kids = g.children;
+        const ff = kids.find(function (m) { const q = m.geometry && m.geometry.parameters; return m.material === o.material && q && near(q.depth, 0.3) && near(q.width, p.width + 0.35); });
+        if (!ff) return;                     // (the church: no false front)
+        const cap = kids.find(function (m) { const q = m.geometry && m.geometry.parameters; return m.material === MAT.darkWood && q && near(q.width, p.width + 0.55) && near(q.height, 0.22); });
+        houses.push({ g: g, body: o, ff: ff, cap: cap, w: p.width, h: p.height, d: p.depth });
+    });
+
+    const kit = [];
+    const put = function (geo, mat, matrix) {
+        const m = new THREE.Mesh(geo, mat);
+        m.matrixAutoUpdate = false;
+        m.matrix.copy(matrix); m.matrixWorld.copy(matrix);
+        m.castShadow = true; m.receiveShadow = true;
+        kit.push(m);
+        return m;
+    };
+    const at = function (x, y, z) { return new THREE.Matrix4().makeTranslation(x, y, z); };
+    // planks as the front's own: world UVs by the metre, shifted as woodLook shifted this building, and its tint
+    const asFront = function (m, H) {
+        const P = H.ff.geometry.attributes.position, U = H.ff.geometry.attributes.uv, N = H.ff.geometry.attributes.normal;
+        const v = new THREE.Vector3(), n = new THREE.Vector3(), nm = new THREE.Matrix3().getNormalMatrix(H.ff.matrixWorld);
+        let du = 0, dv = 0;
+        for (let i = 0; i < P.count; i++) {  // a vertex of the front face: its uv minus the plain world uv is the shift
+            n.fromBufferAttribute(N, i).applyMatrix3(nm);
+            if (Math.abs(n.z) < 0.9) continue;
+            v.fromBufferAttribute(P, i).applyMatrix4(H.ff.matrixWorld);
+            du = U.getX(i) - v.x / T; dv = U.getY(i) - v.y / T;
+            break;
+        }
+        worldUV(m, T);
+        const MU = m.geometry.attributes.uv;
+        for (let i = 0; i < MU.count; i++) MU.setXY(i, MU.getX(i) + du, MU.getY(i) + dv);
+        const C = H.ff.geometry.attributes.color;
+        paint(m, C ? [C.getX(0), C.getY(0), C.getZ(0)] : [1, 1, 1]);
+        return m;
+    };
+    const extrude = function (shape, depth) {
+        const geo = new THREE.ExtrudeGeometry(shape, { depth: depth, bevelEnabled: false, curveSegments: 18 });
+        geo.translate(0, 0, -depth / 2);
+        return geo;
+    };
+
+    let prev = '', corbels = 0, bricks = 0, pipes = 0;
+    const crowns = {};
+    const stovepipe = function (G, x, y0, z, len) {             // tin pipe, a collar at the roof, a coolie hat on top
+        put(new THREE.CylinderGeometry(0.1, 0.1, len, 10), MAT.rust, G.clone().multiply(at(x, y0 + len / 2, z)));
+        put(new THREE.CylinderGeometry(0.17, 0.2, 0.12, 10), MAT.metal, G.clone().multiply(at(x, y0 + 0.06, z)));
+        put(new THREE.CylinderGeometry(0.035, 0.035, 0.16, 6), MAT.metal, G.clone().multiply(at(x, y0 + len + 0.08, z)));
+        put(new THREE.ConeGeometry(0.26, 0.2, 12), MAT.metal, G.clone().multiply(at(x, y0 + len + 0.24, z)));
+        pipes++;
+    };
+    houses.forEach(function (H) {
+        const G = H.g.matrixWorld, ffP = H.ff.geometry.parameters, fz = H.ff.position.z, fw = ffP.width;
+        const top = H.ff.position.y + ffP.height / 2;           // the old front's top (the cornice sits on it)
+        const capTop = H.cap ? H.cap.position.y + 0.11 : top;
+        // pick a crown - never the same as the building before
+        let style;
+        do { style = L.crowns[(rand() * L.crowns.length) | 0]; } while (style === prev);
+        prev = style;
+        crowns[style] = (crowns[style] || 0) + 1;
+        const wall = function (geo, x, y) { return asFront(put(geo, H.ff.material, G.clone().multiply(at(x, y, fz))), H); };
+        const trim = function (w, h, d, x, y, zOut) { return put(new THREE.BoxGeometry(w, h, d), MAT.darkWood, G.clone().multiply(at(x, y, fz + (zOut || 0)))); };
+        const y0 = capTop - 0.02;                               // crowns stand on the cornice
+        if (style === 'stepped') {
+            const ws = fw * 0.72, wc = Math.min(fw * 0.42, 4.5);
+            wall(new THREE.BoxGeometry(ws, 0.4, 0.3), 0, y0 + 0.2);
+            wall(new THREE.BoxGeometry(wc, 0.8, 0.3), 0, y0 + 0.4);
+            [-1, 1].forEach(function (s) { trim((ws - wc) / 2 + 0.12, 0.12, 0.4, s * (wc / 2 + (ws - wc) / 4), y0 + 0.46); });
+            trim(wc + 0.22, 0.14, 0.42, 0, y0 + 0.87);
+        } else if (style === 'arched' || style === 'gable') {
+            const a = Math.min(fw * (style === 'arched' ? 0.32 : 0.36), 3.6), e = 0.15, r = style === 'arched' ? 0.75 : 1.05;
+            const sh = new THREE.Shape();
+            sh.moveTo(-a, 0); sh.lineTo(a, 0); sh.lineTo(a, e);
+            if (style === 'arched') {
+                const R = (a * a + r * r) / (2 * r), cy = e + r - R, t0 = Math.atan2(e - cy, a);
+                sh.absarc(0, cy, R, t0, Math.PI - t0, false);
+                // the cornice follows the curve: a band just over the arc
+                const band = new THREE.Shape();
+                band.absarc(0, cy, R + 0.1, t0 - 0.004, Math.PI - t0 + 0.004, false);
+                band.absarc(0, cy, R - 0.02, Math.PI - t0 + 0.004, t0 - 0.004, true);
+                put(extrude(band, 0.4), MAT.darkWood, G.clone().multiply(at(0, y0, fz)));
+            } else {
+                sh.lineTo(0, e + r);
+                sh.lineTo(-a, e);
+                const slope = Math.atan2(r, a), len = Math.hypot(a, r) + 0.2;
+                [-1, 1].forEach(function (s) {
+                    put(new THREE.BoxGeometry(len, 0.12, 0.4), MAT.darkWood, G.clone().multiply(at(s * a / 2, y0 + e + r / 2 + 0.06, fz))
+                        .multiply(new THREE.Matrix4().makeRotationZ(-s * slope)));
+                });
+                put(new THREE.SphereGeometry(0.13, 10, 8), MAT.darkWood, G.clone().multiply(at(0, y0 + e + r + 0.2, fz)));
+            }
+            sh.lineTo(-a, 0);
+            wall(extrude(sh, 0.3), 0, y0);
+        } else {                                                // flat: a finial post at each end of the cornice
+            [-1, 1].forEach(function (s) {
+                put(new THREE.BoxGeometry(0.16, 0.3, 0.16), MAT.darkWood, G.clone().multiply(at(s * (fw / 2 - 0.08), capTop + 0.15, fz)));
+                put(new THREE.SphereGeometry(0.13, 10, 8), MAT.darkWood, G.clone().multiply(at(s * (fw / 2 - 0.08), capTop + 0.4, fz)));
+            });
+        }
+        // corbels under the cornice, all along the front - but not through the sign where it reaches up there
+        const sign = H.g.children.find(function (m) { return m.geometry && m.geometry.type === 'PlaneGeometry' && m.position.y > H.h && Math.abs(m.position.z - fz - 0.2) < 0.01; });
+        const sp = sign && sign.geometry.parameters, clear = sp && sign.position.y + sp.height / 2 > top - 0.4 ? sp.width / 2 + 0.12 : 0;
+        const n = Math.max(2, Math.round(fw / L.corbelEvery));
+        for (let i = 0; i <= n; i++) {
+            const x = -fw / 2 + 0.12 + (fw - 0.24) * i / n;
+            if (Math.abs(x) < clear) continue;
+            trim(0.12, 0.26, 0.1, x, top - 0.24, 0.2);
+            corbels++;
+        }
+        // a chimney towards the back, on one side
+        const r = rand(), side = rand() < 0.5 ? -1 : 1, roofTop = H.h + 0.245;
+        const cx = side * H.w * 0.28, cz = -H.d * 0.22;
+        if (r < L.brick) {
+            const ch = 1.3 + rand() * 0.5;
+            const stack = put(new THREE.BoxGeometry(0.62, ch + 0.1, 0.62), brickMat, G.clone().multiply(at(cx, roofTop + ch / 2 - 0.05, cz)));
+            worldUV(stack, L.brickTile);
+            put(new THREE.BoxGeometry(0.8, 0.1, 0.8), capMat, G.clone().multiply(at(cx, roofTop + ch + 0.05, cz)));
+            put(new THREE.BoxGeometry(0.38, 0.02, 0.38), flueMat, G.clone().multiply(at(cx, roofTop + ch + 0.105, cz)));
+            bricks++;
+        } else if (r < L.brick + L.pipe) {
+            stovepipe(G, cx, roofTop - 0.02, cz, 1.1 + rand() * 0.4);
+        }
+    });
+
+    // the walk-ins that cook: HOMESTEAD from the stove top up through the ceiling, CANTEEN on the roof only
+    [[homestead, -2.0, -3.6, 1.16], [canteen, -2.6, -3.3, 0]].forEach(function (s) {
+        const g = s[0], G = g.matrixWorld;
+        const roof = g.children.find(function (m) { return m.material === MAT.shingle; });
+        const roofTop = roof.position.y + roof.geometry.parameters.height / 2, ceiling = roofTop - roof.geometry.parameters.height;
+        if (s[3]) put(new THREE.CylinderGeometry(0.09, 0.09, ceiling - s[3], 10), MAT.rust, G.clone().multiply(at(s[1], (s[3] + ceiling) / 2, s[2])));
+        stovepipe(G, s[1], roofTop - 0.02, s[2], 1.2);
+    });
+
+    const drawn = mergeMeshesByLook(kit);
+    drawn.name = 'roofline';
+    decor.add(drawn);
+    kit.forEach(function (m) { m.geometry.dispose(); });
+    Object.assign(stats, { houses: houses.length, crowns: crowns, corbels: corbels, bricks: bricks, pipes: pipes, pieces: kit.length, parts: drawn.children.length });
+    return stats;
+}
+
 function buildVisualLayer() {
     // (the steps that change the town's looks go here, before the merge)
     groundLook();                            // M5
@@ -5061,6 +5249,7 @@ function buildVisualLayer() {
     woodLook();                              // M8
     boardwalkLook();                         // M9a - after M8 (plankV takes colours now)
     windowLook();                            // M9b
+    roofLineLook();                          // M9c - after M8 (the fronts' planks and tints)
     skyAndSun();                             // M4
     mendRocks();                             // M3
     dressMine();                             // M3

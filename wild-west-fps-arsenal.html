@@ -5392,6 +5392,106 @@ function hitchingLook() {
     return stats;
 }
 
+/* ---- M10: inside the walk-ins -----------------------------------------------------------
+   The five walk-ins had sand for a floor, the roof's shingles for a ceiling, and furniture
+   hanging in the air (the kitchen table 1.3 m up on nothing, the bed, the sofa, the coffee
+   table). Now: a plank floor and a skirting board along the walls, a plank ceiling with
+   joists across it, and legs under every piece that floats with nothing beneath it (a piece
+   resting on another - the mattress, the stove top, the tools on the bench - is left alone).
+   All decor; the furniture itself does not move (bullets stop where they stopped). */
+const INTERIOR_LOOK = {
+    floorY: 0.03, floorTint: 0.8, skirtH: 0.12,
+    joistEvery: 1.6, ceilColor: 0x9c8870,
+    floatsAbove: 0.1, legInset: 0.1
+};
+function interiorLook() {
+    const L = INTERIOR_LOOK, T = WOOD_LOOK.tile;
+    const stats = interiorLook.stats = {};
+    const ceilMat = new THREE.MeshStandardMaterial({ map: MAT.plank.map, color: L.ceilColor, roughness: 0.95 });
+    const P = function (m) { return m.geometry && m.geometry.parameters; };
+    world.updateMatrixWorld(true);
+
+    const kit = [];
+    const put = function (geo, mat, matrix) {
+        const m = new THREE.Mesh(geo, mat);
+        m.matrixAutoUpdate = false;
+        m.matrix.copy(matrix); m.matrixWorld.copy(matrix);
+        m.castShadow = true; m.receiveShadow = true;
+        kit.push(m);
+        return m;
+    };
+    const at = function (x, y, z) { return new THREE.Matrix4().makeTranslation(x, y, z); };
+    const walls = [MAT.plank, MAT.plankGrey, MAT.plankRed, MAT.plankPale];
+
+    let floors = 0, joists = 0, legs = 0, standing = 0;
+    [homestead, supply, workshop, canteen, ranger].forEach(function (g) {
+        const G = g.matrixWorld;
+        const side = g.children.find(function (m) { const q = P(m); return walls.indexOf(m.material) >= 0 && q && Math.abs(q.width - 0.3) < 1e-3; });
+        const roof = g.children.find(function (m) { return m.material === MAT.shingle; });
+        if (!side || !roof) return;
+        const w = Math.abs(side.position.x) * 2, d = P(side).depth, h = P(side).height, t = 0.15;
+        const x0 = -w / 2 + t, x1 = w / 2 - t, z0 = -d / 2 + t, z1 = d / 2;
+        // floor
+        const floor = put(new THREE.PlaneGeometry(x1 - x0, z1 - z0), MAT.plankV,
+            G.clone().multiply(at(0, L.floorY, (z0 + z1) / 2)).multiply(new THREE.Matrix4().makeRotationX(-Math.PI / 2)));
+        floor.castShadow = false;
+        floor.renderOrder = -1;              // drawn before the ground, so the ground's shader is not run again under it
+        worldUV(floor, T); paint(floor, [L.floorTint, L.floorTint, L.floorTint * 0.97]);
+        // skirting: the back and both sides, up to the doorway posts
+        const skirt = function (sw, sd, x, z) { put(new THREE.BoxGeometry(sw, L.skirtH, sd), MAT.darkWood, G.clone().multiply(at(x, L.floorY + L.skirtH / 2, z))); };
+        skirt(x1 - x0, 0.03, 0, z0 + 0.015);
+        [-1, 1].forEach(function (s) { skirt(0.03, (z1 - 0.2) - z0, s * (x1 - 0.015), (z0 + z1 - 0.2) / 2); });
+        // ceiling under the roof, joists across it
+        const ceil = put(new THREE.PlaneGeometry(x1 - x0, z1 - z0), ceilMat,
+            G.clone().multiply(at(0, h - 0.01, (z0 + z1) / 2)).multiply(new THREE.Matrix4().makeRotationX(Math.PI / 2)));
+        ceil.castShadow = false;
+        ceil.renderOrder = -1;
+        worldUV(ceil, T);
+        const n = Math.max(2, Math.round((z1 - z0) / L.joistEvery));
+        for (let i = 1; i < n; i++) {
+            put(new THREE.BoxGeometry(x1 - x0, 0.18, 0.14), MAT.darkWood, G.clone().multiply(at(0, h - 0.1, z0 + (z1 - z0) * i / n)));
+            joists++;
+        }
+        floors++;
+
+        // legs under whatever floats with nothing beneath it
+        // (the mattress and the rug are in wall planks: they hold things up, they do not get legs; the walls are neither)
+        const pieces = g.children.filter(function (m) {
+            return m.isMesh && m.geometry.type === 'BoxGeometry' && m.material !== MAT.shingle && m.material !== MAT.glass && Math.abs(P(m).height - h) > 0.01;
+        }).map(function (m) {
+            const q = P(m);
+            return { m: m, x: m.position.x, z: m.position.z, hw: q.width / 2, hd: q.depth / 2, bottom: m.position.y - q.height / 2, top: m.position.y + q.height / 2,
+                legs: walls.indexOf(m.material) < 0 };
+        });
+        pieces.forEach(function (a) {
+            if (!a.legs || a.bottom < L.floatsAbove || (a.hw < 0.15 && a.hd < 0.15) || a.hw > w / 2 - 0.2) return;   // on the floor, a post, or the doorway lintel
+            if (a.m.position.y > h - 0.5) return;
+            const held = pieces.some(function (b) {
+                return b !== a && Math.abs(a.x - b.x) < a.hw + b.hw && Math.abs(a.z - b.z) < a.hd + b.hd && b.top >= a.bottom - 0.05 && b.bottom < a.bottom;
+            });
+            if (held) return;
+            const legMat = a.m.material === MAT.metal ? MAT.metal : MAT.darkWood;
+            const size = a.bottom > 0.5 ? 0.09 : 0.1, len = a.bottom - L.floorY;
+            const xs = a.hw > 1.5 ? [-1, 0, 1] : [-1, 1], ix = Math.min(L.legInset, a.hw / 2), iz = Math.min(L.legInset, a.hd / 2);
+            xs.forEach(function (sx) {
+                [-1, 1].forEach(function (sz) {
+                    put(new THREE.BoxGeometry(size, len, size), legMat, G.clone().multiply(at(
+                        a.x + sx * (a.hw - ix), L.floorY + len / 2, a.z + sz * (a.hd - iz))));
+                    legs++;
+                });
+            });
+            standing++;
+        });
+    });
+
+    const drawn = mergeMeshesByLook(kit);
+    drawn.name = 'interiors';
+    decor.add(drawn);
+    kit.forEach(function (m) { m.geometry.dispose(); });
+    Object.assign(stats, { floors: floors, joists: joists, standing: standing, legs: legs, pieces: kit.length, parts: drawn.children.length });
+    return stats;
+}
+
 function buildVisualLayer() {
     // (the steps that change the town's looks go here, before the merge)
     groundLook();                            // M5
@@ -5402,6 +5502,7 @@ function buildVisualLayer() {
     windowLook();                            // M9b
     roofLineLook();                          // M9c - after M8 (the fronts' planks and tints)
     hitchingLook();                          // M9d - after M8 (finds the doors by their size, not their material)
+    interiorLook();                          // M10 - after M8 (plankV takes colours; the ceiling uses the new siding)
     skyAndSun();                             // M4
     mendRocks();                             // M3
     dressMine();                             // M3

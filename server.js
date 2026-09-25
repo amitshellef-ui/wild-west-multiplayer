@@ -1,5 +1,6 @@
 const express = require("express");
 const crypto = require("crypto");
+const fs = require("fs");
 const http = require("http");
 const { Server } = require("socket.io");
 const path = require("path");
@@ -18,12 +19,41 @@ const server = http.createServer(app);
    Code review 2026-09-25 (S2). */
 const io = new Server(server, { maxHttpBufferSize: 32 * 1024 });
 
-app.use(express.static(__dirname));
+/* Over HTTP the server hands out only what the page loads (code review 2026-09-25): the page
+   itself, and models/*.glb - the fallback when the CDN copy fails. socket.io serves its own client
+   at /socket.io/. The rest of this folder - the server's source, node_modules, HANDOFF - stays off
+   the web (the whole folder used to be served, node_modules included). */
+const PAGE = "wild-west-fps-arsenal.html";
+app.get("/" + PAGE, (req, res) => res.sendFile(PAGE, { root: __dirname }));
+app.get("/models/:file", (req, res, next) => {
+    if (!/^[a-z0-9_-]+\.glb$/i.test(req.params.file)) return next();
+    res.sendFile(req.params.file, { root: path.join(__dirname, "models") });
+});
 
 // The short URL should open the game instead of returning 404
 app.get("/", (req, res) => {
-    res.redirect("/wild-west-fps-arsenal.html");
+    res.redirect("/" + PAGE);
 });
+
+/* Which build is running: the commit Render deployed and the sha256 of every file in it, so an
+   upload can be checked against the local copies without serving the files themselves. Hashed on
+   the first request, not at boot - a deploy's files never change while it runs. */
+let version = null;
+app.get("/version", (req, res) => {
+    if (!version) {
+        const files = {};
+        const hash = (rel) => { files[rel] = crypto.createHash("sha256").update(fs.readFileSync(path.join(__dirname, rel))).digest("hex"); };
+        const filesIn = (dir) => fs.readdirSync(path.join(__dirname, dir), { withFileTypes: true })
+            .filter((e) => e.isFile() && !e.name.startsWith(".")).map((e) => path.posix.join(dir, e.name));
+        filesIn(".").forEach(hash);
+        if (fs.existsSync(path.join(__dirname, "models"))) filesIn("models").forEach(hash);
+        version = { commit: process.env.RENDER_GIT_COMMIT || null, files: files };
+    }
+    res.json(version);
+});
+
+// the browser-check runners in tests/ add their own pages to it
+module.exports = { app };
 
 /* =========================================================================
    GAME MODES

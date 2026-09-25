@@ -5730,6 +5730,237 @@ function hayLook() {
     return stats;
 }
 
+/* ---- M12b: tumbleweeds ---------------------------------------------------------------------
+   The seven tumbleweeds were wireframe balls - a cage of straight lines. Each now gets a
+   tangle of dry twigs: curved branches round a ball, short side twigs off them, a few spokes
+   to the middle. Three shapes shared by the seven. They roll exactly as they did - the meshes
+   are the same objects, only their shape and paint are new - and they live in `scene`, not
+   `world`: bullets never stopped on them. */
+const TUMBLE_LOOK = {
+    radius: 0.55, shapes: 3,
+    twigs: 62, spokes: 10, thick: [0.007, 0.015],
+    color: 0x8c7048
+};
+function tumbleLook() {
+    const L = TUMBLE_LOOK, rand = makeSeededRandom(VISUAL_SEED + 13), stats = tumbleLook.stats = {};
+    const dir = function () {
+        const z = rand() * 2 - 1, a = rand() * 6.283, r = Math.sqrt(1 - z * z);
+        return new THREE.Vector3(r * Math.cos(a), z, r * Math.sin(a));
+    };
+    const thick = function (k) { return (L.thick[0] + rand() * (L.thick[1] - L.thick[0])) * k; };
+    const shape = function () {
+        const parts = [];
+        const twig = function (pts, r, shade) {
+            parts.push({ g: new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), pts.length, r, 3, false), shade: shade });
+        };
+        for (let i = 0; i < L.twigs; i++) {         // branches curving round the ball
+            const d0 = dir(), axis = dir().cross(d0).normalize(), arc = 0.9 + rand() * 1.4;
+            const R0 = L.radius * (0.7 + rand() * 0.3), shade = 0.72 + rand() * 0.4, pts = [];
+            for (let k = 0; k <= 5; k++) pts.push(d0.clone().applyAxisAngle(axis, arc * k / 5).multiplyScalar(R0 * (1 + (rand() - 0.5) * 0.14)));
+            twig(pts, thick(1), shade);
+            const k = 1 + Math.floor(rand() * 4), from = pts[k], on = pts[k + 1].clone().sub(from).normalize();
+            const side = on.add(dir().multiplyScalar(0.9)).normalize(), len = 0.1 + rand() * 0.16;   // a short twig off it
+            twig([from, from.clone().addScaledVector(side, len * 0.5), from.clone().addScaledVector(side, len).multiplyScalar(0.97)], thick(0.6), shade);
+        }
+        for (let i = 0; i < L.spokes; i++) {        // a few through the middle
+            const d = dir(), bend = dir().multiplyScalar(0.06);
+            twig([d.clone().multiplyScalar(0.06), d.clone().multiplyScalar(L.radius * 0.45).add(bend), d.clone().multiplyScalar(L.radius * 0.85)], thick(1.1), 0.62 + rand() * 0.2);
+        }
+        // one geometry, the twigs' shades in its colours
+        let nv = 0, ni = 0;
+        parts.forEach(function (p) { nv += p.g.attributes.position.count; ni += p.g.index.count; });
+        const pos = new Float32Array(nv * 3), nor = new Float32Array(nv * 3), uv = new Float32Array(nv * 2), col = new Float32Array(nv * 3);
+        const idx = new Uint16Array(ni);
+        let vo = 0, io = 0;
+        parts.forEach(function (p) {
+            const g = p.g, n = g.attributes.position.count;
+            pos.set(g.attributes.position.array, vo * 3); nor.set(g.attributes.normal.array, vo * 3); uv.set(g.attributes.uv.array, vo * 2);
+            for (let i = 0; i < n; i++) col.set([p.shade, p.shade * 0.97, p.shade * 0.9], (vo + i) * 3);
+            for (let i = 0; i < g.index.count; i++) idx[io++] = g.index.getX(i) + vo;
+            vo += n;
+            g.dispose();
+        });
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+        geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+        geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+        geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+        geo.setIndex(new THREE.BufferAttribute(idx, 1));
+        geo.computeBoundingSphere();
+        return geo;
+    };
+    const shapes = [];
+    for (let i = 0; i < L.shapes; i++) shapes.push(shape());
+    const mat = new THREE.MeshLambertMaterial({ color: L.color, vertexColors: true });
+    let n = 0;
+    animatedProps.forEach(function (a) {
+        if (a.type !== 'tumble') return;
+        a.obj.geometry.dispose();
+        a.obj.geometry = shapes[n % shapes.length];
+        a.obj.material = mat;
+        n++;
+    });
+    Object.assign(stats, { tumbleweeds: n, shapes: shapes.length, tris: shapes.map(function (g) { return g.index.count / 3; }) });
+    return stats;
+}
+
+/* ---- M12c: dust on the wind -----------------------------------------------------------------
+   Now and then a gust lifts a low cloud of dust off the open ground round the player and
+   carries it along the tumbleweeds' wind (+x). Soft camera-facing puffs, one draw for all of
+   them, each fading in, growing and thinning out as it goes. Only under open sky: a coarse
+   map of the ground (2 m cells) marks every cell under anything taller than a person and
+   wider than a post - buildings, porch roofs, the mine's rock - made the first time the loop
+   runs. A gust starts only where the ground is open all the way from the player to it (the
+   same street, not behind a house), and a puff that drifts under a roof fades out fast. Close to
+   the camera they thin out, so one never fills the screen. Purely a look: nothing is sent,
+   nothing is hit. */
+const DUST_WIND = {
+    max: 60, every: [1.0, 3.0],                    // at most this many puffs (90 in view: +1.2 ms); seconds between gusts
+    puffs: [8, 16], spread: 3.5,                   // puffs per gust, metres round its centre
+    near: 8, far: 34,                              // metres from the camera a gust starts (open ground all the way to it)
+    wind: [4.2, 0.6], rise: 0.22,                  // m/s along x (and up to this across); how fast a puff climbs
+    life: [3.5, 6.5], size: [1.4, 3.2], grow: 0.7, // seconds; metres; how much a puff grows over its life
+    alpha: 0.6, color: 0xeedcbc,
+    cell: 2, tall: 2.2, wide: 1.5, fadeNear: [2.5, 7]   // map cell (m); a roof: higher than this and wider than this; thin out this close (m)
+};
+function dustWind() {
+    const L = DUST_WIND, stats = dustWind.stats = { gusts: 0, alive: 0 };
+    // the puff: a few soft blobs, white, alpha in the picture
+    const [c, x] = cv(128);
+    const rand = makeSeededRandom(VISUAL_SEED + 14);
+    for (let i = 0; i < 7; i++) {
+        const px = 64 + (rand() - 0.5) * 44, py = 64 + (rand() - 0.5) * 30, r = 26 + rand() * 22;
+        const g = x.createRadialGradient(px, py, 0, px, py, r);
+        g.addColorStop(0, 'rgba(255,255,255,0.5)'); g.addColorStop(0.6, 'rgba(255,255,255,0.16)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+        x.fillStyle = g; x.fillRect(0, 0, 128, 128);
+    }
+    const puffTex = new THREE.CanvasTexture(c);
+    const N = L.max;
+    const pos = new Float32Array(N * 3), size = new Float32Array(N), alpha = new Float32Array(N);
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+    geo.setAttribute('aSize', new THREE.BufferAttribute(size, 1).setUsage(THREE.DynamicDrawUsage));
+    geo.setAttribute('aAlpha', new THREE.BufferAttribute(alpha, 1).setUsage(THREE.DynamicDrawUsage));
+    geo.setDrawRange(0, 0);
+    const mat = new THREE.ShaderMaterial({
+        uniforms: THREE.UniformsUtils.merge([THREE.UniformsLib.fog, {
+            map: { value: null }, uColor: { value: new THREE.Color(L.color) }, uScale: { value: 400 }, uNear: { value: new THREE.Vector2(L.fadeNear[0], L.fadeNear[1]) } }]),
+        vertexShader: [
+            'attribute float aSize;', 'attribute float aAlpha;', 'uniform float uScale;', 'uniform vec2 uNear;', 'varying float vAlpha;',
+            '#include <fog_pars_vertex>',
+            'void main() {',
+            '    vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);',
+            '    gl_Position = projectionMatrix * mvPosition;',
+            '    float d = -mvPosition.z;',
+            '    gl_PointSize = aSize * uScale / max(d, 0.1);',
+            '    vAlpha = aAlpha * smoothstep(uNear.x, uNear.y, d);',
+            '    #include <fog_vertex>',
+            '}'].join('\n'),
+        fragmentShader: [
+            'uniform sampler2D map;', 'uniform vec3 uColor;', 'varying float vAlpha;',
+            '#include <fog_pars_fragment>',
+            'void main() {',
+            '    vec4 t = texture2D(map, gl_PointCoord);',
+            '    gl_FragColor = vec4(uColor, t.a * vAlpha);',
+            '    if (gl_FragColor.a < 0.003) discard;',
+            '    #include <tonemapping_fragment>',
+            '    #include <encodings_fragment>',
+            '    #include <fog_fragment>',
+            '}'].join('\n'),
+        transparent: true, depthWrite: false, fog: true
+    });
+    mat.uniforms.map.value = puffTex;
+    const pts = new THREE.Points(geo, mat);
+    pts.name = 'dust-wind'; pts.frustumCulled = false; pts.raycast = function () { };
+    pts.visible = false;
+    decor.add(pts);
+
+    // the open-sky map, made on the first frame (the town is built and placed by then)
+    let open = null, X0 = 0, Z0 = 0, NX = 0, NZ = 0;
+    const makeMap = function () {
+        const C = L.cell, b = new THREE.Box3(), tall = [];
+        let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+        world.updateMatrixWorld(true);
+        world.traverse(function (o) {
+            if (!o.isMesh) return;
+            if (!o.geometry.boundingBox) o.geometry.computeBoundingBox();
+            b.copy(o.geometry.boundingBox).applyMatrix4(o.matrixWorld);
+            x0 = Math.min(x0, b.min.x); x1 = Math.max(x1, b.max.x); z0 = Math.min(z0, b.min.z); z1 = Math.max(z1, b.max.z);
+            if (b.max.y > L.tall && Math.max(b.max.x - b.min.x, b.max.z - b.min.z) > L.wide) tall.push([b.min.x, b.max.x, b.min.z, b.max.z]);   // posts and lamps do not count
+        });
+        X0 = x0; Z0 = z0; NX = Math.ceil((x1 - x0) / C) + 1; NZ = Math.ceil((z1 - z0) / C) + 1;
+        open = new Uint8Array(NX * NZ).fill(1);
+        tall.forEach(function (a) {
+            const i0 = Math.max(0, Math.floor((a[0] - X0) / C)), i1 = Math.min(NX - 1, Math.floor((a[1] - X0) / C));
+            const j0 = Math.max(0, Math.floor((a[2] - Z0) / C)), j1 = Math.min(NZ - 1, Math.floor((a[3] - Z0) / C));
+            for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) open[j * NX + i] = 0;   // (a wall seen from inside hides a puff behind it anyway)
+        });
+        let n = 0; open.forEach(function (v) { n += v; });
+        stats.openCells = n; stats.cells = NX * NZ;
+    };
+    const isOpen = function (px, pz) {
+        const i = Math.floor((px - X0) / L.cell), j = Math.floor((pz - Z0) / L.cell);
+        return i >= 0 && j >= 0 && i < NX && j < NZ && open[j * NX + i] === 1;
+    };
+    dustWind.isOpen = function (px, pz) { if (!open) makeMap(); return isOpen(px, pz); };
+    const clearTo = function (from, gx, gz) {      // open ground from 3 m out to the gust: the same street, not behind a house
+        const dx = gx - from.x, dz = gz - from.z, d = Math.sqrt(dx * dx + dz * dz);
+        for (let s = 3; s <= d; s += 1.5) if (!isOpen(from.x + dx * s / d, from.z + dz * s / d)) return false;
+        return isOpen(gx, gz);
+    };
+
+    const puffs = [];                               // {x, y, z, vx, vy, vz, age, life, s0, fade}
+    let nextGust = 1.5;
+    const span = function (r) { return r[0] + Math.random() * (r[1] - r[0]); };
+    const gust = function () {
+        const cam = camera.position;
+        for (let tries = 0; tries < 12; tries++) {
+            const a = (tries % 2 ? Math.random() * 6.283 : (Math.random() < 0.5 ? 0 : Math.PI) + (Math.random() - 0.5) * 0.5), d = span([L.near, L.far]);   // half along the wind: the main street runs that way
+            const gx = cam.x + Math.cos(a) * d, gz = cam.z + Math.sin(a) * d;
+            if (!clearTo(cam, gx, gz)) continue;
+            const n = Math.round(span(L.puffs)), vz = (Math.random() - 0.5) * 2 * L.wind[1];
+            for (let k = 0; k < n && puffs.length < N; k++) {
+                const r = Math.sqrt(Math.random()) * L.spread, t = Math.random() * 6.283, s0 = span(L.size);
+                const px = gx + Math.cos(t) * r, pz = gz + Math.sin(t) * r * 0.6;
+                if (!isOpen(px, pz)) continue;
+                puffs.push({ x: px, y: s0 * 0.3 + Math.random() * 0.25, z: pz,
+                    vx: L.wind[0] * (0.8 + Math.random() * 0.4), vy: L.rise * (0.5 + Math.random()), vz: vz * (0.7 + Math.random() * 0.6),
+                    age: -Math.random() * 0.6, life: span(L.life), s0: s0, fade: 1 });
+            }
+            stats.gusts++;
+            return;
+        }
+    };
+    const v = new THREE.Vector2();
+    visualUpdaters.push(function (dt) {
+        if (!open) makeMap();
+        nextGust -= dt;
+        if (nextGust <= 0) { gust(); nextGust = span(L.every); }
+        let n = 0;
+        for (let i = 0; i < puffs.length; i++) {
+            const p = puffs[i];
+            p.age += dt;
+            if (p.age > p.life || p.fade <= 0) { puffs.splice(i--, 1); continue; }
+            if (p.age < 0) continue;
+            p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
+            if (!isOpen(p.x, p.z)) p.fade -= dt * 3;
+            const t = p.age / p.life;
+            pos[n * 3] = p.x; pos[n * 3 + 1] = p.y; pos[n * 3 + 2] = p.z;
+            size[n] = p.s0 * (1 + L.grow * t);
+            alpha[n] = L.alpha * Math.min(1, t / 0.25) * Math.min(1, (1 - t) / 0.45) * Math.max(0, p.fade);
+            n++;
+        }
+        stats.alive = n;
+        pts.visible = n > 0;
+        if (!n) return;
+        geo.setDrawRange(0, n);
+        geo.attributes.position.needsUpdate = geo.attributes.aSize.needsUpdate = geo.attributes.aAlpha.needsUpdate = true;
+        renderer.getDrawingBufferSize(v);
+        mat.uniforms.uScale.value = v.y / (2 * Math.tan(camera.fov * Math.PI / 360));
+    });
+    return stats;
+}
+
 function buildVisualLayer() {
     // (the steps that change the town's looks go here, before the merge)
     groundLook();                            // M5
@@ -5746,6 +5977,8 @@ function buildVisualLayer() {
     dressMine();                             // M3
     mineGlow();                              // M11 - after M3 (dressMine says where the lamps and crystals are)
     hayLook();                               // M12a - before the merge (it hides the old bales)
+    tumbleLook();                            // M12b
+    dustWind();                              // M12c
     mergeTownForDrawing();                   // M2 - after every change to the town, before the shadows
     bakeSunShadows();                        // M1 - last: it draws the shadows of whatever is there
 }

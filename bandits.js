@@ -717,19 +717,48 @@ function eggsFor(room, players) {
 /* The eggs drop in an arc in front of it (yaw), on ground it can see from where it
    stands (up against a wall, anywhere round it within layFar + 1.5). Returns
    [[id, x, z], ...] for the ones that found a place. */
+/* Free ground an egg can drop on, seen from where the dragon stands. */
+function eggGround(x, z, px, pz) {
+    return !nav.collidesAt(px, pz, BROOD.eggRadius + 0.15) && nav.lineClear(x, z, px, pz);
+}
+/* When the random tries all miss - a tight corner, where only a sliver of the ring round the
+   dragon is free (5-30% of it, 2026-09-25: 2-3 eggs of 5 in about one wall spot in ten) - go round
+   the ring in order: the free spot nearest the egg's own place in the arc, clear of the eggs
+   already down if there is one. Null only if there is no free ground at all. */
+function eggFallback(x, z, want, laid) {
+    let best = null, bestScore = Infinity;
+    for (let r = BROOD.layNear; r <= BROOD.layFar + 1.5 + 1e-9; r += 0.5) {
+        for (let a = 0; a < Math.PI * 2; a += 0.1) {
+            const px = x + Math.sin(a) * r, pz = z + Math.cos(a) * r;
+            if (!eggGround(x, z, px, pz)) continue;
+            let off = Math.abs(a - want) % (Math.PI * 2);
+            if (off > Math.PI) off = Math.PI * 2 - off;
+            const crowded = laid.some((e) => Math.hypot(e[1] - px, e[2] - pz) < BROOD.eggRadius * 2 + 0.2);
+            const score = off + (crowded ? 10 : 0);
+            if (score < bestScore) { bestScore = score; best = { x: px, z: pz }; }
+        }
+    }
+    return best;
+}
+
 function layEggs(room, players, x, z, yaw, count, now) {
     const out = [];
     for (let i = 0; i < count; i++) {
         const mid = count === 1 ? 0 : -BROOD.layArc + (2 * BROOD.layArc) * i / (count - 1);
         /* 16 tries in its place in the arc; then, up against a wall, anywhere round it
-           a little further out - the room gets every egg it was promised */
-        for (let k = 0; k < 40; k++) {
+           a little further out; then, if those all missed, round the ring in order
+           (eggFallback) - the room gets every egg it was promised */
+        let at = null;
+        for (let k = 0; k < 40 && !at; k++) {
             const round = k >= 16;
             const a = round ? Math.random() * Math.PI * 2 : yaw + mid + (Math.random() - 0.5) * 0.3 * (1 + k / 4);
             const r = BROOD.layNear + Math.random() * (BROOD.layFar - BROOD.layNear + (round ? 1.5 : 0));
             const px = x + Math.sin(a) * r, pz = z + Math.cos(a) * r;
-            if (nav.collidesAt(px, pz, BROOD.eggRadius + 0.15)) continue;
-            if (!nav.lineClear(x, z, px, pz)) continue;
+            if (eggGround(x, z, px, pz)) at = { x: px, z: pz };
+        }
+        if (!at) at = eggFallback(x, z, yaw + mid, out);
+        if (at) {
+            const px = at.x, pz = at.z;
             const b = spawnBandit(room, players, { x: px, z: pz });
             b.kind = "egg";
             b.summoned = true;
@@ -739,7 +768,6 @@ function layEggs(room, players, x, z, yaw, count, now) {
             b.yaw = Math.random() * Math.PI * 2;
             b.lastShot = Infinity;
             out.push([b.id, round2(px), round2(pz)]);
-            break;
         }
     }
     return out;

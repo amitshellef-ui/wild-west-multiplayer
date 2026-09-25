@@ -13,7 +13,10 @@ const missions = require("./missions");
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+/* A message may be at most 32 KB (socket.io's default is 1 MB). The biggest an honest page sends
+   is ~2 KB - a shotgun's 12 tracers, or 8 hit targets; a bigger one closes that connection.
+   Code review 2026-09-25 (S2). */
+const io = new Server(server, { maxHttpBufferSize: 32 * 1024 });
 
 app.use(express.static(__dirname));
 
@@ -743,6 +746,44 @@ function placeInRoom(socket, p, code) {
     console.log("Player", p.id.slice(0, 6), "->", code, "(" + roomCount(code) + " inside)");
 }
 
+/* ---- Containing an exception (code review 2026-09-25, H3) --------------------------------
+   Node ends the process on an exception nobody catches, and every room, score and reconnect
+   seat lives only in this process's memory - one bug in one room's boss, or one odd packet,
+   was everybody's game over. It is caught at two boundaries: a room's turn in the tick
+   (guardRoom) and a packet's handler (guard, registerHandlers). What throws is logged with
+   its stack, once a minute per place and then a count, and only that room's tick or that one
+   packet is lost; a room that keeps throwing stands still while the others play on. */
+const errorLog = {};
+function reportError(where, e) {
+    const now = Date.now(), r = errorLog[where] || (errorLog[where] = { at: 0, skipped: 0 });
+    if (now - r.at < 60000) { r.skipped++; return; }
+    console.error("ERROR in " + where + (r.skipped ? " (" + r.skipped + " more since the last report)" : "") + ":", (e && e.stack) || e);
+    r.at = now;
+    r.skipped = 0;
+}
+function guard(where, fn) {
+    return function () {
+        try { return fn.apply(this, arguments); } catch (e) { reportError(where, e); }
+    };
+}
+function guardRoom(code, fn) {
+    try { fn(); } catch (e) { reportError("room " + code, e); }
+}
+
+/* ---- The shot relay's allowance (code review 2026-09-25, H1) -----------------------------
+   Every `shoot` is passed on to everybody else in the room, so an unlimited sender multiplies
+   its own traffic by the room - and eats the 5 GB a month. A small bucket per player: the
+   fastest gun (the SMG, one every 75 ms) is 13 a second, so 20 a second with a burst of 8
+   never touches an honest player; past that a shot is simply not passed on. */
+const SHOT_RELAY = { perSec: 20, burst: 8 };
+function spendShot(p, now) {
+    p.shotTokens = Math.min(SHOT_RELAY.burst, p.shotTokens + (now - p.shotAt) * SHOT_RELAY.perSec / 1000);
+    p.shotAt = now;
+    if (p.shotTokens < 1) return false;
+    p.shotTokens -= 1;
+    return true;
+}
+
 io.on("connection", (socket) => {
     const auth = socket.handshake.auth || {};
     const offered = (typeof auth.token === "string" && /^[0-9a-f]{32}$/.test(auth.token)) ? auth.token : null;
@@ -803,7 +844,9 @@ io.on("connection", (socket) => {
         lastBossHitAt: 0,
         lastDeltaAt: 0,
         lastRoomAt: 0,
-        reloadAt: 0
+        reloadAt: 0,
+        shotTokens: SHOT_RELAY.burst,       // the shot relay's allowance (SHOT_RELAY)
+        shotAt: 0
     };
     const me = players[socket.id];
     socket.data.pid = me.id;
@@ -834,9 +877,11 @@ io.on("connection", (socket) => {
 /* Every event a connected player can send. Registered for a brand new
    connection and for one that has come back, identically. */
 function registerHandlers(socket) {
+    /* every handler runs inside guard(): a throw costs that one packet, not every room (H3) */
+    const on = (event, fn) => socket.on(event, guard("socket " + event, fn));
 
     /* ---- Room controls ---- */
-    socket.on("create-room", (m) => {
+    on("create-room", (m) => {
         const p = players[socket.data.pid];
         if (!p) return;
         const now = Date.now();
@@ -846,13 +891,13 @@ function registerHandlers(socket) {
         const code = makeRoomCode();
         if (!code) { socket.emit("room-error", { reason: "FULL" }); return; }
 
-        const modeId = (m && typeof m.mode === "string" && MODES[m.mode]) ? m.mode : DEFAULT_MODE;
+        const modeId = (m && typeof m.mode === "string" && Object.prototype.hasOwnProperty.call(MODES, m.mode)) ? m.mode : DEFAULT_MODE;   // not "constructor" (review S8)
         createRoom(code, modeId);
         console.log("Room created:", code, rooms[code].mode.label);
         placeInRoom(socket, p, code);
     });
 
-    socket.on("join-room", (m) => {
+    on("join-room", (m) => {
         const p = players[socket.data.pid];
         if (!p) return;
         const now = Date.now();
@@ -878,7 +923,7 @@ function registerHandlers(socket) {
         placeInRoom(socket, p, code);
     });
 
-    socket.on("leave-room", () => {
+    on("leave-room", () => {
         const p = players[socket.data.pid];
         if (!p || isLobby(p.room)) return;
         const now = Date.now();
@@ -890,7 +935,7 @@ function registerHandlers(socket) {
     /* ---- Position + rotation (steps 3 and 4, batched in step 14) ----
        Nothing leaves here any more. The move is recorded and marked, and the
        room's next position packet carries it along with everybody else's. */
-    socket.on("move", (m) => {
+    on("move", (m) => {
         const p = players[socket.data.pid];
         if (!p || !p.room || p.downed) return;          // lying where they fell
         const move = readMove(m);
@@ -903,11 +948,12 @@ function registerHandlers(socket) {
     });
 
     /* ---- Shot relay (step 7): muzzle flash, tracers and sound only ---- */
-    socket.on("shoot", (m) => {
+    on("shoot", (m) => {
         const p = players[socket.data.pid];
         if (!p || !p.room) return;
         const shot = readShot(m);
         if (!shot) return;
+        if (!spendShot(p, Date.now())) return;          // past the fastest gun's rate: not passed on (H1)
         socket.to(p.room).emit("player-shot", {
             id: p.id, w: shot.w, o: shot.o, e: shot.e
         });
@@ -917,7 +963,7 @@ function registerHandlers(socket) {
        magazines. Looks only, like the shot relay - the server does not count
        ammunition and does not start now. `ms` is how long the reload takes,
        worked out by the page from the rounds it is loading. */
-    socket.on("reload", (m) => {
+    on("reload", (m) => {
         const p = players[socket.data.pid];
         if (!p || !p.room || !p.alive || p.downed || p.away) return;
         const ms = m && m.ms;
@@ -941,7 +987,7 @@ function registerHandlers(socket) {
 
          - there is no wall between them (step 15)
        ===================================================================== */
-    socket.on("hit", (m) => {
+    on("hit", (m) => {
         const shooter = players[socket.data.pid];
         if (!shooter || !shooter.alive || !shooter.room) return;
 
@@ -957,6 +1003,7 @@ function registerHandlers(socket) {
         if (now - shooter.lastHitAt < w.fireCd * 0.7) return;
 
         if (!Array.isArray(m.targets) || m.targets.length === 0 || m.targets.length > 8) return;
+        shooter.lastHitAt = now;        // accepted or not, a report spends the cooldown - line-of-sight work is not free (review M1)
 
         const accepted = [];
         let pellets = 0;
@@ -981,7 +1028,6 @@ function registerHandlers(socket) {
         }
         if (accepted.length === 0 || pellets > w.pellets) return;
 
-        shooter.lastHitAt = now;
         for (let i = 0; i < accepted.length; i++) {
             const a = accepted[i];
             setHealth(a.victim, a.victim.health - (a.body * w.body + a.head * w.head),
@@ -997,7 +1043,7 @@ function registerHandlers(socket) {
        rate, a plausible distance, and a pellet count the gun could actually
        throw. A client cannot invent a kill.
        ===================================================================== */
-    socket.on("bandit-hit", (m) => {
+    on("bandit-hit", (m) => {
         const shooter = players[socket.data.pid];
         if (!shooter || !shooter.alive || !shooter.room) return;
         const room = rooms[shooter.room];
@@ -1011,6 +1057,7 @@ function registerHandlers(socket) {
         if (now - shooter.lastBanditHitAt < w.fireCd * 0.7) return;
 
         if (!Array.isArray(m.targets) || m.targets.length === 0 || m.targets.length > 8) return;
+        shooter.lastBanditHitAt = now;  // accepted or not, a report spends the cooldown (review M1)
 
         const accepted = [];
         let pellets = 0;
@@ -1034,7 +1081,6 @@ function registerHandlers(socket) {
         }
         if (accepted.length === 0 || pellets > w.pellets) return;
 
-        shooter.lastBanditHitAt = now;
         for (let i = 0; i < accepted.length; i++) {
             const a = accepted[i];
             const damage = a.body * w.body + a.head * w.head;
@@ -1057,7 +1103,7 @@ function registerHandlers(socket) {
        is one entity with its own cooldown - otherwise a player could spend the
        same trigger pull twice, once on each path.
        ===================================================================== */
-    socket.on("boss-hit", (m) => {
+    on("boss-hit", (m) => {
         const shooter = players[socket.data.pid];
         if (!shooter || !shooter.alive || !shooter.room) return;
         const room = rooms[shooter.room];
@@ -1074,6 +1120,7 @@ function registerHandlers(socket) {
         const head = strictCount(m.head, w.pellets);
         if (body < 0 || head < 0) return;
         if (body + head <= 0 || body + head > w.pellets) return;
+        shooter.lastBossHitAt = now;    // accepted or not, a report spends the cooldown (review M1)
 
         const b = room.boss;
         if (Math.hypot(shooter.x - b.x, shooter.z - b.z) > w.range * 1.15 + 3) return;
@@ -1081,7 +1128,6 @@ function registerHandlers(socket) {
         const lift = boss.liftOf(b, now);
         if (!inLineOfFire(shooter, b, 1.75, lift > 0 ? 1.62 * 1.75 + lift : undefined)) return;
 
-        shooter.lastBossHitAt = now;
         const typeIndex = b.typeIndex;
         const healthBefore = b.health;
         const res = boss.hurt(room, body * w.body + head * w.head, now);
@@ -1141,7 +1187,7 @@ function registerHandlers(socket) {
        and the small top-up for a kill. It is still a client saying a number,
        so it is still capped: 20 a report, five reports a second.
        ===================================================================== */
-    socket.on("health-delta", (m) => {
+    on("health-delta", (m) => {
         const p = players[socket.data.pid];
         if (!p || !p.alive) return;
         if (!m || typeof m.d !== "number" || !Number.isFinite(m.d)) return;
@@ -1158,7 +1204,7 @@ function registerHandlers(socket) {
     /* ---- Reviving a team mate (step 23) ----
        The page says when E goes down on somebody and when it comes up; the
        server does the counting and the checking. */
-    socket.on("revive-start", (m) => {
+    on("revive-start", (m) => {
         const r = players[socket.data.pid];
         if (!r || !r.alive || r.away || !r.room || !m || typeof m.id !== "string") return;
         const room = rooms[r.room];
@@ -1181,7 +1227,7 @@ function registerHandlers(socket) {
        Anybody in a won room may press it, once; the first press restarts the
        room for everybody, and any press after that finds a room that is not
        won any more and does nothing. */
-    socket.on("room-restart", () => {
+    on("room-restart", () => {
         const p = players[socket.data.pid];
         if (!p || !p.room || p.away) return;
         const room = rooms[p.room];
@@ -1215,7 +1261,7 @@ function registerHandlers(socket) {
         console.log("Room", code, "- new game, started by", p.id.slice(0, 6));
     });
 
-    socket.on("revive-stop", (m) => {
+    on("revive-stop", (m) => {
         const r = players[socket.data.pid];
         if (!r || !m || typeof m.id !== "string") return;
         const t = players[m.id];
@@ -1224,7 +1270,7 @@ function registerHandlers(socket) {
 
     /* Not gone - away. The seat, the slot and the score wait RECONNECT_MS for
        the same page to come back; after that it is a normal departure. */
-    socket.on("disconnect", () => {
+    on("disconnect", () => {
         const p = players[socket.data.pid];
         if (!p || p.socketId !== socket.id) return;     // a newer connection already owns them
         p.away = true;
@@ -1266,13 +1312,13 @@ setInterval(() => {
     nav.beginTick();
     const active = activePlayers();        // away players are invisible to the simulation
 
-    for (const code in rooms) {
+    for (const code in rooms) guardRoom(code, () => {     // one room throwing costs that room's tick only (H3)
         const room = rooms[code];
 
         /* A won room (step 28) is frozen: nothing moves, fires, spawns or ticks
            down until somebody starts a new game. Revives still finish, so a
            player lying there when the dragon fell can be picked up. */
-        if (room.won) { stepRevives(room, now); continue; }
+        if (room.won) { stepRevives(room, now); return; }
 
         /* One sink for both simulations. The bandits and the boss share the
            room's bullet list, so they also share the list of what those
@@ -1360,22 +1406,22 @@ setInterval(() => {
         }
 
         stepRevives(room, now);
-    }
+    });
 
     // Snapshot every other tick: 10 a second
     const tick = tickCount++;
     if ((tick % 2) === 0) {
-        for (const code in rooms) {
+        for (const code in rooms) guardRoom(code, () => {
             const room = rooms[code];
-            if (!room.bandits) continue;
+            if (!room.bandits) return;
             let occupied = false;
             for (const id in players) if (players[id].room === code) { occupied = true; break; }
-            if (!occupied) continue;
+            if (!occupied) return;
             /* A won room: the fallen bandits once a second (a latecomer still sees
                them lying there), no boss clock, no wave clock - nothing is coming. */
             if (room.won) {
                 if ((tick % 20) === 0) io.to(code).emit("bandits", { b: bandits.snapshot(room) });
-                continue;
+                return;
             }
             io.to(code).emit("bandits", { b: bandits.snapshot(room) });
 
@@ -1405,7 +1451,7 @@ setInterval(() => {
                     in: waves.secondsToWave(room, now)
                 });
             }
-        }
+        });
     }
 }, bandits.TICK_MS);
 

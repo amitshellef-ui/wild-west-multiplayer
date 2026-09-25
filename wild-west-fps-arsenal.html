@@ -4865,6 +4865,194 @@ function boardwalkLook() {
     return stats;
 }
 
+/* ---- M9b: shutters, window frames, awnings ------------------------------------------
+   The fronts had two bare windows each and the sides and backs none at all - blank boxes
+   from anywhere off the street. Now every front window gets a sill and (mostly) a pair of
+   open shutters in its building's paint; the sides and backs get windows of their own -
+   frame, glass, cross, sill, head - some with the shutters shut. A wall that looks out on
+   open ground (awnClear metres before anything solid) gets a striped canvas awning over
+   each window. The walk-ins get a window through each side wall, seen from both sides.
+   All decor, found from the buildings themselves: nothing to walk into, bullets pass. */
+const WINDOW_LOOK = {
+    shutterW: 0.5, gap: 0.04,
+    open: 0.7, shut: 0.18,                   // side / back windows: open shutters, shut ones (the rest: none)
+    frontShutters: 0.75,
+    awnClear: 5, awnOut: 1.05, awnDrop: 0.45, awnOver: 0.3, stripe: 0.3,
+    paints: [[0.3, 0.44, 0.32], [0.56, 0.22, 0.17], [0.32, 0.41, 0.54], [0.22, 0.2, 0.18], [0.84, 0.78, 0.64], [0.48, 0.53, 0.38]]
+};
+function makeShutter(rand) {                 // light and neutral: the paint is the vertex colour
+    const [c, x] = cv(128, 256);
+    x.fillStyle = '#e6dccb'; x.fillRect(0, 0, 128, 256);
+    x.fillStyle = 'rgba(70,50,30,0.35)';     // the stiles and rails
+    x.fillRect(0, 0, 14, 256); x.fillRect(114, 0, 14, 256);
+    x.fillRect(0, 0, 128, 14); x.fillRect(0, 242, 128, 14); x.fillRect(0, 121, 128, 14);
+    [[14, 121], [135, 242]].forEach(function (r) {           // louvres: a shadow under each slat, light on its edge
+        for (let y = r[0] + 3; y < r[1] - 6; y += 11) {
+            x.fillStyle = 'rgba(40,26,12,0.45)'; x.fillRect(14, y + 6, 100, 4);
+            x.fillStyle = 'rgba(255,250,235,0.4)'; x.fillRect(14, y, 100, 2);
+        }
+    });
+    for (let i = 0; i < 1500; i++) {        // worn paint
+        x.fillStyle = 'rgba(' + (rand() < 0.5 ? '90,64,40,' : '255,250,235,') + (rand() * 0.14) + ')';
+        x.fillRect(rand() * 128, rand() * 256, 1 + rand() * 2, 1 + rand() * 5);
+    }
+    return c;
+}
+function makeAwning(rand) {                  // 4 bands, one colour each, stripes across; an awning uses one band
+    const [c, x] = cv(256, 256), cols = ['#a4382b', '#3f6b4a', '#3e5b7c', '#b98a33'];
+    cols.forEach(function (col, k) {
+        for (let s = 0; s < 4; s++) {
+            x.fillStyle = s % 2 ? '#e7dcc4' : col;
+            x.fillRect(s * 64, k * 64, 64, 64);
+        }
+    });
+    for (let i = 0; i < 6000; i++) {        // sun-faded, dusty
+        x.fillStyle = 'rgba(' + (rand() < 0.6 ? '80,60,40,' : '255,248,230,') + (rand() * 0.12) + ')';
+        x.fillRect(rand() * 256, rand() * 256, 1 + rand() * 3, 1 + rand() * 2);
+    }
+    return c;
+}
+function windowLook() {
+    const L = WINDOW_LOOK, rand = makeSeededRandom(VISUAL_SEED + 9);
+    const stats = windowLook.stats = {};
+    const walls = [MAT.plank, MAT.plankGrey, MAT.plankRed, MAT.plankPale];
+    const shutterMat = new THREE.MeshStandardMaterial({ map: tex(makeShutter(rand), 1, 1), vertexColors: true, roughness: 0.85 });
+    const awnMat = new THREE.MeshStandardMaterial({ map: tex(makeAwning(rand), 1, 1), roughness: 0.95 });
+    const near = function (a, b) { return Math.abs(a - b) < 1e-3; };
+    world.updateMatrixWorld(true);
+
+    // the buildings (a body with the front windows' glass beside it) and the walk-ins' side walls
+    const houses = [], sideWalls = [];
+    world.traverse(function (o) {
+        if (!o.isMesh || o.geometry.type !== 'BoxGeometry' || walls.indexOf(o.material) < 0) return;
+        const p = o.geometry.parameters;
+        if (p.width > 3 && p.height > 3 && p.depth > 3) {
+            const glass = o.parent.children.filter(function (m) {
+                const q = m.geometry && m.geometry.parameters;
+                return m.material === MAT.glass && q && near(q.width, 1.25) && near(q.height, 1.05) && near(q.depth, 0.06);
+            });
+            if (glass.length) houses.push({ g: o.parent, w: p.width, h: p.height, d: p.depth, glass: glass });   // (the church has its own windows)
+        } else if (near(p.width, 0.3) && p.height > 3 && p.depth > 3) {
+            sideWalls.push(o);
+        }
+    });
+
+    const kit = [];
+    const put = function (geo, mat, matrix, colour) {
+        const m = new THREE.Mesh(geo, mat);
+        m.matrixAutoUpdate = false;
+        m.matrix.copy(matrix); m.matrixWorld.copy(matrix);
+        m.castShadow = true; m.receiveShadow = true;
+        if (colour) paint(m, colour);
+        kit.push(m);
+        return m;
+    };
+    const at = function (x, y, z) { return new THREE.Matrix4().makeTranslation(x, y, z); };
+    // a wall's own frame: origin on the wall at the window's centre, +z straight out of the wall
+    const wallFrame = function (G, x, y, z, nx, nz) {
+        return G.clone().multiply(at(x, y, z)).multiply(new THREE.Matrix4().makeRotationY(Math.atan2(nx, nz)));
+    };
+    // metres of open ground straight out from the wall (3 rays: the window's middle and its two sides)
+    const ray = new THREE.Ray(), hit = new THREE.Vector3();
+    const clearance = function (F, t) {                        // t: half the wall, when the ray starts inside it
+        const out = new THREE.Vector3(0, 0, 1).transformDirection(F);
+        let best = Infinity;
+        [-0.9, 0, 0.9].forEach(function (s) {
+            ray.set(new THREE.Vector3(s, -1.2, t + 0.05).applyMatrix4(F), out);
+            ray.origin.y = 1.0;
+            colliders.forEach(function (b) { if (ray.intersectBox(b, hit)) best = Math.min(best, hit.distanceTo(ray.origin)); });
+        });
+        return best;
+    };
+    let front = 0, frontShutters = 0, made = 0, open = 0, shut = 0, awnings = 0, through = 0;
+    const shutters = function (F, z, paintRGB) {                 // a pair, opened back flat on the wall
+        [-1, 1].forEach(function (s) {
+            put(new THREE.BoxGeometry(L.shutterW, 1.3, 0.045), shutterMat, F.clone().multiply(at(s * (0.75 + L.gap + L.shutterW / 2), 0, z)), paintRGB);
+        });
+    };
+    const awning = function (F, band) {
+        const yTop = 0.65 + 0.1 + L.awnOver, len = Math.hypot(L.awnOut, L.awnDrop), w = 2.0;
+        const uvBand = function (geo, v0, v1) {                 // stripes by the metre along the wall, one colour band
+            const P = geo.attributes.position, U = geo.attributes.uv, p = geo.parameters;
+            for (let i = 0; i < P.count; i++) {
+                const t = p.depth > 0.1 ? (P.getZ(i) / p.depth + 0.5) : 0.5;
+                U.setXY(i, (P.getX(i) + w / 2) / (4 * L.stripe), (3 - band + v0 + (v1 - v0) * t) / 4);
+            }
+        };
+        const top = new THREE.BoxGeometry(w, 0.03, len);
+        uvBand(top, 0.2, 0.8);
+        put(top, awnMat, F.clone().multiply(at(0, yTop - L.awnDrop / 2, L.awnOut / 2)).multiply(new THREE.Matrix4().makeRotationX(Math.atan2(L.awnDrop, L.awnOut))));
+        const valance = new THREE.BoxGeometry(w, 0.2, 0.03);   // the hanging edge in front
+        uvBand(valance, 0.8, 0.8);
+        put(valance, awnMat, F.clone().multiply(at(0, yTop - L.awnDrop - 0.09, L.awnOut + 0.01)));
+        [-1, 1].forEach(function (s) {                          // two iron braces from the wall
+            const a = new THREE.Vector3(s * (w / 2 - 0.15), yTop - L.awnDrop - 0.5, 0.02), b = new THREE.Vector3(s * (w / 2 - 0.15), yTop - L.awnDrop + 0.02, L.awnOut - 0.08);
+            const m = new THREE.Matrix4().lookAt(a, b, new THREE.Vector3(0, 1, 0)).setPosition(a.clone().add(b).multiplyScalar(0.5));
+            put(new THREE.BoxGeometry(0.035, 0.035, a.distanceTo(b)), MAT.metal, F.clone().multiply(m));
+        });
+        awnings++;
+    };
+    // one new window on a wall; thick = the wall's thickness when it goes through (a walk-in's wall)
+    const newWindow = function (F, look, thick) {
+        const t = thick ? thick / 2 : 0, both = thick ? [1, -1] : [1];
+        const r = rand(), kind = r < L.open || (thick && r < L.open + L.shut) ? 'open' : r < L.open + L.shut ? 'shut' : 'none';   // (a walk-in's shows its pane inside: never shut)
+        const dw = MAT.darkWood;
+        put(new THREE.BoxGeometry(1.5, 1.3, 0.1 + 2 * t), dw, F.clone().multiply(at(0, 0, thick ? 0 : 0.06)));
+        if (kind !== 'shut') {
+            const k = thick ? 0 : 0.12;
+            put(new THREE.BoxGeometry(1.25, 1.05, 0.06 + 2 * t + (thick ? 0.16 : 0)), MAT.glass, F.clone().multiply(at(0, 0, k)));
+            put(new THREE.BoxGeometry(0.07, 1.05, 0.06 + 2 * t + (thick ? 0.22 : 0)), dw, F.clone().multiply(at(0, 0, thick ? 0 : 0.15)));
+            put(new THREE.BoxGeometry(1.25, 0.07, 0.06 + 2 * t + (thick ? 0.22 : 0)), dw, F.clone().multiply(at(0, 0, thick ? 0 : 0.15)));
+        }
+        both.forEach(function (s) {                             // sill and head, on each face it shows
+            const face = s * t;
+            put(new THREE.BoxGeometry(1.7, 0.07, 0.2), dw, F.clone().multiply(at(0, -0.685, face + s * 0.1)));
+            put(new THREE.BoxGeometry(1.66, 0.1, 0.14), dw, F.clone().multiply(at(0, 0.7, face + s * 0.07)));
+        });
+        if (kind === 'open') { shutters(F, t + 0.0275, look.paint); open++; }
+        if (kind === 'shut') {
+            [-1, 1].forEach(function (s) {
+                put(new THREE.BoxGeometry(0.62, 1.05, 0.04), shutterMat, F.clone().multiply(at(s * 0.315, 0, t + 0.13)), look.paint);
+            });
+            shut++;
+        }
+        if (clearance(F, t) >= L.awnClear) awning(F, look.band);
+        made++;
+    };
+    const lookOf = function () {
+        return { paint: L.paints[(rand() * L.paints.length) | 0], band: (rand() * 4) | 0 };
+    };
+
+    houses.forEach(function (H) {
+        const G = H.g.matrixWorld, look = lookOf(), winY = H.h > 4 ? 2.6 : 2.2;
+        // the front: a sill under each window and, mostly, open shutters (the porch roof is the head)
+        H.glass.forEach(function (gl) {
+            const F = wallFrame(G, gl.position.x, gl.position.y, H.d / 2, 0, 1);
+            put(new THREE.BoxGeometry(1.7, 0.07, 0.2), MAT.darkWood, F.clone().multiply(at(0, -0.685, 0.1)));
+            if (rand() < L.frontShutters) { shutters(F, 0.0275, look.paint); frontShutters++; }
+            front++;
+        });
+        // the back: two or three windows; each side: one, a little behind the middle
+        const xs = H.w >= 11 ? [-H.w / 3, 0, H.w / 3] : [-H.w / 4, H.w / 4];
+        xs.forEach(function (x) { newWindow(wallFrame(G, x, winY, -H.d / 2, 0, -1), look); });
+        [-1, 1].forEach(function (s) { newWindow(wallFrame(G, s * H.w / 2, winY, -H.d * 0.12, s, 0), look); });
+    });
+    sideWalls.forEach(function (o) {                            // the walk-ins: through the wall, both faces
+        const p = o.geometry.parameters, g = o.parent, s = Math.sign(o.position.x) || 1;
+        const h = p.height, winY = h > 4 ? 2.6 : 2.2;
+        newWindow(wallFrame(g.matrixWorld, o.position.x, winY, -p.depth * 0.12, s, 0), lookOf(), p.width);
+        through++;
+    });
+
+    const drawn = mergeMeshesByLook(kit);
+    drawn.name = 'windows';
+    decor.add(drawn);
+    kit.forEach(function (m) { m.geometry.dispose(); });
+    Object.assign(stats, { houses: houses.length, front: front, frontShutters: frontShutters, made: made, open: open, shut: shut,
+        awnings: awnings, through: through, pieces: kit.length });
+    return stats;
+}
+
 function buildVisualLayer() {
     // (the steps that change the town's looks go here, before the merge)
     groundLook();                            // M5
@@ -4872,6 +5060,7 @@ function buildVisualLayer() {
     horizonLook();                           // M7 - after M5 (the sand's material)
     woodLook();                              // M8
     boardwalkLook();                         // M9a - after M8 (plankV takes colours now)
+    windowLook();                            // M9b
     skyAndSun();                             // M4
     mendRocks();                             // M3
     dressMine();                             // M3

@@ -226,6 +226,20 @@
         padding: 7px 13px; cursor: pointer;
     }
     #room-box button:hover { background: rgba(120,72,24,0.85); }
+    /* graphics quality (map M13) - under the room panel */
+    #gfx-box {
+        margin-top: 10px; pointer-events: auto; direction: rtl;
+        font-family: 'Segoe UI', Tahoma, sans-serif; font-size: 12px; color: #9c8156;
+        display: flex; gap: 6px; align-items: center; justify-content: center;
+    }
+    #gfx-box button {
+        font-family: 'Segoe UI', Tahoma, sans-serif; font-size: 12px;
+        color: #c9a978; background: rgba(40,24,8,0.6);
+        border: 1px solid #6b451f; border-radius: 3px;
+        padding: 4px 11px; cursor: pointer;
+    }
+    #gfx-box button:hover { background: rgba(120,72,24,0.85); }
+    #gfx-box button.on { color: #ffd77a; background: rgba(120,72,24,0.85); border-color: #c08a44; }
     #room-input {
         font-family: 'Segoe UI', Tahoma, sans-serif; font-size: 13px;
         width: 86px; text-align: center; text-transform: uppercase;
@@ -393,6 +407,11 @@
             <button id="btn-leave">&#1495;&#1494;&#1512;&#1492; &#1500;&#1500;&#1493;&#1489;&#1497;</button>
         </div>
         <div id="room-msg"></div>
+    </div>
+    <div id="gfx-box">&#1490;&#1512;&#1508;&#1497;&#1511;&#1492;:
+        <button data-gfx="high">&#1495;&#1491;&#1492;</button>
+        <button data-gfx="normal">&#1512;&#1490;&#1497;&#1500;&#1492;</button>
+        <button data-gfx="low">&#1502;&#1492;&#1497;&#1512;&#1492;</button>
     </div>
 
     <div id="loading">Winchester + SMG + Sniper + AR + Shotgun + Deagle</div>
@@ -2416,8 +2435,28 @@ const DEFAULT_FOV = 78, ADS_FOV = 19;
 const camera = new THREE.PerspectiveCamera(DEFAULT_FOV, innerWidth / innerHeight, 0.05, 900);
 camera.rotation.order = 'YXZ';
 
+/* ---- M13: graphics quality ----------------------------------------------------------------
+   Since the map was merged (M2) the frame is paid for by pixels, not by pieces, and on a
+   screen scaled to 150% the game drew 1.5 x 1.5 = 2.25 times the pixels of the window:
+   on the UHD 620 that is the street at 32 ms instead of 17. Three levels, picked in the menu
+   and kept in this browser (localStorage 'ww-gfx'; ?gfx=high|normal|low for a test):
+   high = the screen's own sharpness (as before M13, up to x2), normal = one pixel per
+   window pixel, low = three quarters of that. Only how sharp the picture is changes -
+   the map, the fog and how far you see are the same for everybody. */
+const GFX = {
+    levels: { high: function () { return Math.min(devicePixelRatio, 2); }, normal: function () { return 1; }, low: function () { return 0.75; } },
+    fallback: 'normal',
+    level: null
+};
+GFX.level = (function () {
+    const m = /[?&]gfx=(high|normal|low)\b/.exec(location.search);
+    if (m) return m[1];
+    let saved = null;
+    try { saved = localStorage.getItem('ww-gfx'); } catch (e) { }
+    return GFX.levels[saved] ? saved : GFX.fallback;
+})();
 const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setPixelRatio(GFX.levels[GFX.level]());
 renderer.setSize(innerWidth, innerHeight);
 renderer.autoClear = false;
 renderer.shadowMap.enabled = true;
@@ -2425,6 +2464,27 @@ renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.96;
 container.appendChild(renderer.domElement);
+
+/* the menu's graphics buttons (M13): change it on the spot, remember it */
+function setGfxLevel(level) {
+    if (!GFX.levels[level]) return;
+    GFX.level = level;
+    try { localStorage.setItem('ww-gfx', level); } catch (e) { }
+    renderer.setPixelRatio(GFX.levels[level]());
+    renderer.setSize(innerWidth, innerHeight);
+    document.querySelectorAll('#gfx-box button').forEach(function (b) { b.classList.toggle('on', b.dataset.gfx === level); });
+}
+// a window dragged to a screen with another scale: "high" follows it (runs before the resize handler's setSize)
+window.addEventListener('resize', function () { renderer.setPixelRatio(GFX.levels[GFX.level]()); });
+(function () {
+    const box = document.getElementById('gfx-box');
+    if (!box) return;
+    box.addEventListener('click', function (e) { e.stopPropagation(); });   // the menu itself grabs the pointer on click
+    box.querySelectorAll('button').forEach(function (b) {
+        b.classList.toggle('on', b.dataset.gfx === GFX.level);
+        b.addEventListener('click', function () { setGfxLevel(b.dataset.gfx); });
+    });
+})();
 
 const skyMesh = new THREE.Mesh(
     new THREE.SphereGeometry(420, 32, 20),

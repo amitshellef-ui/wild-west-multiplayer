@@ -2806,6 +2806,7 @@ function createEnterableBuilding(o) {
         g.add(sign);
     }
     world.add(g);
+    g.walkIn = { w: w, d: d };               // its size, for the border rocks to keep clear of (borderMesas)
     g.updateMatrixWorld(true);
     solidWalls.forEach(function (m) {
         const bb = new THREE.Box3().setFromObject(m);
@@ -3383,11 +3384,30 @@ function mesaColliders(cx, cz, w, d, ry, top) {
 (function borderMesas() {
     // Expanded frontier: roughly 50% more room to explore.
     const R = 72;
+    // Keep the walk-in buildings clear (map fix, 2026-09-25): three rocks stood in the back half of
+    // RANGER. A rock whose foot would reach a walk-in - or under its roof, MESA_CLEAR round it - is slid
+    // straight out, away from the middle of the map, until it clears. It draws no random numbers, so
+    // every other rock and box stays exactly where it was; only those rocks and their strips move.
+    const MESA_CLEAR = 0.6;
+    const clearOf = [homestead, supply, workshop, canteen, ranger].map(function (g) {
+        const side = Math.abs(Math.sin(g.rotation.y)) > 0.5;
+        const hx = (side ? g.walkIn.d : g.walkIn.w) / 2 + MESA_CLEAR, hz = (side ? g.walkIn.w : g.walkIn.d) / 2 + MESA_CLEAR;
+        return [g.position.x, g.position.z, hx, hz];
+    });
+    function mesaHits(x, z, w, d, ry, r) {  // the rock's turned foot against a building's (separating axes)
+        const ux = Math.cos(ry), uz = -Math.sin(ry), vx = Math.sin(ry), vz = Math.cos(ry);   // as in mesaColliders
+        const dx = r[0] - x, dz = r[1] - z, hx = r[2], hz = r[3];
+        if (Math.abs(dx) > Math.abs(ux) * w / 2 + Math.abs(vx) * d / 2 + hx) return false;
+        if (Math.abs(dz) > Math.abs(uz) * w / 2 + Math.abs(vz) * d / 2 + hz) return false;
+        if (Math.abs(dx * ux + dz * uz) > w / 2 + hx * Math.abs(ux) + hz * Math.abs(uz)) return false;
+        if (Math.abs(dx * vx + dz * vz) > d / 2 + hx * Math.abs(vx) + hz * Math.abs(vz)) return false;
+        return true;
+    }
     for (let i = 0; i < 96; i++) {
         const a = (i / 96) * Math.PI * 2;
         const r = R + Math.random() * 4;
         let x = Math.cos(a) * r;
-        const z = Math.sin(a) * r;
+        let z = Math.sin(a) * r;
         const h = 9 + Math.random() * 10;
         const w = 9 + Math.random() * 7, d = w * 0.9;
         const ry = a + (Math.random() - 0.5) * 0.5;
@@ -3397,6 +3417,9 @@ function mesaColliders(cx, cz, w, d, ry, top) {
         const halfX = (Math.abs(Math.cos(ry)) * w + Math.abs(Math.sin(ry)) * d) / 2;
         if (z < -58 && x + halfX > 0.4 && x - halfX < 15.6) {
             x = x < 8 ? (0.4 - halfX) : (15.6 + halfX);
+        }
+        for (let out = 0; out < 12 && clearOf.some(function (b) { return mesaHits(x, z, w, d, ry, b); }); out += 0.25) {
+            x += Math.cos(a) * 0.25; z += Math.sin(a) * 0.25;
         }
         const m = box(w, h, d, MAT.rock, x, h / 2 - 1, z);
         m.rotation.y = ry;
@@ -3478,7 +3501,7 @@ function mapFingerprint() {
        stop on them
      - nothing that has a collider is hidden or moved
    tests/map-audit/replay/sim.js rebuilds the seeded town from this file and
-   says whether a single collider moved: 94b46e8e-909, 0 moved.
+   says whether a single collider moved: 4080abb0-902, 0 moved.
    ========================================================================= */
 const VISUAL_SEED = 20260924;
 const decor = new THREE.Group();

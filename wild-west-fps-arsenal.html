@@ -5241,6 +5241,157 @@ function roofLineLook() {
     return stats;
 }
 
+/* ---- M9d: lanterns and hitching posts ------------------------------------------------
+   A lantern on an iron arm beside every door (on the side with more wall - away from the
+   window and its shutters), one hung on a chain under every porch roof (away from the
+   swinging sign), one on the doorway post of each walk-in. The hitching rails get caps on
+   their posts, iron tie rings on the bar and, on some, a lead rope hanging in a loop; each
+   walk-in gets a single tie post beside its porch. All decor, found from the buildings
+   themselves; nothing old moves, nothing new stops a bullet or a player (as the rails). */
+const HITCH_LOOK = {
+    glow: 0.55,                              // the lantern glass: lit, warm
+    wallY: 2.3, armOut: 0.28, doorReach: 0.98,
+    rings: 3, rope: 0.5, postClear: 0.5
+};
+function hitchingLook() {
+    const L = HITCH_LOOK, rand = makeSeededRandom(VISUAL_SEED + 11);
+    const stats = hitchingLook.stats = {};
+    const glassMat = new THREE.MeshStandardMaterial({ color: 0xfff0cc, emissive: 0xffa040, emissiveIntensity: L.glow, roughness: 0.2 });
+    const ropeMat = new THREE.MeshStandardMaterial({ color: 0xb59a68, roughness: 1 });
+    const walls = [MAT.plank, MAT.plankGrey, MAT.plankRed, MAT.plankPale];
+    const near = function (a, b) { return Math.abs(a - b) < 1e-3; };
+    const P = function (m) { return m.geometry && m.geometry.parameters; };
+    world.updateMatrixWorld(true);
+
+    const kit = [];
+    const put = function (geo, mat, matrix) {
+        const m = new THREE.Mesh(geo, mat);
+        m.matrixAutoUpdate = false;
+        m.matrix.copy(matrix); m.matrixWorld.copy(matrix);
+        m.castShadow = true; m.receiveShadow = true;
+        kit.push(m);
+        return m;
+    };
+    const at = function (x, y, z) { return new THREE.Matrix4().makeTranslation(x, y, z); };
+    const lantern = function (M) {           // M: the middle of the glass
+        const metal = MAT.metal, on = function (geo, mat, x, y, z) { put(geo, mat, M.clone().multiply(at(x, y, z))); };
+        on(new THREE.CylinderGeometry(0.075, 0.075, 0.2, 8), glassMat, 0, 0, 0);
+        on(new THREE.CylinderGeometry(0.1, 0.11, 0.05, 8), metal, 0, -0.125, 0);
+        on(new THREE.ConeGeometry(0.11, 0.09, 8), metal, 0, 0.145, 0);
+        on(new THREE.CylinderGeometry(0.03, 0.035, 0.06, 6, 1, true), metal, 0, 0.215, 0);
+        [-1, 1].forEach(function (a) { [-1, 1].forEach(function (b) { on(new THREE.BoxGeometry(0.012, 0.22, 0.012), metal, a * 0.06, 0, b * 0.06); }); });
+        on(new THREE.TorusGeometry(0.06, 0.007, 3, 6, Math.PI), metal, 0, 0.25, 0);   // the bail, over the top
+    };
+    const wallLantern = function (G, x, y, zFace) {           // plate on the wall, arm straight out, the lantern under its end
+        put(new THREE.BoxGeometry(0.08, 0.2, 0.03), MAT.metal, G.clone().multiply(at(x, y + 0.38, zFace + 0.015)));
+        put(new THREE.BoxGeometry(0.025, 0.025, L.armOut + 0.02), MAT.metal, G.clone().multiply(at(x, y + 0.44, zFace + L.armOut / 2 + 0.01)));
+        put(new THREE.BoxGeometry(0.012, 0.1, 0.012), MAT.metal, G.clone().multiply(at(x, y + 0.38, zFace + L.armOut)));
+        lantern(G.clone().multiply(at(x, y, zFace + L.armOut)));
+    };
+    const up = new THREE.Vector3(0, 1, 0), ray = new THREE.Raycaster();
+
+    // the buildings: body + the front windows' glass (as M9b), their door, porch roof and hitching rail
+    const houses = [];
+    world.traverse(function (o) {
+        if (!o.isMesh || o.geometry.type !== 'BoxGeometry' || walls.indexOf(o.material) < 0) return;
+        const p = P(o);
+        if (!(p.width > 3 && p.height > 3 && p.depth > 3)) return;
+        const kids = o.parent.children;
+        const glass = kids.filter(function (m) { const q = P(m); return m.material === MAT.glass && q && near(q.width, 1.25) && near(q.height, 1.05); });
+        if (!glass.length) return;
+        const door = kids.find(function (m) { const q = P(m); return q && m.geometry.type === 'BoxGeometry' && near(q.width, 1.3) && near(q.height, 2.3) && near(q.depth, 0.12); });
+        const roof = kids.find(function (m) { const q = P(m); return m.material === MAT.shingle && q && near(q.height, 0.16) && near(q.depth, 3.1); });
+        const posts = kids.filter(function (m) { const q = P(m); return m.material === MAT.beam && m.geometry.type === 'CylinderGeometry' && near(q.height, 1.3) && near(q.radiusTop, 0.09); });
+        const bar = kids.find(function (m) { const q = P(m); return m.material === MAT.beam && m.geometry.type === 'CylinderGeometry' && near(q.radiusTop, 0.07); });
+        houses.push({ g: o.parent, w: p.width, d: p.depth, glass: glass, door: door, roof: roof, posts: posts, bar: bar });
+    });
+
+    let byDoor = 0, hung = 0, onPost = 0, caps = 0, rings = 0, ropes = 0, tiePosts = 0;
+    houses.forEach(function (H) {
+        const G = H.g.matrixWorld;
+        // beside the door: the side with more wall before the nearest window's shutter
+        if (H.door) {
+            const dx = H.door.position.x;
+            let best = null;
+            [-1, 1].forEach(function (s) {
+                const x = dx + s * L.doorReach;
+                if (Math.abs(x) > H.w / 2 - 0.35) return;
+                let room = Infinity;
+                H.glass.forEach(function (gl) { room = Math.min(room, Math.abs(x - gl.position.x) - (0.75 + WINDOW_LOOK.gap + WINDOW_LOOK.shutterW) - 0.1); });
+                if (!best || room > best.room) best = { x: x, room: room };
+            });
+            if (best && best.room > 0.05) { wallLantern(G, best.x, L.wallY, H.d / 2); byDoor++; }
+        }
+        // hung under the porch roof, on the side away from the swinging sign (it hangs at +x)
+        if (H.roof) {
+            const x = -H.w / 3, z = H.d / 2 + 2.45, y = 2.4;
+            const from = new THREE.Vector3(x, y, z).applyMatrix4(G);
+            ray.set(from, up);
+            const hit = ray.intersectObject(H.roof, false)[0];
+            if (hit) {
+                const len = hit.distance - 0.31 - 0.01;
+                put(new THREE.CylinderGeometry(0.012, 0.012, len, 4, 1, true), MAT.metal, G.clone().multiply(at(x, y + 0.31 + len / 2, z)));
+                lantern(G.clone().multiply(at(x, y, z)));
+                hung++;
+            }
+        }
+        // the hitching rail: caps on the posts, rings under the bar, sometimes a lead rope
+        H.posts.forEach(function (p) {
+            put(new THREE.BoxGeometry(0.24, 0.05, 0.24), MAT.beam, G.clone().multiply(at(p.position.x, p.position.y + 0.675, p.position.z)));
+            caps++;
+        });
+        if (H.bar) {
+            const b = H.bar.position, len = P(H.bar).height, ringXs = [];
+            for (let i = 0; i < L.rings; i++) {
+                const x = b.x + (i - (L.rings - 1) / 2) * len * 0.3;
+                put(new THREE.BoxGeometry(0.02, 0.04, 0.03), MAT.metal, G.clone().multiply(at(x, b.y - 0.08, b.z)));           // the staple
+                put(new THREE.TorusGeometry(0.055, 0.011, 4, 10), MAT.metal, G.clone().multiply(at(x, b.y - 0.07 - 0.044, b.z)));
+                ringXs.push(x);
+                rings++;
+            }
+            if (rand() < L.rope) {           // tied through a ring, hanging in a loop, the end thrown over the bar
+                const x = ringXs[(rand() * ringXs.length) | 0], s = rand() < 0.5 ? -1 : 1, y0 = b.y - 0.16;
+                const pts = [[0, 0, 0], [0.04, -0.2, 0.03], [0.1, -0.46, 0.05], [0.2, -0.52, 0.05], [0.27, -0.3, 0.04], [0.3, 0.02, 0.02], [0.3, 0.19, 0], [0.33, 0.27, -0.06], [0.36, 0.1, -0.1]]
+                    .map(function (q) { return new THREE.Vector3(x + s * q[0], y0 + q[1], b.z + q[2]); });
+                put(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 18, 0.016, 4, false), ropeMat, G.clone());
+                ropes++;
+            }
+        }
+    });
+
+    // the walk-ins: a lantern on the left doorway post, a tie post beside the porch
+    const blocked = function (v) { return colliders.some(function (c) { return c.distanceToPoint(v) < L.postClear; }); };
+    [homestead, supply, workshop, canteen, ranger].forEach(function (g) {
+        const G = g.matrixWorld;
+        const frame = g.children.filter(function (m) { const q = P(m); return m.material === MAT.darkWood && q && near(q.width, 0.3) && near(q.depth, 0.38); });
+        const deck = g.children.find(function (m) { const q = P(m); return m.material === MAT.plankV && q && near(q.height, 0.18) && near(q.depth, 2.6); });
+        if (frame.length) {
+            const left = frame.reduce(function (a, m) { return m.position.x < a.position.x ? m : a; });
+            wallLantern(G, left.position.x, L.wallY, left.position.z + 0.19);
+            onPost++;
+        }
+        if (deck) {
+            const dw = P(deck).width, z = deck.position.z + 0.4;
+            const spot = [1, -1].map(function (s) { return new THREE.Vector3(s * (dw / 2 + 0.45), 0, z); })
+                .find(function (v) { return !blocked(v.clone().applyMatrix4(G)); });
+            if (spot) {
+                put(new THREE.CylinderGeometry(0.08, 0.09, 1.2, 8), MAT.beam, G.clone().multiply(at(spot.x, 0.6, spot.z)));
+                put(new THREE.BoxGeometry(0.2, 0.05, 0.2), MAT.beam, G.clone().multiply(at(spot.x, 1.225, spot.z)));
+                put(new THREE.TorusGeometry(0.055, 0.011, 4, 10), MAT.metal, G.clone().multiply(at(spot.x, 1.0, spot.z + 0.09)));
+                tiePosts++;
+            }
+        }
+    });
+
+    const drawn = mergeMeshesByLook(kit);
+    drawn.name = 'lanterns-hitching';
+    decor.add(drawn);
+    kit.forEach(function (m) { m.geometry.dispose(); });
+    Object.assign(stats, { houses: houses.length, byDoor: byDoor, hung: hung, onPost: onPost, caps: caps, rings: rings, ropes: ropes,
+        tiePosts: tiePosts, pieces: kit.length, parts: drawn.children.length });
+    return stats;
+}
+
 function buildVisualLayer() {
     // (the steps that change the town's looks go here, before the merge)
     groundLook();                            // M5
@@ -5250,6 +5401,7 @@ function buildVisualLayer() {
     boardwalkLook();                         // M9a - after M8 (plankV takes colours now)
     windowLook();                            // M9b
     roofLineLook();                          // M9c - after M8 (the fronts' planks and tints)
+    hitchingLook();                          // M9d - after M8 (finds the doors by their size, not their material)
     skyAndSun();                             // M4
     mendRocks();                             // M3
     dressMine();                             // M3

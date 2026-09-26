@@ -726,16 +726,24 @@ function eggGround(x, z, px, pz) {
    the ring in order: the free spot nearest the egg's own place in the arc, clear of the eggs
    already down if there is one. Null only if there is no free ground at all. */
 function eggFallback(x, z, want, laid) {
+    return ringFallback(x, z, BROOD.layNear, BROOD.layFar + 1.5, (px, pz) => eggGround(x, z, px, pz), (px, pz, a) => {
+        let off = Math.abs(a - want) % (Math.PI * 2);
+        if (off > Math.PI) off = Math.PI * 2 - off;
+        const crowded = laid.some((e) => Math.hypot(e[1] - px, e[2] - pz) < BROOD.eggRadius * 2 + 0.2);
+        return off + (crowded ? 10 : 0);
+    });
+}
+/* Round a ring from rMin to rMax out, every 0.5 m and 0.1 rad, in order: of the spots that
+   fit, the one with the lowest score(px, pz, angle). Null if none fits. Shared by the eggs
+   and the summons - what "fits" and what is "better" is theirs. */
+function ringFallback(x, z, rMin, rMax, fits, score) {
     let best = null, bestScore = Infinity;
-    for (let r = BROOD.layNear; r <= BROOD.layFar + 1.5 + 1e-9; r += 0.5) {
+    for (let r = rMin; r <= rMax + 1e-9; r += 0.5) {
         for (let a = 0; a < Math.PI * 2; a += 0.1) {
             const px = x + Math.sin(a) * r, pz = z + Math.cos(a) * r;
-            if (!eggGround(x, z, px, pz)) continue;
-            let off = Math.abs(a - want) % (Math.PI * 2);
-            if (off > Math.PI) off = Math.PI * 2 - off;
-            const crowded = laid.some((e) => Math.hypot(e[1] - px, e[2] - pz) < BROOD.eggRadius * 2 + 0.2);
-            const score = off + (crowded ? 10 : 0);
-            if (score < bestScore) { bestScore = score; best = { x: px, z: pz }; }
+            if (!fits(px, pz)) continue;
+            const sc = score(px, pz, a);
+            if (sc < bestScore) { bestScore = sc; best = { x: px, z: pz }; }
         }
     }
     return best;
@@ -847,22 +855,32 @@ function regularCount(room) {
 /* Help, arriving (step 21). Placed in a loose ring around (x, z) on ground a
    bandit can stand on and walk away from; they are ordinary bandits in every
    way except that none of them comes back after dying. Returns how many came. */
+/* Free ground a summoned bandit can stand on, in sight of whoever called it. */
+function summonGround(x, z, px, pz) {
+    return !nav.collidesAt(px, pz, BANDIT.radius + 0.2) && nav.lineClear(x, z, px, pz);
+}
 function summon(room, players, x, z, count) {
-    let came = 0;
+    const out = [];
     for (let i = 0; i < count; i++) {
-        for (let k = 0; k < 24; k++) {
+        let at = null;
+        for (let k = 0; k < 24 && !at; k++) {
             const a = Math.random() * Math.PI * 2, r = 5 + Math.random() * 6;
             const px = x + Math.cos(a) * r, pz = z + Math.sin(a) * r;
-            if (nav.collidesAt(px, pz, BANDIT.radius + 0.2)) continue;
-            if (!nav.lineClear(x, z, px, pz)) continue;
-            const b = spawnBandit(room, players, { x: px, z: pz });
-            b.summoned = true;
-            b.state = "chase";
-            came++;
-            break;
+            if (summonGround(x, z, px, pz)) at = { x: px, z: pz };
         }
+        /* In a tight spot the 24 random tries can all miss free ground that is there - the
+           sniper came up one or two short in 1.3% of her calls (2026-09-26; free ground
+           existed in all but 2 of 53). Then round the ring in order, clear of the ones
+           already called if it can be - the same fallback as the dragon's eggs. */
+        if (!at) at = ringFallback(x, z, 5, 11, (px, pz) => summonGround(x, z, px, pz),
+            (px, pz) => (out.some((b) => Math.hypot(b.x - px, b.z - pz) < BANDIT.radius * 2 + 0.5) ? 10 : 0) + Math.random());
+        if (!at) continue;
+        const b = spawnBandit(room, players, at);
+        b.summoned = true;
+        b.state = "chase";
+        out.push(b);
     }
-    return came;
+    return out.length;
 }
 
 /* A wave turning over makes the bandits already standing tougher too, by the

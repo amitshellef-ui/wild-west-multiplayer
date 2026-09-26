@@ -354,20 +354,22 @@ const MINE = { x0: 0.6, x1: 15.4 };
    border rocks sealed off a few small pockets between the rocks and the
    boundary wall - about 230 cells - and a bandit placed in one stays there for
    good, holding one of the wave's slots while it does. So points are drawn from
-   the town's own region. The mine shaft is still allowed on purpose, as before. */
+   the town's own region. The mine shaft is still allowed on purpose, as before -
+   except with `townOnly`, for a boss: the shaft is sealed off from the town, so a
+   boss placed or sent there never comes out (code review 2026-09-25, H2). */
 let TOWN_REGION = -1;
 function townRegion() {
     if (TOWN_REGION < 0) TOWN_REGION = regionSize.indexOf(Math.max.apply(null, regionSize));
     return TOWN_REGION;
 }
 
-function randomNavPoint() {
+function randomNavPoint(townOnly) {
     for (let k = 0; k < 40; k++) {
         const cx = Math.floor(Math.random() * NAV.w);
         const cz = Math.floor(Math.random() * NAV.h);
         if (isBlocked(cx, cz)) continue;
         const x = cellCenterX(cx), z = cellCenterZ(cz);
-        const inShaft = x > MINE.x0 && x < MINE.x1 && z < -52;
+        const inShaft = !townOnly && x > MINE.x0 && x < MINE.x1 && z < -52;
         if (!inShaft && (Math.abs(x) > 66 || Math.abs(z) > 66)) continue;
         if (!inShaft && region[navIdx(cx, cz)] !== townRegion()) continue;
         return { x: x, z: z };

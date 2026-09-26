@@ -76,7 +76,6 @@ const BOSS = {
     radius: 0.85,
     eyeHeight: 1.75 * 1.62,
     sightRange: 55,
-    engageRange: 42,
     keepDistance: 9,
     fireRange: 38,
     snipeRange: 70,
@@ -413,9 +412,9 @@ function initRoom(room, now) {
 /* Far enough away that it does not land on top of anybody, close enough that
    it is walking towards the fight rather than across the map. */
 function pickBossSpawn(room, players, radius) {
-    let fallback = nav.randomNavPoint();
+    let fallback = nav.randomNavPoint(true);         // town only: out of the mine shaft there is no way back (H2)
     for (let attempt = 0; attempt < 60; attempt++) {
-        const p = nav.randomNavPoint();
+        const p = nav.randomNavPoint(true);
         if (nav.collidesAt(p.x, p.z, radius || BOSS.radius)) continue;
         let nearest = Infinity;
         for (const id in players) {
@@ -1740,12 +1739,12 @@ function stepBoss(room, b, players, now, dt, sink) {
         } else {
             b.hasLos = false;
         }
-        if (b.hasLos && near && near.dist < BOSS.engageRange) {
-            b.state = "chase";
-        } else if (b.state === "chase" && (!near || near.dist > 60)) {
-            b.state = "patrol";
-        }
     }
+    /* A boss always comes for whoever is nearest (code review 2026-09-25, H2). It used
+       to give up past 60 m and patrol random points until it happened to see somebody
+       again - and while it lives no wave turns over, so a boss that never found a
+       player standing still stalled the room. It patrols only with nobody standing. */
+    b.state = near ? "chase" : "patrol";
 
     tickAbility(room, b, players, near, now, dt, sink);
 
@@ -1762,7 +1761,7 @@ function stepBoss(room, b, players, now, dt, sink) {
         if (b.type.keepDistance && b.hasLos && near.dist <= keepDistance - 4) wantsMove = false;
     } else {
         if (!b.patrolTarget || Math.hypot(b.patrolTarget.x - b.x, b.patrolTarget.z - b.z) < 2.2) {
-            b.patrolTarget = nav.randomNavPoint();
+            b.patrolTarget = nav.randomNavPoint(true);
             b.path = null;
         }
         goal = b.patrolTarget;

@@ -473,6 +473,39 @@ function readMove(m) {
     return out;
 }
 
+/* Where a player can be (code review 2026-09-25, stage 3d). Silent: a move to somewhere
+   no page can stand keeps the last good spot (the turn still counts), a height no jump
+   reaches is held to one that does, and neither is answered - only counted in the log.
+   None of it can touch an honest page:
+     - the page never puts a body inside a wall: before every step it tests the same boxes
+       (map-data.js, which the map gate holds to the page) with a 0.42 m body - 0.2 here
+       leaves room for the packet's 2-decimal rounding
+     - nobody walks past the border: flood-filled from the start with that 0.42 m body, a
+       player reaches x -66..65.75, z -83..66 (t53) - 2 m more is allowed
+     - eyes at 1.72, a jump adds at most 0.89 (6.1 m/s against 21 m/s/s), head bob and
+       camera shake at most 0.11 either way - 1.5..2.85 is never left by a page (t53 reads
+       these numbers from the page itself)
+   How fast somebody moves is not checked: a page is not told where the server placed it
+   when it joins a room, so its first move can be anywhere - that needs the page to take
+   its spawn point from the server first. */
+const PLACE = { r: 0.2, minX: -68, maxX: 68, minZ: -85, maxZ: 68, minY: 1.5, maxY: 2.85 };
+function canStand(x, z) {
+    return x >= PLACE.minX && x <= PLACE.maxX && z >= PLACE.minZ && z <= PLACE.maxZ &&
+        !nav.collidesAt(x, z, PLACE.r);
+}
+module.exports.canStand = canStand;         // t53 holds the page to it
+module.exports.PLACE = PLACE;
+const refusedMoves = { at: 0, count: 0 };
+function reportRefusedMove(p, move) {
+    const now = Date.now();
+    refusedMoves.count++;
+    if (now - refusedMoves.at < 60000) return;
+    console.log("Moves refused (nowhere a player can stand):", refusedMoves.count, "in the last minute - latest",
+        p.id.slice(0, 6), "at", move.x.toFixed(1) + ",", move.z.toFixed(1));
+    refusedMoves.at = now;
+    refusedMoves.count = 0;
+}
+
 function readShot(m) {
     if (!m || typeof m !== "object") return null;
     if (typeof m.w !== "number" || !Number.isFinite(m.w) || m.w < 0 || m.w > 32) return null;
@@ -970,7 +1003,9 @@ function registerHandlers(socket) {
         if (!p || !p.room || p.downed) return;          // lying where they fell
         const move = readMove(m);
         if (!move) return;
-        p.x = move.x; p.y = move.y; p.z = move.z;
+        if (canStand(move.x, move.z)) { p.x = move.x; p.z = move.z; }
+        else reportRefusedMove(p, move);
+        p.y = Math.max(PLACE.minY, Math.min(PLACE.maxY, move.y));
         p.yaw = move.yaw; p.pitch = move.pitch;
         p.movedAt = Date.now();
         p.moveDirty = true;

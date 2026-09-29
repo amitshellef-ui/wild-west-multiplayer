@@ -20,11 +20,13 @@ const server = http.createServer(app);
 const io = new Server(server, { maxHttpBufferSize: 32 * 1024 });
 
 /* Over HTTP the server hands out only what the page loads (code review 2026-09-25): the page
-   itself, and models/*.glb - the fallback when the CDN copy fails. socket.io serves its own client
+   itself, game-tables.js (stage 4a), and models/*.glb - the fallback when the CDN copy fails. socket.io serves its own client
    at /socket.io/. The rest of this folder - the server's source, node_modules, HANDOFF - stays off
    the web (the whole folder used to be served, node_modules included). */
 const PAGE = "wild-west-fps-arsenal.html";
 app.get("/" + PAGE, (req, res) => res.sendFile(PAGE, { root: __dirname }));
+// the numbers the page and the server share (stage 4a) - the page loads it from next to itself
+app.get("/game-tables.js", (req, res) => res.sendFile("game-tables.js", { root: __dirname }));
 app.get("/models/:file", (req, res, next) => {
     if (!/^[a-z0-9_-]+\.glb$/i.test(req.params.file)) return next();
     res.sendFile(req.params.file, { root: path.join(__dirname, "models") });
@@ -361,16 +363,10 @@ const SPAWNS = [
     [40, -22], [12, 32], [28, 22], [-30, -20], [8, -40], [44, 4]
 ];
 
-/* The damage table lives here, not on the client. A client reports *that* it
-   hit and *where* - never how much that is worth. */
-const WEAPONS = [
-    { id: "winchester", body: 37, head: 96, pellets: 1, range: 200, fireCd: 430 },
-    { id: "smg", body: 13, head: 26, pellets: 1, range: 90, fireCd: 75 },
-    { id: "sniper", body: 120, head: 220, pellets: 1, range: 280, fireCd: 980 },
-    { id: "ar", body: 22, head: 44, pellets: 1, range: 160, fireCd: 105 },
-    { id: "shotgun", body: 14, head: 20, pellets: 8, range: 45, fireCd: 720 },
-    { id: "deagle", body: 58, head: 115, pellets: 1, range: 120, fireCd: 260 }
-];
+/* The damage table is the server's to apply, not the client's. A client reports *that* it
+   hit and *where* - never how much that is worth. The numbers themselves are in one copy
+   the page reads too (code review stage 4a): game-tables.js. */
+const WEAPONS = require("./game-tables").WEAPONS;
 
 /* Coming back to life inside somebody's line of fire is not a fight, it is a
    punishment. Pick the spawn that is furthest from the bandits currently alive

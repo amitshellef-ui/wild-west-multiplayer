@@ -287,6 +287,9 @@
 <!-- Served by the Node server. Absent when the file is opened straight from
      disk, in which case the game simply stays offline single player. -->
 <script src="/socket.io/socket.io.js"></script>
+<!-- The numbers the server and the page share, one copy (code review stage 4a). A relative
+     path, so it also loads with the page opened straight from disk, from next to it. -->
+<script src="game-tables.js"></script>
 </head>
 <body>
 
@@ -12467,13 +12470,22 @@ rifleGroup.userData = {
 };
 
 const ARSENAL = [
-    { id: 'winchester', name: 'WINCHESTER', mag: 8, reserveMax: 64, fireCd: 430, auto: true, pellets: 1, dmg: 37, head: 96, spreadHip: 0.024, spreadAds: 0.0092, adsFov: 19, recoil: 0.075, range: 200, sfx: sfxRifleShot, cock: true, model: rifleGroup, hip: WPN_HIP, ads: WPN_ADS, run: WPN_RUN },
-    { id: 'smg', name: 'SMG', mag: 30, reserveMax: 150, fireCd: 75, auto: true, pellets: 1, dmg: 13, head: 26, spreadHip: 0.042, spreadAds: 0.02, adsFov: 58, recoil: 0.028, range: 90, sfx: sfxSmg, cock: false, model: buildSmgModel(), hip: new THREE.Vector3(0.18, -0.2, -0.4), ads: new THREE.Vector3(0.0, -0.1, -0.42), run: new THREE.Vector3(0.22, -0.26, -0.36) },
-    { id: 'sniper', name: 'SNIPER', mag: 5, reserveMax: 25, fireCd: 980, auto: false, pellets: 1, dmg: 120, head: 220, spreadHip: 0.045, spreadAds: 0.0008, adsFov: 12, recoil: 0.12, range: 280, sfx: sfxSniper, cock: true, model: buildSniperModel(), hip: new THREE.Vector3(0.22, -0.2, -0.42), ads: new THREE.Vector3(0.0, -0.09, -0.38), run: new THREE.Vector3(0.26, -0.28, -0.36) },
-    { id: 'ar', name: 'AR', mag: 25, reserveMax: 125, fireCd: 105, auto: true, pellets: 1, dmg: 22, head: 44, spreadHip: 0.022, spreadAds: 0.007, adsFov: 42, recoil: 0.045, range: 160, sfx: sfxAr, cock: false, model: buildArModel(), hip: new THREE.Vector3(0.2, -0.19, -0.4), ads: new THREE.Vector3(0.0, -0.088, -0.42), run: new THREE.Vector3(0.24, -0.26, -0.36) },
-    { id: 'shotgun', name: 'SHOTGUN', mag: 6, reserveMax: 36, fireCd: 720, auto: false, pellets: 8, dmg: 14, head: 20, spreadHip: 0.11, spreadAds: 0.06, adsFov: 62, recoil: 0.14, range: 45, sfx: sfxShotgun, cock: true, model: buildShotgunModel(), hip: new THREE.Vector3(0.2, -0.2, -0.4), ads: new THREE.Vector3(0.0, -0.1, -0.44), run: new THREE.Vector3(0.24, -0.27, -0.36) },
-    { id: 'deagle', name: 'DEAGLE', mag: 7, reserveMax: 42, fireCd: 260, auto: false, pellets: 1, dmg: 58, head: 115, spreadHip: 0.03, spreadAds: 0.008, adsFov: 48, recoil: 0.11, range: 120, sfx: sfxDeagle, cock: false, model: buildDeagleModel(), hip: new THREE.Vector3(0.22, -0.18, -0.38), ads: new THREE.Vector3(0.0, -0.08, -0.4), run: new THREE.Vector3(0.26, -0.24, -0.34) }
+    { id: 'winchester', name: 'WINCHESTER', mag: 8, reserveMax: 64, auto: true, spreadHip: 0.024, spreadAds: 0.0092, adsFov: 19, recoil: 0.075, sfx: sfxRifleShot, cock: true, model: rifleGroup, hip: WPN_HIP, ads: WPN_ADS, run: WPN_RUN },
+    { id: 'smg', name: 'SMG', mag: 30, reserveMax: 150, auto: true, spreadHip: 0.042, spreadAds: 0.02, adsFov: 58, recoil: 0.028, sfx: sfxSmg, cock: false, model: buildSmgModel(), hip: new THREE.Vector3(0.18, -0.2, -0.4), ads: new THREE.Vector3(0.0, -0.1, -0.42), run: new THREE.Vector3(0.22, -0.26, -0.36) },
+    { id: 'sniper', name: 'SNIPER', mag: 5, reserveMax: 25, auto: false, spreadHip: 0.045, spreadAds: 0.0008, adsFov: 12, recoil: 0.12, sfx: sfxSniper, cock: true, model: buildSniperModel(), hip: new THREE.Vector3(0.22, -0.2, -0.42), ads: new THREE.Vector3(0.0, -0.09, -0.38), run: new THREE.Vector3(0.26, -0.28, -0.36) },
+    { id: 'ar', name: 'AR', mag: 25, reserveMax: 125, auto: true, spreadHip: 0.022, spreadAds: 0.007, adsFov: 42, recoil: 0.045, sfx: sfxAr, cock: false, model: buildArModel(), hip: new THREE.Vector3(0.2, -0.19, -0.4), ads: new THREE.Vector3(0.0, -0.088, -0.42), run: new THREE.Vector3(0.24, -0.26, -0.36) },
+    { id: 'shotgun', name: 'SHOTGUN', mag: 6, reserveMax: 36, auto: false, spreadHip: 0.11, spreadAds: 0.06, adsFov: 62, recoil: 0.14, sfx: sfxShotgun, cock: true, model: buildShotgunModel(), hip: new THREE.Vector3(0.2, -0.2, -0.4), ads: new THREE.Vector3(0.0, -0.1, -0.44), run: new THREE.Vector3(0.24, -0.27, -0.36) },
+    { id: 'deagle', name: 'DEAGLE', mag: 7, reserveMax: 42, auto: false, spreadHip: 0.03, spreadAds: 0.008, adsFov: 48, recoil: 0.11, sfx: sfxDeagle, cock: false, model: buildDeagleModel(), hip: new THREE.Vector3(0.22, -0.18, -0.38), ads: new THREE.Vector3(0.0, -0.08, -0.4), run: new THREE.Vector3(0.26, -0.24, -0.34) }
 ];
+/* Fire rate, pellets, damage and range come from game-tables.js - the same copy the server
+   judges hits with (code review stage 4a). Matched by id, so a table in a different order
+   stops the page loudly here instead of every shot costing the wrong amount. */
+if (GAME_TABLES.WEAPONS.length !== ARSENAL.length) throw new Error('game-tables.js has ' + GAME_TABLES.WEAPONS.length + ' weapons, the page ' + ARSENAL.length);
+ARSENAL.forEach(function (w, i) {
+    const t = GAME_TABLES.WEAPONS[i];
+    if (t.id !== w.id) throw new Error('game-tables.js: weapon ' + i + ' is ' + t.id + ', the page has ' + w.id);
+    w.fireCd = t.fireCd; w.pellets = t.pellets; w.dmg = t.body; w.head = t.head; w.range = t.range;
+});
 let unlockedWeapons = 1;
 let currentWpn = 0;
 const wpnAmmo = ARSENAL.map(function (w) { return { clip: w.mag, reserve: w.reserveMax }; });

@@ -453,6 +453,8 @@ function spawnBoss(room, players, now) {
         losAt: 0,
         hasLos: false,
         patrolTarget: null,
+        patrolBest: Infinity,       // nearest it has got to patrolTarget, and when (a shuffle picks a new one)
+        patrolGainAt: 0,
         stuckCheckAt: 0,
         lastX: p.x, lastZ: p.z,
         strafeAt: 0,
@@ -1760,9 +1762,20 @@ function stepBoss(room, b, players, now, dt, sink) {
            where it breathes from. The others close in, as they always have. */
         if (b.type.keepDistance && b.hasLos && near.dist <= keepDistance - 4) wantsMove = false;
     } else {
-        if (!b.patrolTarget || Math.hypot(b.patrolTarget.x - b.x, b.patrolTarget.z - b.z) < 2.2) {
+        /* A new point when it gets there - or when 6 s have gone by without it getting 1 m
+           nearer: a big body (robot, dragon) can shuffle to and fro on the spot, pressed to a
+           wall between two routes, or at a gap its line fits through and its body does not;
+           it is moving, so the stuck check below never sees it (2026-09-26: a 30 s shuffle
+           in ~1 patrol of 60). */
+        const left = b.patrolTarget ? Math.hypot(b.patrolTarget.x - b.x, b.patrolTarget.z - b.z) : 0;
+        if (!b.patrolTarget || left < 2.2 || now - b.patrolGainAt > 6000) {
             b.patrolTarget = nav.randomNavPoint(true);
             b.path = null;
+            b.patrolBest = Infinity;
+            b.patrolGainAt = now;
+        } else if (left < b.patrolBest - 1) {
+            b.patrolBest = left;
+            b.patrolGainAt = now;
         }
         goal = b.patrolTarget;
     }

@@ -6595,7 +6595,7 @@ function showBossEnraged(bt, where, loud) {
    - it has no bone masks, so every clip is cut once into a lower half (legs and
      hips) and an upper half. The legs keep walking while the arms shoot.
    ========================================================================= */
-const MODEL_BASE_CDN = 'https://cdn.jsdelivr.net/gh/amitshellef-ui/wild-west-multiplayer@86f4026b089611395d0df2e579a46c5c657e1b5e/models/';   // step 33a: + the new dragon.glb (10 clips, eyes, jaw)
+const MODEL_BASE_CDN = 'https://cdn.jsdelivr.net/gh/amitshellef-ui/wild-west-multiplayer@2d7958ea2280ed08f3812219fab9fdde6deab506/models/';   // step Strafe: + cowboy.glb with StrafeL / StrafeR
 const MODEL_BASE_LOCAL = '/models/';
 const MODEL_FORCE_CUBES = /[?&]cubes\b/.test(location.search);   // ?cubes = the old rig, for comparisons
 const MODEL_HITBOX_MUL = 1.2;                                       // the same margin the cube rig uses
@@ -6631,8 +6631,12 @@ const MODEL_SPECS = {
         file: 'cowboy.glb',
         // metres a second each clip covers at normal speed (measured in Blender)
         vWalk: 1.58, vRun: 4.17,
+        // side-steps (step Strafe): a bandit that sidesteps while it faces the player plays
+        // StrafeL / StrafeR instead of walking forward sideways; 1.6 m/s at x1 (a planted
+        // foot slides at exactly that), so a bandit's 2.21 runs them at x1.38
+        strafe: { v: 1.6, ts: [0.6, 1.8] },
         // the moments a foot lands, in seconds into the clip - for the footstep sound
-        steps: { Walk: [14 / 24, 30 / 24], Run: [9 / 24, 19 / 24] },
+        steps: { Walk: [14 / 24, 30 / 24], Run: [9 / 24, 19 / 24], StrafeL: [0, 6 / 24], StrafeR: [0, 6 / 24] },
         // Shoot is raise (0-8), kick (10), hold, second kick (18), lower (24-36):
         // one shot plays 8 -> 16 and then holds the aim for a moment
         shoot: { from: 8 / 24, to: 16 / 24, hold: 0.7 },
@@ -6778,6 +6782,8 @@ const MODEL_SPECS = {
          vWalk, vRun       metres a second each clip covers at normal speed
          gait              speeds (m/s) for Idle / Run / back to Walk and each clip's speed-up range
                            (optional: MODEL_GAIT)
+         strafe            { v, ts } when the model has StrafeL / StrafeR: metres a second they
+                           cover and their speed-up range (optional: without it, Walk sideways)
          steps             footstep moments per clip, in seconds (optional)
          shoot             { from, to, hold, fadeIn, fadeOut } - the part of Shoot that fires
                            (optional: the whole clip)
@@ -7014,7 +7020,7 @@ function createModelRig(key, isBoss, bt) {
         lower: null, upper: null,
         motion: null, full: null,          // full = a whole-body clip (Death) owns both halves
         overlay: null, overlayStop: 0, overlayUntil: 0, lastHit: 0,
-        speed: 0, prevX: 0, prevZ: 0, hasPrev: false, back: false, stepT: 0
+        speed: 0, prevX: 0, prevZ: 0, hasPrev: false, back: false, side: 0, stepT: 0
     };
     blob.visible = false;                    // born "far"; updateModelRigs settles it on the first frame
     if (spec.gun && spec.gun.arsenal) rigSetWeapon(rig, 0);   // everybody starts with the Winchester
@@ -7290,7 +7296,7 @@ function rigStand(rig, fade) {
     if (!rig || rig.kind !== 'model' || !rig.full) return;
     rig.full = null;
     rig.overlay = null;
-    rig.speed = 0; rig.hasPrev = false; rig.back = false; rig.air = false;
+    rig.speed = 0; rig.hasPrev = false; rig.back = false; rig.side = 0; rig.air = false;
     rigPlayMotion(rig, 'Idle', fade);
 }
 
@@ -7300,7 +7306,7 @@ function rigReset(rig) {
     rig.mixer.stopAllAction();
     rig.lower = null; rig.upper = null;
     rig.full = null; rig.overlay = null;
-    rig.speed = 0; rig.hasPrev = false; rig.back = false; rig.air = false;
+    rig.speed = 0; rig.hasPrev = false; rig.back = false; rig.side = 0; rig.air = false;
     rigPlayMotion(rig, 'Idle', 0);
 }
 
@@ -7310,11 +7316,27 @@ function rigReset(rig) {
    rig.air (a remote player off the ground) plays Jump. */
 const MODEL_GAIT = { idle: 0.3, runUp: 2.9, runDown: 2.3, walkTs: [0.6, 1.8], runTs: [0.6, 2.2] };
 
-function rigChooseMotion(rig) {
+/* Side-steps (step Strafe): moving mostly sideways to where the body faces - more than
+   ~49 degrees off its front or back to start, ~37 to keep on. A walker changes to them,
+   or back, only once that has held for STRAFE_SETTLE seconds: a bandit at the edge of
+   its range goes forward and sideways by turns, and the legs flicked between clips
+   (measured: 3 times a second). rig.side is that sideways share, + = its left. */
+const STRAFE_ON = 0.75, STRAFE_OFF = 0.6, STRAFE_SETTLE = 0.25;
+
+function rigChooseMotion(rig, delta) {
     const s = rig.scale, v = rig.speed, spec = rig.spec, g = spec.gait || MODEL_GAIT;
+    const strafing = rig.motion === 'StrafeL' || rig.motion === 'StrafeR';
+    const side = rig.side || 0;
+    let sideways = !!spec.strafe && !!rigClip(rig, 'StrafeL') && Math.abs(side) > (strafing ? STRAFE_OFF : STRAFE_ON);
+    if (sideways !== strafing && (strafing || rig.motion === 'Walk' || rig.motion === 'Run')) {
+        rig.strafeT = (rig.strafeT || 0) + (delta || 0);
+        if (rig.strafeT < STRAFE_SETTLE) sideways = strafing;
+    } else rig.strafeT = 0;
     let want;
     if (rig.air && rigClip(rig, 'Jump')) want = 'Jump';
     else if (v < g.idle * s) want = 'Idle';
+    else if (sideways)      // a side it is clearly going to, or the one it was stepping to
+        want = Math.abs(side) > STRAFE_OFF || !strafing ? (side > 0 ? 'StrafeL' : 'StrafeR') : rig.motion;
     else if (rig.back) want = 'Walk';
     else if (rig.motion === 'Run') want = v > g.runDown * s ? 'Run' : 'Walk';
     else want = v > g.runUp * s ? 'Run' : 'Walk';
@@ -7322,6 +7344,7 @@ function rigChooseMotion(rig) {
     if (want !== rig.motion) rigPlayMotion(rig, want, (want === 'Jump' || rig.motion === 'Jump') ? 0.1 : 0.2);
     let ts = 1;
     if (want === 'Walk') ts = THREE.MathUtils.clamp(v / (spec.vWalk * s), g.walkTs[0], g.walkTs[1]) * (rig.back ? -1 : 1);
+    else if (want === 'StrafeL' || want === 'StrafeR') ts = THREE.MathUtils.clamp(v / (spec.strafe.v * s), spec.strafe.ts[0], spec.strafe.ts[1]);
     else if (want === 'Run') ts = THREE.MathUtils.clamp(v / (spec.vRun * s), g.runTs[0], g.runTs[1]);
     else if (want === 'Jump') ts = spec.jump || 1;
     rig.lower.setEffectiveTimeScale(ts);
@@ -7369,6 +7392,7 @@ function updateModelRigs(delta) {
                 if (v > 0.2) {
                     const yaw = rig.root.rotation.y;             // the model faces +Z
                     rig.back = (dx * Math.sin(yaw) + dz * Math.cos(yaw)) / (v * span) < -0.35;
+                    rig.side = (dx * Math.cos(yaw) - dz * Math.sin(yaw)) / (v * span);     // its left is local +X
                 }
             }
         } else if (rig.hasPrev && delta > 0) {
@@ -7380,6 +7404,10 @@ function updateModelRigs(delta) {
                 const yaw = rig.root.rotation.y;             // the model faces +Z
                 const fwd = (dx * Math.sin(yaw) + dz * Math.cos(yaw)) / (inst * delta);
                 rig.back = fwd < -0.35;
+                // its left is local +X; smoothed like the speed - drawn between packets, the
+                // direction jumps at every corner and the legs flicked between clips
+                const side = (dx * Math.cos(yaw) - dz * Math.sin(yaw)) / (inst * delta);
+                rig.side += (side - rig.side) * Math.min(1, 8 * delta);
             }
         }
         rig.prevX = p.x; rig.prevZ = p.z; rig.hasPrev = true;
@@ -7392,7 +7420,7 @@ function updateModelRigs(delta) {
             rig.blob.visible = near;
         }
 
-        if (!rig.full) rigChooseMotion(rig);
+        if (!rig.full) rigChooseMotion(rig, delta);
         const before = rig.lower ? rig.lower.time : 0;
         rig.mixer.update(delta);
 

@@ -434,6 +434,52 @@ setInterval(() => {
     LINE_OF_FIRE.since = Date.now();
 }, 5 * 60 * 1000);
 
+/* What accepted hits on bandits cost, and the kills they make - one place for a round and
+   for the shield's every bounce. */
+function hurtBandits(shooter, room, w, accepted) {
+    for (let i = 0; i < accepted.length; i++) {
+        const a = accepted[i];
+        const damage = a.body * w.body + a.head * w.head;
+        const res = bandits.hurt(room, a.b.id, damage);
+        if (res && res.killed) {
+            shooter.kills++;
+            scoresChanged(room.code);
+            io.to(room.code).emit("bandit-died", {
+                id: a.b.id, by: shooter.id, x: a.b.x, z: a.b.z, headshot: a.head > 0
+            });
+        }
+    }
+}
+
+/* ---- The shield going on to the next bandit (step F6b) ----
+   The player may not see the second bandit - the shield does, from the first. So a bounce is
+   judged from where the last bandit it hit stood: the next one (a new one, `n` the next
+   bounce, `from` the last) within bounceReach of it, nothing solid between, and the whole
+   chain within 3 s of the first hit. No cooldown of its own: the throw already paid. */
+const SHIELD_CHAIN_MS = 3000;
+function shieldBounce(shooter, room, w, m, now) {
+    const c = shooter.shieldChain;
+    if (!c || now - c.at > SHIELD_CHAIN_MS || c.n >= w.bounces) return;
+    if (m.from !== c.last || m.n !== c.n + 1) return;
+    if (!Array.isArray(m.targets) || m.targets.length !== 1) return;
+    const t = m.targets[0];
+    if (!t || typeof t.id !== "number" || c.hit.indexOf(t.id) >= 0) return;
+    const body = strictCount(t.body, 1), head = strictCount(t.head, 1);
+    if (body < 0 || head < 0 || body + head !== 1) return;
+    const b = room.bandits[t.id];
+    if (!b || !b.alive) return;
+    // where it is now, or anywhere in the last 300 ms (the page draws it slightly in the past)
+    const spots = [b.x, b.z].concat(b.trail || []);
+    let ok = false;
+    for (let i = 0; i < spots.length && !ok; i += 2) {
+        ok = Math.hypot(spots[i] - c.x, spots[i + 1] - c.z) <= w.bounceReach + 2 &&
+            nav.shotClear(c.x, 1.2, c.z, spots[i], 1.2, spots[i + 1]);
+    }
+    if (!ok) return;
+    c.n++; c.last = b.id; c.x = b.x; c.z = b.z; c.hit.push(b.id);
+    hurtBandits(shooter, room, w, [{ b: b, body: body, head: head }]);
+}
+
 function distanceBetween(a, b) {
     const dx = a.x - b.x, dy = a.y - b.y, dz = a.z - b.z;
     return Math.sqrt(dx * dx + dy * dy + dz * dz);
@@ -1118,6 +1164,8 @@ function registerHandlers(socket) {
         const w = WEAPONS[m.w];
 
         const now = Date.now();
+        // step F6b: the shield going on from one bandit to the next - judged from the last one
+        if (w.bounces && m.from !== undefined) { shieldBounce(shooter, room, w, m, now); return; }
         if (now - shooter.lastBanditHitAt < w.fireCd * 0.7) return;
 
         if (!Array.isArray(m.targets) || m.targets.length === 0 || m.targets.length > 8) return;
@@ -1145,18 +1193,9 @@ function registerHandlers(socket) {
         }
         if (accepted.length === 0 || pellets > w.pellets) return;
 
-        for (let i = 0; i < accepted.length; i++) {
-            const a = accepted[i];
-            const damage = a.body * w.body + a.head * w.head;
-            const res = bandits.hurt(room, a.b.id, damage);
-            if (res && res.killed) {
-                shooter.kills++;
-                scoresChanged(room.code);
-                io.to(room.code).emit("bandit-died", {
-                    id: a.b.id, by: shooter.id, x: a.b.x, z: a.b.z, headshot: a.head > 0
-                });
-            }
-        }
+        // a shield's first bandit starts its chain (step F6b)
+        if (w.bounces) shooter.shieldChain = { at: now, n: 0, last: accepted[0].b.id, x: accepted[0].b.x, z: accepted[0].b.z, hit: [accepted[0].b.id] };
+        hurtBandits(shooter, room, w, accepted);
     });
 
     /* =====================================================================

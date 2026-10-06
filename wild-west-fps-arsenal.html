@@ -12528,8 +12528,9 @@ function buildDeagleModel() {
    Thrown, not fired: a click sends it flat and spinning along the sights; it stops at the
    first thing it meets - a bandit, the boss, a player in FREE FOR ALL, a wall - and flies
    back to the hand (through everything on the way back). No ammunition and no reload: the
-   wait is the trip. One hit a throw (step F6a); the bounces from one bandit to the next are
-   step F6b. Built in code like the other guns: red, white, red, a blue middle, a white star. */
+   wait is the trip. From a bandit it goes on to the nearest one it has not hit yet that it can
+   reach in the open, up to `bounces` times (step F6b); the boss, a player or a wall sends it
+   home. Built in code like the other guns: red, white, red, a blue middle, a white star. */
 const SHIELD_FLY = {
     speed: 30,          // m/s out
     back: 36,           // m/s home, faster than you can run away from it
@@ -12614,6 +12615,7 @@ ARSENAL.forEach(function (w, i) {
     const t = GAME_TABLES.WEAPONS[i];
     if (t.id !== w.id) throw new Error('game-tables.js: weapon ' + i + ' is ' + t.id + ', the page has ' + w.id);
     w.fireCd = t.fireCd; w.pellets = t.pellets; w.dmg = t.body; w.head = t.head; w.range = t.range;
+    if (t.bounces) { w.bounces = t.bounces; w.bounceReach = t.bounceReach; }      // step F6b: the shield
 });
 let unlockedWeapons = 1;
 let currentWpn = 0;
@@ -12621,7 +12623,13 @@ const wpnAmmo = ARSENAL.map(function (w) { return { clip: w.mag, reserve: w.rese
 
 /* ---- step F6: the shield in the air (ours) and the ones the others throw ---- */
 const SHIELD_IDX = ARSENAL.findIndex(function (w) { return w.id === 'shield'; });
-const SHIELD = { state: 'hand', mesh: null, pos: new THREE.Vector3(), vel: new THREE.Vector3(), went: 0, backT: 0, from: new THREE.Vector3() };
+const SHIELD = {
+    state: 'hand', mesh: null, pos: new THREE.Vector3(), vel: new THREE.Vector3(), went: 0, backT: 0, from: new THREE.Vector3(),
+    hit: [],            // step F6b: the bandits this throw has hit, in order (ids online, bodies offline)
+    target: null,       // the one it is on its way to now, or null (flying straight)
+    homeT: 0            // how long it has been on its way to it
+};
+const SHIELD_HOME_MAX_S = 1.2;     // gives up on a bandit it has not reached by then (it moved behind something)
 const remoteShields = [];       // { mesh, a, b, body, t, out } - somebody else's throw, drawn only
 function shieldMesh() {
     const m = shieldParts(SHIELD_FLY.radius);
@@ -12642,6 +12650,8 @@ function throwShield(now) {
     SHIELD.pos.copy(camera.position).addScaledVector(dir, 0.6).y -= 0.15;
     SHIELD.vel.copy(dir).multiplyScalar(SHIELD_FLY.speed);
     SHIELD.went = 0;
+    SHIELD.hit.length = 0;
+    SHIELD.target = null;
     SHIELD.state = 'out';
     SHIELD.mesh.position.copy(SHIELD.pos);
     SHIELD.mesh.visible = true;
@@ -12655,6 +12665,7 @@ function shieldStrike(h) {
     const w = ARSENAL[SHIELD_IDX], at = h.point;
     sfxShieldClang(at);
     spawnParticles(at, 0xe6e6e6, 10, 3.2);
+    const n = SHIELD.hit.length;                 // 0 = the throw's first hit, then the bounces
     if (h.object.userData.bossHit && netBoss.active && netBoss.alive) {
         showHitmarker(); sfxHitMarker();
         if (NET.connected && NET.socket) NET.socket.emit('boss-hit', { w: SHIELD_IDX, body: 1, head: 0 });
@@ -12663,8 +12674,11 @@ function shieldStrike(h) {
     const banditId = h.object.userData.banditId;
     if (banditId !== undefined && serverBandits[banditId]) {
         showHitmarker(); sfxHitMarker(); sfxFleshHit(at);
-        if (NET.connected && NET.socket) NET.socket.emit('bandit-hit', { w: SHIELD_IDX, targets: [{ id: parseInt(banditId, 10), body: 1, head: 0 }] });
-        return;
+        const id = parseInt(banditId, 10), msg = { w: SHIELD_IDX, targets: [{ id: id, body: 1, head: 0 }] };
+        if (n > 0) { msg.from = SHIELD.hit[n - 1]; msg.n = n; }       // step F6b: a bounce, judged from the last one
+        if (NET.connected && NET.socket) NET.socket.emit('bandit-hit', msg);
+        SHIELD.hit.push(id);
+        return 'bandit';
     }
     const remoteId = h.object.userData.remoteId;
     if (remoteId && PLAYERS[remoteId]) {
@@ -12673,7 +12687,49 @@ function shieldStrike(h) {
         return;
     }
     const bot = h.object.userData.bot;
-    if (bot && bot.alive) { showHitmarker(); sfxHitMarker(); damageBot(bot, w.dmg, at, false); }
+    if (bot && bot.alive) {
+        showHitmarker(); sfxHitMarker(); damageBot(bot, w.dmg, at, false);
+        if (!bot.isBoss) { SHIELD.hit.push(bot); return 'bandit'; }
+    }
+    return null;
+}
+/* step F6b: the next bandit for the shield - the nearest it has not hit, alive, within
+   bounceReach of where it is, and nothing solid between (the server checks the same). */
+const _bounceRay = new THREE.Raycaster();
+function shieldNextTarget() {
+    const w = ARSENAL[SHIELD_IDX];
+    if (SHIELD.hit.length > w.bounces) return null;
+    let best = null, bestD = w.bounceReach;
+    const consider = function (key, mesh) {
+        if (SHIELD.hit.indexOf(key) >= 0) return;
+        const p = mesh.position, d = Math.hypot(p.x - SHIELD.pos.x, p.z - SHIELD.pos.z);
+        if (d >= bestD) return;
+        const aim = new THREE.Vector3(p.x, 1.2, p.z), dir = aim.clone().sub(SHIELD.pos);
+        const len = dir.length();
+        _bounceRay.set(SHIELD.pos, dir.normalize());
+        _bounceRay.far = len;
+        if (_bounceRay.intersectObject(world, true).length) return;
+        best = { key: key, mesh: mesh }; bestD = d;
+    };
+    if (onlineBandits()) {
+        Object.keys(serverBandits).forEach(function (id) {
+            const sb = serverBandits[id];
+            if (sb.alive && !sb.broodKind) consider(parseInt(id, 10), sb.mesh);
+        });
+    } else {
+        bots.forEach(function (b) { if (b.alive && !b.isBoss) consider(b, b.mesh); });
+    }
+    return best;
+}
+/* the key a hit part of a body is known by in SHIELD.hit: the id online, the body offline */
+function shieldKeyOf(o) {
+    const ud = o.userData;
+    if (ud.banditId !== undefined) return parseInt(ud.banditId, 10);
+    return ud.bot || null;
+}
+function shieldTargetAlive(t) {
+    if (onlineBandits()) { const sb = serverBandits[t.key]; return !!(sb && sb.alive); }
+    return !!t.key.alive;
 }
 const _shieldRay = new THREE.Raycaster();
 const _shieldDir = new THREE.Vector3();
@@ -12685,12 +12741,25 @@ function updateShield(delta) {
             _shieldDir.copy(SHIELD.vel).normalize();
             _shieldRay.set(SHIELD.pos, _shieldDir);
             _shieldRay.far = step + SHIELD_FLY.radius;
-            const hits = _shieldRay.intersectObjects(shotTargets(), true);
+            // (step F6b: straight through the bandits it has already hit - it starts each bounce inside one)
+            const hits = _shieldRay.intersectObjects(shotTargets(), true).filter(function (h) { return SHIELD.hit.indexOf(shieldKeyOf(h.object)) < 0; });
             if (hits.length) {
                 SHIELD.pos.copy(hits[0].point).addScaledVector(_shieldDir, -SHIELD_FLY.radius);
-                shieldStrike(hits[0]);
+                const what = shieldStrike(hits[0]);
                 sendShieldShot(SHIELD.from, hits[0].point);
-                SHIELD.state = 'back'; SHIELD.backT = 0;
+                SHIELD.from.copy(SHIELD.pos);            // the next leg, as the others see it, starts here
+                SHIELD.target = what === 'bandit' ? shieldNextTarget() : null;
+                SHIELD.homeT = 0;
+                if (!SHIELD.target) { SHIELD.state = 'back'; SHIELD.backT = 0; }
+            } else if (SHIELD.target) {               // step F6b: on its way to the next bandit
+                SHIELD.homeT += delta;
+                if (!shieldTargetAlive(SHIELD.target) || SHIELD.homeT > SHIELD_HOME_MAX_S) {
+                    SHIELD.target = null; SHIELD.state = 'back'; SHIELD.backT = 0;
+                } else {
+                    const p = SHIELD.target.mesh.position;
+                    SHIELD.vel.set(p.x - SHIELD.pos.x, 1.2 - SHIELD.pos.y, p.z - SHIELD.pos.z).normalize().multiplyScalar(SHIELD_FLY.speed);
+                    SHIELD.pos.addScaledVector(_shieldDir, step);
+                }
             } else {
                 SHIELD.pos.addScaledVector(_shieldDir, step);
                 SHIELD.went += step;
@@ -12730,6 +12799,8 @@ function updateShield(delta) {
 }
 function resetShield() {
     SHIELD.state = 'hand';
+    SHIELD.target = null;
+    SHIELD.hit.length = 0;
     if (SHIELD.mesh) SHIELD.mesh.visible = false;
     wpnAmmo[SHIELD_IDX].clip = 1;
 }

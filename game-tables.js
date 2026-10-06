@@ -27,8 +27,10 @@
         { id: "ar", body: 22, head: 44, pellets: 1, range: 160, fireCd: 105 },
         { id: "shotgun", body: 14, head: 20, pellets: 8, range: 45, fireCd: 720 },
         { id: "deagle", body: 58, head: 115, pellets: 1, range: 120, fireCd: 260 },
-        /* step F6: the shield, thrown - one hit a throw (no head bonus), out to 40 m.
-           fireCd is the shortest time between two throws that come straight back. */
-        { id: "shield", body: 70, head: 70, pellets: 1, range: 40, fireCd: 600 }
+        /* step F6: the shield, thrown - one hit (no head bonus) out to 40 m, then (F6b) on
+           to the nearest bandit it has not hit yet, up to `bounces` more times, each no
+           further than `bounceReach` m from the last and in the open between them. fireCd
+           is the shortest time between two throws that come straight back. */
+        { id: "shield", body: 70, head: 70, pellets: 1, range: 40, fireCd: 600, bounces: 3, bounceReach: 12 }
     ]
 });

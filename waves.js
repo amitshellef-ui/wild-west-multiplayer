@@ -80,9 +80,34 @@ function banditCap(wave) {
     return Math.min(WAVE.maxCap, WAVE.startCap + (n - 1) * WAVE.perWave);
 }
 
+/* ---- How many are fighting (step F5a) -----------------------------------
+   The wave's allowance was made for a full room. With fewer people in it the
+   room gets fewer bandits at once and a dead one takes longer to come back -
+   scaled DOWN only, because the full room's sixteen is the measured ceiling
+   (see the note at the top). Indexed by the people in the room, a downed one
+   still counted (he is still there, waiting for a revive); four or more is the
+   game as it always was. The page plays offline with none of this. */
+const CROWD = [
+    null,
+    { cap: 0.5, respawn: 1.6 },     // one player: 8 at wave 6, back 1.6x slower
+    { cap: 0.65, respawn: 1.35 },   // two: 10
+    { cap: 0.8, respawn: 1.15 },    // three: 13
+    { cap: 1, respawn: 1 }          // four or more: 16, as before
+];
+function crowdOf(room) {
+    const n = room && room.humans;
+    if (!(n >= 1)) return CROWD[CROWD.length - 1];      // not counted yet: as before
+    return CROWD[Math.min(n, CROWD.length - 1)];
+}
+
 /* What the bandit simulation asks before it spawns anything. */
 function capFor(room) {
-    return banditCap(room ? room.wave : 1);
+    return Math.max(1, Math.round(banditCap(room ? room.wave : 1) * crowdOf(room).cap));
+}
+
+/* How long a dead bandit stays down: the wave's time, longer in an emptier room. */
+function respawnMsFor(room) {
+    return Math.round(difficultyFor(room).respawnMs * crowdOf(room).respawn);
 }
 
 function initRoom(room, now) {
@@ -113,8 +138,11 @@ function advance(room, players, now, reason) {
 function stepRoom(room, players, now, sink) {
     if (room.wave === undefined) initRoom(room, now);
 
-    let occupied = false;
-    for (const id in players) if (players[id].room === room.code) { occupied = true; break; }
+    // how many are in the room, every tick - so it follows people in and out (step F5a)
+    let humans = 0;
+    for (const id in players) if (players[id].room === room.code) humans++;
+    room.humans = humans;
+    const occupied = humans > 0;
     if (!occupied) {
         // an empty town is not fighting its way through anything
         room.nextWaveAt = now + WAVE.everyMs;
@@ -136,6 +164,6 @@ function stepRoom(room, players, now, sink) {
 }
 
 module.exports = {
-    WAVE, DIFFICULTY, banditCap, capFor, initRoom, stepRoom, advance, secondsToWave,
-    difficulty, difficultyFor
+    WAVE, DIFFICULTY, CROWD, banditCap, capFor, respawnMsFor, initRoom, stepRoom, advance,
+    secondsToWave, difficulty, difficultyFor
 };

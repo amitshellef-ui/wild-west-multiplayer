@@ -335,7 +335,7 @@ function stepBandit(room, b, players, now, dt, sink) {
         /* Nobody comes back while a boss is on the field - the browser held
            them back the same way, so a boss fight is a boss fight and not a
            boss fight plus a fresh dozen. */
-        if (b.summoned) {
+        if (b.summoned || b.retired) {
             if (b.removeAt && now >= b.removeAt) delete room.bandits[b.id];
             return;
         }
@@ -845,10 +845,11 @@ function fillTo(room, players, cap, limit) {
 }
 
 /* How many of the room's bandits are the town's own - the ones the wave
-   allowance is about. A boss's summoned help is on top of that, not instead. */
+   allowance is about. A boss's summoned help is on top of that, not instead; one
+   falling for the last time (step F5a, retired) is already off the count. */
 function regularCount(room) {
     let n = 0;
-    for (const id in room.bandits) if (!room.bandits[id].summoned) n++;
+    for (const id in room.bandits) if (!room.bandits[id].summoned && !room.bandits[id].retired) n++;
     return n;
 }
 
@@ -907,7 +908,11 @@ function hurt(room, banditId, amount) {
         b.health = 0;
         b.alive = false;
         if (b.summoned) b.removeAt = Date.now() + 2500;     // long enough to be seen falling
-        else b.respawnAt = Date.now() + waves.difficultyFor(room).respawnMs;
+        /* step F5a: somebody left and the room now allows fewer - this one does not come
+           back, the same way called-in help does not. Never the other way: a room that
+           allows more gets them from the 15 s reinforcements, not a sudden crowd. */
+        else if (regularCount(room) > waves.capFor(room)) { b.retired = true; b.removeAt = Date.now() + 2500; }
+        else b.respawnAt = Date.now() + waves.respawnMsFor(room);
         b.path = null;
         return { killed: true, bandit: b };
     }

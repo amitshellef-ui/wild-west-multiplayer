@@ -6810,7 +6810,9 @@ const MODEL_SPECS = {
      glow   a soft glow in the boss's eye colour, so each of them reads differently
      glowMap  (a model whose texture has its own glow, the ghost's eyes, hands and tail) how
             bright that glow is, in its own colours - the eye colour would dim and tint it */
-const BOSS_LOOK_DEFAULT = { model: 'cowboy', scale: 1.75, tint: 0.35, glow: 0.12 };
+// step F1: 1.35, not 1.75 - the cowboy is 1.90 m with the hat, so at 1.75 its head (3.3 m) went
+// through the window awnings (decor, no collision) a boss walks under. 1.35 = 2.56 m, under every one.
+const BOSS_LOOK_DEFAULT = { model: 'cowboy', scale: 1.35, tint: 0.35, glow: 0.12 };
 const BOSS_LOOKS = {
     skeleton: { model: 'skeleton', scale: 1.6, tint: 0, glow: 0.1 },    // step 30a: head at ~2.6m, like the robot
     charge: {},

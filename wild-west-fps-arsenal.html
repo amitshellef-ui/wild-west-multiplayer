@@ -940,7 +940,7 @@ function onMissionEnd(res) {
     let line;
     if (res.ok) {
         // the health comes from the server; the rounds are ours to hand out, like a wave's
-        wpnAmmo[currentWpn].reserve = reserve = reserve + 30;
+        addReserve(currentWpn, 30);
         updateAmmoUI();
         sfxPickup();
         line = 'MISSION COMPLETE \u2014 +25 health, +30 ammo';
@@ -8215,19 +8215,19 @@ function setRemoteReviving(id, on) {
 }
 
 /* Somebody reloading (step 26c): the soldier changes magazines for as long as the
-   reload lasts, and each round clicks in at the moment it does for them (0.35s,
-   then every 0.3s). A shot of theirs ends both - see playRemoteShot. */
+   reload lasts, and it clicks when it does for them - the magazine out, then in
+   (step F3; until then a click a round). A shot of theirs ends both - see playRemoteShot. */
 function remoteReload(body, ms) {
     if (body.alive === false) return;
     rigReload(body.rig.model, ms);
-    body.reload = { at: performance.now(), n: Math.max(0, Math.round((ms / 1000 - 0.8) / 0.3)), done: 0 };
+    body.reload = { at: performance.now(), clicks: [RELOAD_OUT, Math.max(RELOAD_OUT, ms / 1000 - RELOAD_IN)], done: 0 };
 }
 function tickRemoteReload(body) {
     const r = body.reload;
     if (!r) return;
-    if (body.alive === false || r.done >= r.n) { body.reload = null; return; }
+    if (body.alive === false || r.done >= r.clicks.length) { body.reload = null; return; }
     const t = (performance.now() - r.at) / 1000;
-    while (r.done < r.n && t >= 0.35 + 0.3 * r.done) { r.done++; sfxShellInsert(r.done, body.mesh.position); }
+    while (r.done < r.clicks.length && t >= r.clicks[r.done]) { r.done++; sfxShellInsert(r.done, body.mesh.position); }
 }
 
 /* Hit, as the server tells it: a flinch in the upper body and a short flash that
@@ -12225,7 +12225,7 @@ camera.add(worldMuzzleLight);
 const WPN = {
     lever: null, hammer: null, muzzle: null, ejectPort: null,
     recoilPos: 0, recoilRot: 0,
-    cockT: -1, reloadT: -1, reloadShells: 0, shellsToLoad: 0,
+    cockT: -1, reloadT: -1, shellsToLoad: 0,
     bobPhase: 0, sway: new THREE.Vector2(), swayTarget: new THREE.Vector2()
 };
 
@@ -12500,12 +12500,12 @@ rifleGroup.userData = {
 };
 
 const ARSENAL = [
-    { id: 'winchester', name: 'WINCHESTER', mag: 8, reserveMax: 64, auto: true, spreadHip: 0.024, spreadAds: 0.0092, adsFov: 19, recoil: 0.075, sfx: sfxRifleShot, cock: true, model: rifleGroup, hip: WPN_HIP, ads: WPN_ADS, run: WPN_RUN },
-    { id: 'smg', name: 'SMG', mag: 30, reserveMax: 150, auto: true, spreadHip: 0.042, spreadAds: 0.02, adsFov: 58, recoil: 0.028, sfx: sfxSmg, cock: false, model: buildSmgModel(), hip: new THREE.Vector3(0.18, -0.2, -0.4), ads: new THREE.Vector3(0.0, -0.1, -0.42), run: new THREE.Vector3(0.22, -0.26, -0.36) },
-    { id: 'sniper', name: 'SNIPER', mag: 5, reserveMax: 25, auto: false, spreadHip: 0.045, spreadAds: 0.0008, adsFov: 12, recoil: 0.12, sfx: sfxSniper, cock: true, model: buildSniperModel(), hip: new THREE.Vector3(0.22, -0.2, -0.42), ads: new THREE.Vector3(0.0, -0.09, -0.38), run: new THREE.Vector3(0.26, -0.28, -0.36) },
-    { id: 'ar', name: 'AR', mag: 25, reserveMax: 125, auto: true, spreadHip: 0.022, spreadAds: 0.007, adsFov: 42, recoil: 0.045, sfx: sfxAr, cock: false, model: buildArModel(), hip: new THREE.Vector3(0.2, -0.19, -0.4), ads: new THREE.Vector3(0.0, -0.088, -0.42), run: new THREE.Vector3(0.24, -0.26, -0.36) },
-    { id: 'shotgun', name: 'SHOTGUN', mag: 6, reserveMax: 36, auto: false, spreadHip: 0.11, spreadAds: 0.06, adsFov: 62, recoil: 0.14, sfx: sfxShotgun, cock: true, model: buildShotgunModel(), hip: new THREE.Vector3(0.2, -0.2, -0.4), ads: new THREE.Vector3(0.0, -0.1, -0.44), run: new THREE.Vector3(0.24, -0.27, -0.36) },
-    { id: 'deagle', name: 'DEAGLE', mag: 7, reserveMax: 42, auto: false, spreadHip: 0.03, spreadAds: 0.008, adsFov: 48, recoil: 0.11, sfx: sfxDeagle, cock: false, model: buildDeagleModel(), hip: new THREE.Vector3(0.22, -0.18, -0.38), ads: new THREE.Vector3(0.0, -0.08, -0.4), run: new THREE.Vector3(0.26, -0.24, -0.34) }
+    { id: 'winchester', name: 'WINCHESTER', mag: 8, reload: 2.6, reserveMax: 64, auto: true, spreadHip: 0.024, spreadAds: 0.0092, adsFov: 19, recoil: 0.075, sfx: sfxRifleShot, cock: true, model: rifleGroup, hip: WPN_HIP, ads: WPN_ADS, run: WPN_RUN },
+    { id: 'smg', name: 'SMG', mag: 30, reload: 2.4, reserveMax: 150, auto: true, spreadHip: 0.042, spreadAds: 0.02, adsFov: 58, recoil: 0.028, sfx: sfxSmg, cock: false, model: buildSmgModel(), hip: new THREE.Vector3(0.18, -0.2, -0.4), ads: new THREE.Vector3(0.0, -0.1, -0.42), run: new THREE.Vector3(0.22, -0.26, -0.36) },
+    { id: 'sniper', name: 'SNIPER', mag: 5, reload: 3.2, reserveMax: 25, auto: false, spreadHip: 0.045, spreadAds: 0.0008, adsFov: 12, recoil: 0.12, sfx: sfxSniper, cock: true, model: buildSniperModel(), hip: new THREE.Vector3(0.22, -0.2, -0.42), ads: new THREE.Vector3(0.0, -0.09, -0.38), run: new THREE.Vector3(0.26, -0.28, -0.36) },
+    { id: 'ar', name: 'AR', mag: 25, reload: 2.6, reserveMax: 125, auto: true, spreadHip: 0.022, spreadAds: 0.007, adsFov: 42, recoil: 0.045, sfx: sfxAr, cock: false, model: buildArModel(), hip: new THREE.Vector3(0.2, -0.19, -0.4), ads: new THREE.Vector3(0.0, -0.088, -0.42), run: new THREE.Vector3(0.24, -0.26, -0.36) },
+    { id: 'shotgun', name: 'SHOTGUN', mag: 6, reload: 3.0, reserveMax: 36, auto: false, spreadHip: 0.11, spreadAds: 0.06, adsFov: 62, recoil: 0.14, sfx: sfxShotgun, cock: true, model: buildShotgunModel(), hip: new THREE.Vector3(0.2, -0.2, -0.4), ads: new THREE.Vector3(0.0, -0.1, -0.44), run: new THREE.Vector3(0.24, -0.27, -0.36) },
+    { id: 'deagle', name: 'DEAGLE', mag: 7, reload: 2.0, reserveMax: 42, auto: false, spreadHip: 0.03, spreadAds: 0.008, adsFov: 48, recoil: 0.11, sfx: sfxDeagle, cock: false, model: buildDeagleModel(), hip: new THREE.Vector3(0.22, -0.18, -0.38), ads: new THREE.Vector3(0.0, -0.08, -0.4), run: new THREE.Vector3(0.26, -0.24, -0.34) }
 ];
 /* Fire rate, pellets, damage and range come from game-tables.js - the same copy the server
    judges hits with (code review stage 4a). Matched by id, so a table in a different order
@@ -12521,6 +12521,12 @@ let currentWpn = 0;
 const wpnAmmo = ARSENAL.map(function (w) { return { clip: w.mag, reserve: w.reserveMax }; });
 
 function curW() { return ARSENAL[currentWpn]; }
+/* Rounds into weapon i's reserve, never past its reserveMax (step F4: one rule for every
+   reward - a kill, a wave, a mission, DEAD-EYE). Keeps `reserve` in step for the one in hand. */
+function addReserve(i, n) {
+    wpnAmmo[i].reserve = Math.min(ARSENAL[i].reserveMax, wpnAmmo[i].reserve + n);
+    if (i === currentWpn) reserve = wpnAmmo[i].reserve;
+}
 function bindWeaponVisual() {
     const w = curW();
     for (let i = 0; i < ARSENAL.length; i++) ARSENAL[i].model.visible = (i === currentWpn);
@@ -12744,7 +12750,7 @@ function applyWaveReward(n, cap) {
     netWaveCap = cap || banditCap(n);
     pushFeed('WAVE ' + n + ' - ammo drop - up to ' + netWaveCap + ' bandits');
     ui.waveLine.innerText = 'WAVE ' + n;
-    wpnAmmo[currentWpn].reserve = reserve = reserve + 16;
+    addReserve(currentWpn, 16);
     updateAmmoUI();
     sfxPickup();
 }
@@ -12803,7 +12809,8 @@ function onKillReward() {
     reportHealthDelta(Math.min(4, playerMaxHealth - playerHealth));
     playerHealth = Math.min(playerMaxHealth, playerHealth + 4);
     playerSprint = Math.min(100, playerSprint + 12);
-    wpnAmmo[currentWpn].reserve = reserve = reserve + 6;
+    // step F4: a magazine for every weapon unlocked so far (until then +6 for the one in hand)
+    for (let i = 0; i < unlockedWeapons; i++) addReserve(i, ARSENAL[i].mag);
     updateHealthUI(); updateSprintUI(); updateAmmoUI();
     sfxPickup();
 }
@@ -12880,8 +12887,7 @@ function applyBossReward() {
         switchWeapon(unlockedWeapons - 1);
     } else {
         deadEye = true;
-        for (let i = 0; i < ARSENAL.length; i++) wpnAmmo[i].reserve += 40;
-        reserve = wpnAmmo[currentWpn].reserve;
+        for (let i = 0; i < ARSENAL.length; i++) addReserve(i, 40);
         pushFeed('ARSENAL COMPLETE — extra ammo + DEAD-EYE');
     }
     /* Offline, killing the boss buys a wave. Online the server hands that out
@@ -13034,7 +13040,7 @@ function fireOneRay(spread, dmgBody, dmgHead, range) {
     netShotEnds.push(end.x, end.y, end.z);
 }
 
-/* Cut a reload short and keep whatever is already in the tube */
+/* Cut a reload short. Nothing has gone in yet (step F3: the whole magazine goes in at the end) */
 function cancelReload() {
     if (!isReloading) return;
     isReloading = false;
@@ -13049,6 +13055,11 @@ function shoot(manual) {
     const w = curW();
     if (now - lastShotTime < w.fireCd) return;
     if (!manual && !w.auto) return;
+    /* step F2: only a reload started with rounds still in can be cut short by a click. One
+       started from empty used to end at the first click after the first round went in (0.57s),
+       so a player who kept clicking fired that one round, again and again - "the WINCHESTER
+       never reloads by itself". Since step F3 the magazine stays as it was until the reload
+       ends, so "rounds in it now" is the same as "rounds in it when the reload started". */
     if (isReloading) {
         if (manual && clip > 0) cancelReload();
         else return;
@@ -13099,12 +13110,10 @@ function startReload() {
     isReloading = true;
     WPN.reloadT = 0;
     WPN.shellsToLoad = Math.min(mag - clip, reserve);
-    WPN.reloadShells = 0;
     updateAmmoUI();
-    // the others see the soldier change magazines (step 26c) - the same length as
-    // the reload cycle in updateWeapon: 0.35s, 0.3s a round, 0.45s to close up
+    // the others see the soldier change magazines (step 26c) for as long as it takes (step F3)
     if (NET.connected && NET.socket && NET.room) {
-        NET.socket.emit('reload', { ms: Math.round((0.35 + WPN.shellsToLoad * 0.3 + 0.45) * 1000) });
+        NET.socket.emit('reload', { ms: Math.round(curW().reload * 1000) });
     }
 }
 
@@ -13176,24 +13185,20 @@ function updateWeapon(delta, moving, sprinting) {
         if (WPN.cockT >= T) { WPN.cockT = -1; if (WPN.lever) WPN.lever.rotation.x = 0; }
     }
 
-    /* ---- reload cycle ---- */
+    /* ---- reload cycle (step F3) ----
+       One whole magazine, in the weapon's own time (w.reload). Until step F3 it went in a round
+       at a time (0.35s, 0.3s a round, 0.45s) and a shot kept what was already in; now the rounds
+       go in together at the end, so a shot or a weapon change part way loads nothing. */
     if (WPN.reloadT >= 0) {
         const prev = WPN.reloadT;
         WPN.reloadT += delta;
-        const perShell = 0.3;
-        const startDelay = 0.35;
-        const total = startDelay + WPN.shellsToLoad * perShell + 0.45;
-        const shellsDone = Math.floor((WPN.reloadT - startDelay) / perShell);
-        const prevDone = Math.floor((prev - startDelay) / perShell);
-        if (shellsDone > prevDone && shellsDone >= 0 && WPN.reloadShells < WPN.shellsToLoad) {
-            WPN.reloadShells++;
-            clip++; reserve--;
+        const total = curW().reload;
+        if (prev < RELOAD_OUT && WPN.reloadT >= RELOAD_OUT) sfxShellInsert(1);              // the old one out
+        if (prev < total - RELOAD_IN && WPN.reloadT >= total - RELOAD_IN) sfxShellInsert(2); // the new one in
+        if (WPN.reloadT >= total) {
+            clip += WPN.shellsToLoad; reserve -= WPN.shellsToLoad;
             wpnAmmo[currentWpn].clip = clip;
             wpnAmmo[currentWpn].reserve = reserve;
-            sfxShellInsert(WPN.reloadShells);
-            updateAmmoUI();
-        }
-        if (WPN.reloadT >= total) {
             WPN.reloadT = -1;
             isReloading = false;
             WPN.cockT = 0;
@@ -13208,6 +13213,9 @@ function syncWeaponProxy() {
     wpnProxy.scale.copy(weapon.scale);
 }
 const _wpnReloadPos = new THREE.Vector3(0.19, -0.285, -0.36);
+// step F3: when the magazine clicks out after a reload starts, and in before it ends (seconds) -
+// the same for our own reload and for somebody else's (tickRemoteReload)
+const RELOAD_OUT = 0.3, RELOAD_IN = 0.55;
 
 /* =========================================================================
    13. INPUT

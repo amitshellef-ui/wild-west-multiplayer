@@ -87,6 +87,12 @@
     .bullet.spent { background: #40301c; box-shadow: none; }
     #reload-hint { font-size: 11px; color: #e8654a; margin-top: 5px; height: 14px; }
     #wpn-name { font-size: 11px; color: #c99a4e; letter-spacing: 1px; margin-bottom: 4px; }
+    /* step F7: carrying a BOOGIE BOMB */
+    #boogie-hud { position: absolute; bottom: 150px; right: 30px; display: none; padding: 6px 12px;
+        font-family: 'Rye', serif; font-size: 15px; letter-spacing: 1px; color: #fff;
+        background: linear-gradient(90deg, rgba(255,59,107,0.75), rgba(124,59,255,0.75)); border-radius: 4px;
+        text-shadow: 0 1px 2px #000; pointer-events: none; }
+    #boogie-hud b { color: #ffe23b; }
     #loadout {
         bottom: 108px; right: 18px; min-width: 158px; padding: 8px 10px;
         display: flex; flex-direction: column; gap: 4px;
@@ -349,6 +355,7 @@
     <div id="reload-hint"></div>
 </div>
 <div id="loadout" class="panel"></div>
+<div id="boogie-hud">BOOGIE BOMB &middot; <b>G</b></div>
 
 <div id="board" class="panel">
     <h3>&#9733; WANTED &#9733;</h3>
@@ -402,7 +409,7 @@
     <div id="keys">
         <b>WASD</b> &#1514;&#1504;&#1493;&#1506;&#1492; &nbsp;&nbsp; <b>Shift</b> &#1512;&#1497;&#1510;&#1492; &nbsp;&nbsp; <b>Space</b> &#1511;&#1508;&#1497;&#1510;&#1492;<br>
         <b>&#1500;&#1495;&#1497;&#1510;&#1492; &#1513;&#1502;&#1488;&#1500;&#1497;&#1514;</b> &#1497;&#1512;&#1497; &nbsp;&nbsp; <b>&#1500;&#1495;&#1497;&#1510;&#1492; &#1497;&#1502;&#1504;&#1497;&#1514;</b> &#1499;&#1493;&#1493;&#1504;&#1514; &nbsp;&nbsp; <b>R</b> &#1496;&#1506;&#1497;&#1504;&#1492;<br>
-        <b>1-7</b> &#1492;&#1495;&#1500;&#1507;&#1514; &#1504;&#1513;&#1511; &nbsp;&nbsp; &#1489;&#1493;&#1505; &#1499;&#1500; 90 &#1513;&#1504;&#1497;&#1493;&#1514; = &#1504;&#1513;&#1511; &#1495;&#1491;&#1513;
+        <b>G</b> &#1489;&#1493;&#1490;&#1497; &#1489;&#1493;&#1501; &nbsp;&nbsp; <b>1-7</b> &#1492;&#1495;&#1500;&#1507;&#1514; &#1504;&#1513;&#1511; &nbsp;&nbsp; &#1489;&#1493;&#1505; &#1499;&#1500; 90 &#1513;&#1504;&#1497;&#1493;&#1514; = &#1504;&#1513;&#1511; &#1495;&#1491;&#1513;
     </div>
     <div id="room-box">
         <div id="room-line">&#1495;&#1491;&#1512;: <b id="room-code">---</b> <span id="room-mode"></span></div>
@@ -1487,6 +1494,8 @@ function initNetwork() {
         NET.room = data.code;
         if (data.mode) NET.mode = data.mode;
         NET.level = data.level || 'normal';
+        BOOGIE.mine = false;
+        setBoogieItems(data.boogie || []);              // step F7: the room's BOOGIE BOMBs
         setPlayerMaxHealth(data.maxHealth || 100);        // step 32: the room's (older servers: 100)
         SCORES.rows = Array.isArray(data.scores) ? data.scores : [];
         Object.keys(reviveMarkers).forEach(function (id) { setDownedMarker(id, false); });
@@ -1904,6 +1913,8 @@ function initNetwork() {
     NET.socket.on('room-restarted', function (m) {
         hideVictory();
         onRoomRestarted(m || {});
+        BOOGIE.mine = false;
+        setBoogieItems((m && m.boogie) || []);        // step F7: three new ones
     });
 
     // step 32: a boss is down - everybody's most health is 25 higher (the health itself
@@ -1915,6 +1926,24 @@ function initNetwork() {
 
     /* --- Remote gunfire (step 7). Cosmetic: no damage is applied. --- */
     NET.socket.on('player-shot', function (m) { playRemoteShot(m); });
+    /* --- step F7: BOOGIE BOMB - where they lie and who has one, one going off, the boss dancing --- */
+    NET.socket.on('boogie', function (m) {
+        if (!m || !Array.isArray(m.items)) return;
+        const had = BOOGIE.mine;
+        setBoogieItems(m.items);
+        if (BOOGIE.mine && !had) { sfxPickup(); pushFeed('BOOGIE BOMB - press G'); }
+    });
+    NET.socket.on('boogie-boom', function (m) {
+        if (!m || typeof m.x !== 'number' || typeof m.z !== 'number') return;
+        const now = performance.now();
+        (m.b || []).forEach(function (id) { const body = serverBandits[id]; if (body) startDance(body, now, m.ms || BOOGIE_LOOK.banditMs); });
+        boogieBoom(m.x, m.z);
+        pushFeed('BOOGIE BOMB!');
+    });
+    NET.socket.on('boss-dance', function (m) {
+        if (!m || !netBoss.active || !netBoss.alive || !netBoss.mesh) return;
+        startDance(netBoss, performance.now(), m.ms || BOOGIE_LOOK.bossMs);
+    });
     NET.socket.on('player-reload', function (m) {
         if (!m || !m.id || typeof m.ms !== 'number') return;
         const body = remoteBodies[m.id];
@@ -8578,6 +8607,7 @@ function updateServerBandits(delta) {
         body.speed += (inst - body.speed) * Math.min(1, 12 * delta);
 
         animateRemoteBody(body, delta);
+        danceStep(body, performance.now(), false);       // step F7: a BOOGIE BOMB
     }
 }
 
@@ -11002,6 +11032,7 @@ function updateNetBoss(delta) {
     netBoss.speed += (inst - netBoss.speed) * Math.min(1, 12 * delta);
 
     animateRemoteBody(netBoss, delta);
+    danceStep(netBoss, performance.now(), false);       // step F7
 }
 
 /* ---- What the boss throws -------------------------------------------------
@@ -11484,6 +11515,12 @@ function updateBot(bot, delta, now) {
             if (on) { m.emissive.setHex(0x772211); m.emissiveIntensity = 1.0; }
             else emissiveRest(m, bot.model.glow, bot.phase2);
         });
+    }
+
+    // step F7: dancing to a BOOGIE BOMB - no step, no shot, no ability until it is over
+    if (bot.danceUntil) {
+        bot.mesh.position.y = 0;
+        if (danceStep(bot, now, true)) return;
     }
 
     const pos = bot.mesh.position;
@@ -12963,6 +13000,7 @@ const ui = {
     ammoBig: document.getElementById('ammo-big'),
     wpnName: document.getElementById('wpn-name'),
     loadout: document.getElementById('loadout'),
+    boogie: document.getElementById('boogie-hud'),         // step F7
     bullets: document.getElementById('bullets'),
     hint: document.getElementById('reload-hint'),
     meStats: document.getElementById('me-stats'),
@@ -13126,6 +13164,7 @@ function resetGame() {
     playerHealth = playerMaxHealth; playerSprint = 100;
     unlockedWeapons = 1; currentWpn = 0; bossesDown = 0;
     resetShield();
+    if (!NET.connected) boogieOffline();          // step F7 (online the room has its own)
     for (let i = 0; i < ARSENAL.length; i++) {
         wpnAmmo[i].clip = ARSENAL[i].mag;
         wpnAmmo[i].reserve = ARSENAL[i].reserveMax;
@@ -13159,6 +13198,239 @@ function resetGame() {
     nextBanditAt = gameStartTime + BANDIT_SPAWN_MS;
     updateHealthUI(); updateSprintUI(); updateAmmoUI(); updateBoard(); updateLoadoutUI();
     ui.cta.innerText = 'לחץ כדי לשלוף';
+}
+
+/* =========================================================================
+   BOOGIE BOMB (step F7)
+
+   Three disco balls lie on the ground somewhere in town every game; walk over one
+   and it is yours, G throws it. Wherever it lands every bandit and the boss within
+   7 m dances - no walking, no shooting - bandits 4 s, the boss 2.5 s, and they can
+   be shot all the while. Online the room holds the balls (boogie.js): who has one,
+   where it landed and who dances is the server's word; offline it is ours.
+   The dance itself is drawn in code - a hop and a twist on the beat - until the
+   models have a Dance clip of their own (step F7c).
+   ========================================================================= */
+const BOOGIE_LOOK = {
+    pickReach: 1.4,     // m - the server allows 1.8
+    throwSpeed: 18, throwUp: 4, gravity: 18,
+    radius: 7, banditMs: 4000, bossMs: 2500,
+    fxMs: 4000,         // the lights and the music
+    bpm: 120
+};
+const BOOGIE = {
+    items: {},          // id -> { mesh, x, z, holder }
+    mine: false,        // carrying one
+    ball: null,         // ours in the air: { mesh, pos, vel }
+    askAt: 0,
+    fx: []              // the lights where one went off
+};
+const _boogieGeo = new THREE.SphereGeometry(0.24, 14, 9);
+// (not all metal: the town has no reflections to give it, and a full-metal ball draws near black)
+const _boogieMat = new THREE.MeshStandardMaterial({ color: 0xe8e8ff, metalness: 0.35, roughness: 0.25, flatShading: true, emissive: 0x9a6cff, emissiveIntensity: 0.55 });
+const _boogieGlowMat = new THREE.MeshBasicMaterial({ color: 0xb070ff, transparent: true, opacity: 0.45, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
+const _boogieGlowGeo = new THREE.CircleGeometry(0.75, 24);
+const BOOGIE_COLOURS = [0xff3b6b, 0x3bd3ff, 0xffe23b, 0x7cff3b, 0xc73bff, 0xff8a3b];
+const _boogieSpotMats = BOOGIE_COLOURS.map(function (c) {
+    return new THREE.MeshBasicMaterial({ color: c, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
+});
+const _boogieSpotGeo = new THREE.CircleGeometry(0.9, 18);
+
+function boogieBall() {
+    const g = new THREE.Group();
+    const ball = new THREE.Mesh(_boogieGeo, _boogieMat);
+    ball.position.y = 0.45;
+    g.add(ball);
+    const glow = new THREE.Mesh(_boogieGlowGeo, _boogieGlowMat);
+    glow.rotation.x = -Math.PI / 2; glow.position.y = 0.03;
+    g.add(glow);
+    g.userData.ball = ball;
+    scene.add(g);
+    return g;
+}
+function updateBoogieHud() {
+    if (ui.boogie) ui.boogie.style.display = BOOGIE.mine && !BOOGIE.ball ? 'block' : 'none';
+}
+/* The room's list, [id, x, z, holder ("" = on the ground)] - everything not in it is gone */
+function setBoogieItems(rows) {
+    const seen = {};
+    (rows || []).forEach(function (r) {
+        const id = r[0];
+        seen[id] = true;
+        let it = BOOGIE.items[id];
+        if (!it) it = BOOGIE.items[id] = { mesh: boogieBall() };
+        it.x = r[1]; it.z = r[2]; it.holder = r[3] || '';
+        it.mesh.position.set(it.x, 0, it.z);
+        it.mesh.visible = !it.holder;
+    });
+    Object.keys(BOOGIE.items).forEach(function (id) {
+        if (seen[id]) return;
+        scene.remove(BOOGIE.items[id].mesh);
+        delete BOOGIE.items[id];
+    });
+    BOOGIE.mine = (rows || []).some(function (r) { return r[3] && r[3] === NET.id; }) || (!!BOOGIE.ball && BOOGIE.mine);
+    updateBoogieHud();
+}
+/* Offline: three of our own, on open ground 15 m apart */
+function boogieOffline() {
+    const rows = [];
+    for (let i = 0; i < 300 && rows.length < 3; i++) {
+        const p = randomNavPoint();
+        if (collidesAt(p.x, p.z, 0.8)) continue;
+        if (rows.some(function (r) { return Math.hypot(r[1] - p.x, r[2] - p.z) < 15; })) continue;
+        rows.push([rows.length + 1, p.x, p.z, '']);
+    }
+    BOOGIE.mine = false;
+    if (BOOGIE.ball) { scene.remove(BOOGIE.ball.mesh); BOOGIE.ball = null; }
+    setBoogieItems(rows);
+}
+function throwBoogie() {
+    if (!BOOGIE.mine || BOOGIE.ball || playerHealth <= 0 || REVIVE.me.downed) return;
+    const dir = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
+    const mesh = new THREE.Mesh(_boogieGeo, _boogieMat);
+    scene.add(mesh);
+    BOOGIE.ball = {
+        mesh: mesh,
+        pos: camera.position.clone().addScaledVector(dir, 0.5),
+        vel: dir.multiplyScalar(BOOGIE_LOOK.throwSpeed).add(new THREE.Vector3(0, BOOGIE_LOOK.throwUp, 0))
+    };
+    sfxShieldThrow(null);
+    updateBoogieHud();
+}
+const _boogieRay = new THREE.Raycaster();
+function boogieLanded(at) {
+    scene.remove(BOOGIE.ball.mesh);
+    BOOGIE.ball = null;
+    if (NET.connected && NET.socket && NET.room) {
+        // the server says who dances - and whether it is gone from our hand: its 'boogie' list does that
+        // (a throw it refuses, from someone downed a moment ago, leaves it with us to throw again)
+        NET.socket.emit('boogie-throw', { x: +at.x.toFixed(2), z: +at.z.toFixed(2) });
+        updateBoogieHud();
+        return;
+    }
+    BOOGIE.mine = false;
+    updateBoogieHud();
+    // offline: ours to decide
+    const now = performance.now();
+    bots.forEach(function (b) {
+        if (!b.alive) return;
+        const reach = BOOGIE_LOOK.radius + (b.isBoss ? 0.85 : 0);
+        if (Math.hypot(b.mesh.position.x - at.x, b.mesh.position.z - at.z) > reach) return;
+        startDance(b, now, b.isBoss ? BOOGIE_LOOK.bossMs : BOOGIE_LOOK.banditMs);
+    });
+    boogieBoom(at.x, at.z);
+}
+function startDance(body, now, ms) {
+    if (!(body.danceUntil > now)) { body.danceT0 = now; body.danceYaw0 = body.mesh.rotation.y; }
+    body.danceUntil = now + ms;
+}
+/* A hop and a twist on the beat. Called after the body's own position and facing are set for
+   the frame (online: from the server's packets; offline: kept by updateBot, so from yaw0). */
+function danceStep(body, now, offline) {
+    const m = body.mesh;
+    if (!(body.danceUntil > now)) {
+        if (body.danceUntil) {                         // it is over: stand straight, face where it faced
+            body.danceUntil = 0;
+            m.rotation.z = 0;
+            if (offline) m.rotation.y = body.danceYaw0;
+        }
+        return false;
+    }
+    const beat = (now - body.danceT0) / 1000 * BOOGIE_LOOK.bpm / 60 * Math.PI;   // half a turn of sin a beat
+    const k = body.scale || (body.rig && body.rig.scale) || 1;
+    m.position.y += Math.abs(Math.sin(beat)) * 0.2 * k;
+    m.rotation.y = (offline ? body.danceYaw0 : m.rotation.y) + Math.sin(beat * 0.5) * 0.9;
+    m.rotation.z = Math.sin(beat) * 0.12;
+    return true;
+}
+/* Where one went off: a disco ball turning over the spot, coloured lights sweeping the ground
+   round it, sparkles, and four seconds of disco. No real lights - each would rebuild every shader. */
+function boogieBoom(x, z) {
+    const g = new THREE.Group();
+    g.position.set(x, 0, z);
+    const ball = new THREE.Mesh(_boogieGeo, _boogieMat);
+    ball.scale.setScalar(2.2);
+    ball.position.y = 3.2;
+    g.add(ball);
+    const spots = [];
+    for (let i = 0; i < 6; i++) {
+        const s = new THREE.Mesh(_boogieSpotGeo, _boogieSpotMats[i]);
+        s.rotation.x = -Math.PI / 2;
+        s.position.y = 0.04 + i * 0.002;
+        g.add(s);
+        spots.push(s);
+    }
+    scene.add(g);
+    BOOGIE.fx.push({ g: g, ball: ball, spots: spots, t0: performance.now() });
+    for (let i = 0; i < 3; i++) spawnParticles(new THREE.Vector3(x, 1 + i * 0.5, z), BOOGIE_COLOURS[i * 2], 14, 4);
+    sfxDisco(new THREE.Vector3(x, 1.5, z));
+}
+function updateBoogie(delta, now) {
+    // walking over one on the ground
+    if (!BOOGIE.mine && !BOOGIE.ball && isLocked && playerHealth > 0 && !REVIVE.me.downed) {
+        Object.keys(BOOGIE.items).forEach(function (id) {
+            const it = BOOGIE.items[id];
+            if (it.holder || Math.hypot(camera.position.x - it.x, camera.position.z - it.z) > BOOGIE_LOOK.pickReach) return;
+            if (NET.connected && NET.socket && NET.room) {
+                if (now - BOOGIE.askAt < 300) return;
+                BOOGIE.askAt = now;
+                NET.socket.emit('boogie-pick', { id: +id });      // the room's answer comes as 'boogie'
+            } else {
+                it.holder = 'me';
+                it.mesh.visible = false;
+                BOOGIE.mine = true;
+                sfxPickup();
+                pushFeed('BOOGIE BOMB - press G');
+                updateBoogieHud();
+            }
+        });
+    }
+    Object.keys(BOOGIE.items).forEach(function (id) {
+        const it = BOOGIE.items[id];
+        if (it.mesh.visible) { it.mesh.userData.ball.rotation.y += delta * 1.5; it.mesh.userData.ball.position.y = 0.45 + Math.sin(now / 300) * 0.06; }
+    });
+    // ours in the air
+    const b = BOOGIE.ball;
+    if (b) {
+        b.vel.y -= BOOGIE_LOOK.gravity * delta;
+        const step = b.vel.length() * delta;
+        _boogieRay.set(b.pos, b.vel.clone().normalize());
+        _boogieRay.far = step + 0.25;
+        const hit = _boogieRay.intersectObject(world, true)[0];
+        if (hit) boogieLanded(hit.point);
+        else {
+            b.pos.addScaledVector(b.vel, delta);
+            b.mesh.position.copy(b.pos);
+            b.mesh.rotation.y += delta * 8;
+            if (b.pos.y <= 0.25) boogieLanded(b.pos.clone().setY(0));
+        }
+    }
+    // the lights
+    for (let i = BOOGIE.fx.length - 1; i >= 0; i--) {
+        const f = BOOGIE.fx[i], t = (now - f.t0) / 1000;
+        if (t * 1000 > BOOGIE_LOOK.fxMs) { scene.remove(f.g); BOOGIE.fx.splice(i, 1); continue; }
+        f.ball.rotation.y += delta * 2.5;
+        const fade = Math.min(1, (BOOGIE_LOOK.fxMs / 1000 - t) / 0.5);
+        f.spots.forEach(function (s, k) {
+            const a = t * (1.6 + k * 0.23) + k * Math.PI / 3, r = 2.2 + Math.sin(t * 2 + k) * 2.4;
+            s.position.x = Math.cos(a) * r; s.position.z = Math.sin(a) * r;
+            s.material.opacity = 0.55 * fade;
+        });
+    }
+}
+/* Four seconds of disco: four on the floor, an open hi-hat on the off-beat, an octave bass line
+   and a stab on two and four. Heard from where it went off. */
+function sfxDisco(pos) {
+    const d = chain(pos, 0.8, 60); if (!d) return;
+    const beat = 60 / BOOGIE_LOOK.bpm, bass = [55, 110, 65.4, 130.8, 49, 98, 61.7, 123.5];
+    for (let i = 0; i < 8; i++) {
+        const t = i * beat;
+        tone(d, { type: 'sine', f0: 140, f1: 45, dur: 0.18, vol: 0.5, delay: t });                       // kick
+        noiseBurst(d, { type: 'highpass', freq: 7000, dur: 0.07, vol: 0.18, delay: t + beat / 2 });       // hat
+        tone(d, { type: 'sawtooth', f0: bass[i], f1: bass[i], dur: beat * 0.45, vol: 0.09, delay: t });
+        tone(d, { type: 'sawtooth', f0: bass[i] * 2, f1: bass[i] * 2, dur: beat * 0.3, vol: 0.05, delay: t + beat / 2 });
+        if (i % 2) [261.6, 329.6, 392].forEach(function (f) { tone(d, { type: 'square', f0: f, f1: f, dur: 0.12, vol: 0.035, delay: t }); });
+    }
 }
 
 /* ---------- Boss flow ---------- */
@@ -13579,6 +13851,7 @@ document.addEventListener('keydown', function (e) {
         if (e.code === 'Digit5') switchWeapon(4);
         if (e.code === 'Digit6') switchWeapon(5);
         if (e.code === 'Digit7') switchWeapon(6);        // step F6: the shield
+        if (e.code === 'KeyG') throwBoogie();             // step F7: the BOOGIE BOMB
     }
     if (e.code === 'Space' && onGround) {
         velY = 6.1; onGround = false; sfxJump();
@@ -14051,6 +14324,7 @@ function animate() {
     updateNetHazards(delta);
     updateBanditBullets(delta);
     updateShield(delta);                 // step F6
+    updateBoogie(delta, now);            // step F7
     updateModelRigs(delta);
     refreshNetDebug(now);
     tickScoreboard(now);

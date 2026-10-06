@@ -6656,7 +6656,7 @@ function showBossEnraged(bt, where, loud) {
    - it has no bone masks, so every clip is cut once into a lower half (legs and
      hips) and an upper half. The legs keep walking while the arms shoot.
    ========================================================================= */
-const MODEL_BASE_CDN = 'https://cdn.jsdelivr.net/gh/amitshellef-ui/wild-west-multiplayer@0400433ee4f174cbd6fe4358212bd5dc42b25839/models/';   // step F7c: + the cowboy's Dance (step Fly: dragon Fly; step Strafe: cowboy StrafeL / StrafeR)
+const MODEL_BASE_CDN = 'https://cdn.jsdelivr.net/gh/amitshellef-ui/wild-west-multiplayer@c1eda270debda932487341c77c76ea7f83845ddb/models/';   // step Walk: the cowboy's new Walk (F7c: Dance; Fly: dragon Fly; Strafe: StrafeL / StrafeR)
 const MODEL_BASE_LOCAL = '/models/';
 const MODEL_FORCE_CUBES = /[?&]cubes\b/.test(location.search);   // ?cubes = the old rig, for comparisons
 const MODEL_HITBOX_MUL = 1.2;                                       // the same margin the cube rig uses
@@ -6691,13 +6691,20 @@ const MODEL_SPECS = {
     cowboy: {
         file: 'cowboy.glb',
         // metres a second each clip covers at normal speed (measured in Blender)
-        vWalk: 1.58, vRun: 4.17,
+        // step Walk (2026-10-06): the Walk was rebuilt so a planted foot moves back at exactly 1.08 m/s
+        // all the time it is down (3D/cowboy/cowboy_walk.py). The old 1.58 was more than its feet
+        // covered (~1.1 on average, unevenly) - every step slid.
+        vWalk: 1.08, vRun: 4.17,
+        // with 1.08 the Walk plays faster: up to x2.2 (a bandit's 1.87 patrol is x1.73), and the cowboy
+        // bosses (x1.35) change to Run a little sooner - above 3.24 m/s instead of 3.9 - rather than
+        // stepping the Walk past what it covers
+        gait: { idle: 0.3, runUp: 2.4, runDown: 2.0, walkTs: [0.6, 2.2], runTs: [0.6, 2.2] },
         // side-steps (step Strafe): a bandit that sidesteps while it faces the player plays
         // StrafeL / StrafeR instead of walking forward sideways; 1.6 m/s at x1 (a planted
         // foot slides at exactly that), so a bandit's 2.21 runs them at x1.38
         strafe: { v: 1.6, ts: [0.6, 1.8] },
         // the moments a foot lands, in seconds into the clip - for the footstep sound
-        steps: { Walk: [14 / 24, 30 / 24], Run: [9 / 24, 19 / 24], StrafeL: [0, 6 / 24], StrafeR: [0, 6 / 24] },
+        steps: { Walk: [8 / 24, 24 / 24], Run: [9 / 24, 19 / 24], StrafeL: [0, 6 / 24], StrafeR: [0, 6 / 24] },
         // Shoot is raise (0-8), kick (10), hold, second kick (18), lower (24-36):
         // one shot plays 8 -> 16 and then holds the aim for a moment
         shoot: { from: 8 / 24, to: 16 / 24, hold: 0.7 },

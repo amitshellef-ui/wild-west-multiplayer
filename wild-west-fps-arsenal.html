@@ -402,7 +402,7 @@
     <div id="keys">
         <b>WASD</b> &#1514;&#1504;&#1493;&#1506;&#1492; &nbsp;&nbsp; <b>Shift</b> &#1512;&#1497;&#1510;&#1492; &nbsp;&nbsp; <b>Space</b> &#1511;&#1508;&#1497;&#1510;&#1492;<br>
         <b>&#1500;&#1495;&#1497;&#1510;&#1492; &#1513;&#1502;&#1488;&#1500;&#1497;&#1514;</b> &#1497;&#1512;&#1497; &nbsp;&nbsp; <b>&#1500;&#1495;&#1497;&#1510;&#1492; &#1497;&#1502;&#1504;&#1497;&#1514;</b> &#1499;&#1493;&#1493;&#1504;&#1514; &nbsp;&nbsp; <b>R</b> &#1496;&#1506;&#1497;&#1504;&#1492;<br>
-        <b>1-6</b> &#1492;&#1495;&#1500;&#1507;&#1514; &#1504;&#1513;&#1511; &nbsp;&nbsp; &#1489;&#1493;&#1505; &#1499;&#1500; 90 &#1513;&#1504;&#1497;&#1493;&#1514; = &#1504;&#1513;&#1511; &#1495;&#1491;&#1513;
+        <b>1-7</b> &#1492;&#1495;&#1500;&#1507;&#1514; &#1504;&#1513;&#1511; &nbsp;&nbsp; &#1489;&#1493;&#1505; &#1499;&#1500; 90 &#1513;&#1504;&#1497;&#1493;&#1514; = &#1504;&#1513;&#1511; &#1495;&#1491;&#1513;
     </div>
     <div id="room-box">
         <div id="room-line">&#1495;&#1491;&#1512;: <b id="room-code">---</b> <span id="room-mode"></span></div>
@@ -1262,6 +1262,13 @@ function playRemoteShot(m) {
     if (!m || !m.id || !m.o || !m.e) return;
     const body = remoteBodies[m.id];
 
+    if (m.w === SHIELD_IDX) {                     // step F6: a shield thrown - it flies out and back
+        const RS = body && body.rig.model;
+        if (RS && RS.kind === 'model') rigSetWeapon(RS, m.w);
+        playRemoteShield(m, body);
+        NET.shotsRecv++;
+        return;
+    }
     _shotOrigin.set(m.o[0], m.o[1], m.o[2]);
     const R = body && body.rig.model;
     if (body) body.reload = null;                 // a shot ends a reload (the clip too: rigShoot)
@@ -7082,7 +7089,8 @@ const ARSENAL_GRIP = [
     [0, -0.04, 0.00],       // sniper - behind the receiver
     [0, -0.05, 0.03],       // ar - top of the pistol grip
     [0, -0.04, 0.00],       // shotgun - behind the receiver
-    [0, -0.04, 0.04]        // deagle - top of the grip
+    [0, -0.04, 0.04],       // deagle - top of the grip
+    [0, 0, 0]               // shield (step F6) - by its middle
 ];
 const _worldGuns = {};      // weapon index -> { parts: [{ geo, mat }], muzzle }
 
@@ -12516,6 +12524,70 @@ function buildDeagleModel() {
     g.visible = false; weapon.add(g); return g;
 }
 
+/* ---- step F6: the shield (weapon 7) -------------------------------------------------
+   Thrown, not fired: a click sends it flat and spinning along the sights; it stops at the
+   first thing it meets - a bandit, the boss, a player in FREE FOR ALL, a wall - and flies
+   back to the hand (through everything on the way back). No ammunition and no reload: the
+   wait is the trip. One hit a throw (step F6a); the bounces from one bandit to the next are
+   step F6b. Built in code like the other guns: red, white, red, a blue middle, a white star. */
+const SHIELD_FLY = {
+    speed: 30,          // m/s out
+    back: 36,           // m/s home, faster than you can run away from it
+    catchR: 1.3,        // caught this close to the camera
+    maxBackS: 4,        // never in the air longer than this on the way home (then it is just back)
+    spin: 24,           // rad/s
+    radius: 0.32        // the flying one, in the world (the one in the hand is drawn smaller)
+};
+const _shieldKit = {};          // radius -> { geos, mats }: every shield of a size shares them (no dispose needed)
+function shieldParts(r) {
+    if (!_shieldKit[r]) {
+        const metal = function (hex) { return new THREE.MeshStandardMaterial({ color: hex, metalness: 0.55, roughness: 0.35 }); };
+        const red = metal(0xb3202a), white = metal(0xe6e6e6), blue = metal(0x1d3f8f);
+        const star = new THREE.Shape();
+        for (let i = 0; i < 10; i++) {
+            const a = Math.PI / 2 + i * Math.PI / 5, k = (i % 2 ? 0.38 : 1) * r * 0.32;
+            if (i === 0) star.moveTo(Math.cos(a) * k, Math.sin(a) * k); else star.lineTo(Math.cos(a) * k, Math.sin(a) * k);
+        }
+        // rings from the rim inwards, each a touch thicker so the face reads as rings; then the star
+        _shieldKit[r] = [[1, red, 0.09], [0.78, white, 0.1], [0.56, red, 0.11], [0.36, blue, 0.12]].map(function (ring) {
+            return [new THREE.CylinderGeometry(r * ring[0], r * ring[0], r * ring[2], 28), ring[1]];
+        }).concat([[new THREE.ExtrudeGeometry(star, { depth: r * 0.02, bevelEnabled: false }), white]]);
+    }
+    const g = new THREE.Group();
+    _shieldKit[r].forEach(function (part, i) {
+        const m = new THREE.Mesh(part[0], part[1]);
+        if (i === 4) { m.rotation.x = -Math.PI / 2; m.position.y = r * 0.061; }   // the star, face up like the rings
+        g.add(m);
+    });
+    return g;
+}
+function buildShieldModel() {
+    const g = new THREE.Group();
+    const disc = shieldParts(0.17);
+    disc.rotation.set(Math.PI / 2 - 0.35, 0.25, 0);   // face towards you, tipped a little
+    g.add(disc);
+    const muzzle = new THREE.Object3D(); muzzle.position.set(0, 0, -0.1); g.add(muzzle);
+    const eject = new THREE.Object3D(); g.add(eject);
+    g.userData = { muzzle: muzzle, eject: eject, lever: null, hammer: null, fx: { flash: null, flashStar: null, light: null } };
+    g.visible = false; weapon.add(g); return g;
+}
+function sfxShieldThrow(pos) {
+    const d = pos ? chain(pos, 0.4, 30) : chain(null, 0.5, 1); if (!d) return;
+    noiseBurst(d, { type: 'bandpass', freq: 900, q: 1.5, dur: 0.28, vol: 0.5 });
+    tone(d, { type: 'sine', f0: 380, f1: 620, dur: 0.25, vol: 0.06 });
+}
+function sfxShieldClang(pos) {
+    const d = chain(pos, 0.7, 45); if (!d) return;
+    tone(d, { type: 'triangle', f0: 1480, f1: 1320, dur: 0.5, vol: 0.22 });
+    tone(d, { type: 'sine', f0: 2210, f1: 2150, dur: 0.35, vol: 0.12 });
+    noiseBurst(d, { type: 'highpass', freq: 2600, dur: 0.06, vol: 0.4 });
+}
+function sfxShieldCatch() {
+    const d = chain(null, 0.5, 1); if (!d) return;
+    tone(d, { type: 'triangle', f0: 900, f1: 700, dur: 0.12, vol: 0.18 });
+    noiseBurst(d, { type: 'lowpass', freq: 700, dur: 0.08, vol: 0.4 });
+}
+
 const rifleGroup = new THREE.Group();
 while (weapon.children.length) rifleGroup.add(weapon.children[0]);
 weapon.add(rifleGroup);
@@ -12530,7 +12602,9 @@ const ARSENAL = [
     { id: 'sniper', name: 'SNIPER', mag: 5, reload: 3.2, reserveMax: 25, auto: false, spreadHip: 0.045, spreadAds: 0.0008, adsFov: 12, recoil: 0.12, sfx: sfxSniper, cock: true, model: buildSniperModel(), hip: new THREE.Vector3(0.22, -0.2, -0.42), ads: new THREE.Vector3(0.0, -0.09, -0.38), run: new THREE.Vector3(0.26, -0.28, -0.36) },
     { id: 'ar', name: 'AR', mag: 25, reload: 2.6, reserveMax: 125, auto: true, spreadHip: 0.022, spreadAds: 0.007, adsFov: 42, recoil: 0.045, sfx: sfxAr, cock: false, model: buildArModel(), hip: new THREE.Vector3(0.2, -0.19, -0.4), ads: new THREE.Vector3(0.0, -0.088, -0.42), run: new THREE.Vector3(0.24, -0.26, -0.36) },
     { id: 'shotgun', name: 'SHOTGUN', mag: 6, reload: 3.0, reserveMax: 36, auto: false, spreadHip: 0.11, spreadAds: 0.06, adsFov: 62, recoil: 0.14, sfx: sfxShotgun, cock: true, model: buildShotgunModel(), hip: new THREE.Vector3(0.2, -0.2, -0.4), ads: new THREE.Vector3(0.0, -0.1, -0.44), run: new THREE.Vector3(0.24, -0.27, -0.36) },
-    { id: 'deagle', name: 'DEAGLE', mag: 7, reload: 2.0, reserveMax: 42, auto: false, spreadHip: 0.03, spreadAds: 0.008, adsFov: 48, recoil: 0.11, sfx: sfxDeagle, cock: false, model: buildDeagleModel(), hip: new THREE.Vector3(0.22, -0.18, -0.38), ads: new THREE.Vector3(0.0, -0.08, -0.4), run: new THREE.Vector3(0.26, -0.24, -0.34) }
+    { id: 'deagle', name: 'DEAGLE', mag: 7, reload: 2.0, reserveMax: 42, auto: false, spreadHip: 0.03, spreadAds: 0.008, adsFov: 48, recoil: 0.11, sfx: sfxDeagle, cock: false, model: buildDeagleModel(), hip: new THREE.Vector3(0.22, -0.18, -0.38), ads: new THREE.Vector3(0.0, -0.08, -0.4), run: new THREE.Vector3(0.26, -0.24, -0.34) },
+    // step F6: thrown - mag 1 = in the hand, 0 = in the air; no reserve, no reload (see SHIELD)
+    { id: 'shield', name: 'SHIELD', mag: 1, reload: 0, reserveMax: 0, thrown: true, auto: false, spreadHip: 0, spreadAds: 0, adsFov: 55, recoil: 0.05, sfx: sfxShieldThrow, cock: false, model: buildShieldModel(), hip: new THREE.Vector3(0.2, -0.24, -0.5), ads: new THREE.Vector3(0.1, -0.2, -0.5), run: new THREE.Vector3(0.24, -0.28, -0.42) }
 ];
 /* Fire rate, pellets, damage and range come from game-tables.js - the same copy the server
    judges hits with (code review stage 4a). Matched by id, so a table in a different order
@@ -12545,6 +12619,137 @@ let unlockedWeapons = 1;
 let currentWpn = 0;
 const wpnAmmo = ARSENAL.map(function (w) { return { clip: w.mag, reserve: w.reserveMax }; });
 
+/* ---- step F6: the shield in the air (ours) and the ones the others throw ---- */
+const SHIELD_IDX = ARSENAL.findIndex(function (w) { return w.id === 'shield'; });
+const SHIELD = { state: 'hand', mesh: null, pos: new THREE.Vector3(), vel: new THREE.Vector3(), went: 0, backT: 0, from: new THREE.Vector3() };
+const remoteShields = [];       // { mesh, a, b, body, t, out } - somebody else's throw, drawn only
+function shieldMesh() {
+    const m = shieldParts(SHIELD_FLY.radius);
+    m.traverse(function (o) { if (o.isMesh) o.castShadow = false; });
+    scene.add(m);
+    return m;
+}
+function shieldInHand(yes) {
+    wpnAmmo[SHIELD_IDX].clip = yes ? 1 : 0;
+    if (currentWpn === SHIELD_IDX) { clip = yes ? 1 : 0; ARSENAL[SHIELD_IDX].model.visible = yes; updateAmmoUI(); }
+}
+function throwShield(now) {
+    if (SHIELD.state !== 'hand') return;
+    lastShotTime = now;
+    if (!SHIELD.mesh) SHIELD.mesh = shieldMesh();
+    const dir = new THREE.Vector3(0, 0, -1).applyEuler(new THREE.Euler(pitch, yaw, 0, 'YXZ'));
+    SHIELD.from.copy(camera.position);
+    SHIELD.pos.copy(camera.position).addScaledVector(dir, 0.6).y -= 0.15;
+    SHIELD.vel.copy(dir).multiplyScalar(SHIELD_FLY.speed);
+    SHIELD.went = 0;
+    SHIELD.state = 'out';
+    SHIELD.mesh.position.copy(SHIELD.pos);
+    SHIELD.mesh.visible = true;
+    shieldInHand(false);
+    WPN.recoilPos = 0.05;
+    sfxShieldThrow(null);
+}
+/* What it met on the way out: the same as a round that hit it, but the report names the
+   shield itself - the player may have changed weapons while it flew. */
+function shieldStrike(h) {
+    const w = ARSENAL[SHIELD_IDX], at = h.point;
+    sfxShieldClang(at);
+    spawnParticles(at, 0xe6e6e6, 10, 3.2);
+    if (h.object.userData.bossHit && netBoss.active && netBoss.alive) {
+        showHitmarker(); sfxHitMarker();
+        if (NET.connected && NET.socket) NET.socket.emit('boss-hit', { w: SHIELD_IDX, body: 1, head: 0 });
+        return;
+    }
+    const banditId = h.object.userData.banditId;
+    if (banditId !== undefined && serverBandits[banditId]) {
+        showHitmarker(); sfxHitMarker(); sfxFleshHit(at);
+        if (NET.connected && NET.socket) NET.socket.emit('bandit-hit', { w: SHIELD_IDX, targets: [{ id: parseInt(banditId, 10), body: 1, head: 0 }] });
+        return;
+    }
+    const remoteId = h.object.userData.remoteId;
+    if (remoteId && PLAYERS[remoteId]) {
+        showHitmarker(); sfxHitMarker(); sfxFleshHit(at);
+        if (NET.connected && NET.socket && NET.mode.friendlyFire) { NET.socket.emit('hit', { w: SHIELD_IDX, targets: [{ id: remoteId, body: 1, head: 0 }] }); NET.hitsSent++; }
+        return;
+    }
+    const bot = h.object.userData.bot;
+    if (bot && bot.alive) { showHitmarker(); sfxHitMarker(); damageBot(bot, w.dmg, at, false); }
+}
+const _shieldRay = new THREE.Raycaster();
+const _shieldDir = new THREE.Vector3();
+function updateShield(delta) {
+    if (SHIELD.state !== 'hand' && SHIELD.mesh) {
+        SHIELD.mesh.rotation.y += SHIELD_FLY.spin * delta;
+        if (SHIELD.state === 'out') {
+            const step = SHIELD.vel.length() * delta;
+            _shieldDir.copy(SHIELD.vel).normalize();
+            _shieldRay.set(SHIELD.pos, _shieldDir);
+            _shieldRay.far = step + SHIELD_FLY.radius;
+            const hits = _shieldRay.intersectObjects(shotTargets(), true);
+            if (hits.length) {
+                SHIELD.pos.copy(hits[0].point).addScaledVector(_shieldDir, -SHIELD_FLY.radius);
+                shieldStrike(hits[0]);
+                sendShieldShot(SHIELD.from, hits[0].point);
+                SHIELD.state = 'back'; SHIELD.backT = 0;
+            } else {
+                SHIELD.pos.addScaledVector(_shieldDir, step);
+                SHIELD.went += step;
+                if (SHIELD.went >= ARSENAL[SHIELD_IDX].range) {
+                    sendShieldShot(SHIELD.from, SHIELD.pos);
+                    SHIELD.state = 'back'; SHIELD.backT = 0;
+                }
+            }
+        } else {                                       // home, through everything
+            SHIELD.backT += delta;
+            _shieldDir.copy(camera.position).sub(SHIELD.pos);
+            _shieldDir.y -= 0.3;
+            const dist = _shieldDir.length();
+            if (dist < SHIELD_FLY.catchR || SHIELD.backT > SHIELD_FLY.maxBackS) {
+                SHIELD.state = 'hand';
+                SHIELD.mesh.visible = false;
+                shieldInHand(true);
+                if (currentWpn === SHIELD_IDX) sfxShieldCatch();
+            } else SHIELD.pos.addScaledVector(_shieldDir, Math.min(dist, SHIELD_FLY.back * delta) / dist);
+        }
+        SHIELD.mesh.position.copy(SHIELD.pos);
+    }
+    for (let i = remoteShields.length - 1; i >= 0; i--) {
+        const r = remoteShields[i];
+        r.t += delta;
+        r.mesh.rotation.y += SHIELD_FLY.spin * delta;
+        const outT = r.a.distanceTo(r.b) / SHIELD_FLY.speed;
+        if (r.t < outT) r.mesh.position.lerpVectors(r.a, r.b, r.t / outT);
+        else {
+            const home = r.body && r.body.mesh ? r.body.mesh.position.clone().setY(1.3) : r.a;
+            const backT = r.b.distanceTo(home) / SHIELD_FLY.back;
+            const k = Math.min(1, (r.t - outT) / Math.max(0.05, backT));
+            r.mesh.position.lerpVectors(r.b, home, k);
+            if (k >= 1) { scene.remove(r.mesh); remoteShields.splice(i, 1); }
+        }
+    }
+}
+function resetShield() {
+    SHIELD.state = 'hand';
+    if (SHIELD.mesh) SHIELD.mesh.visible = false;
+    wpnAmmo[SHIELD_IDX].clip = 1;
+}
+/* Tell the others where it went, so they see it fly out and back (looks only, like a shot) */
+function sendShieldShot(from, to) {
+    if (!NET.connected || !NET.socket) return;
+    const r = function (v) { return [+v.x.toFixed(2), +v.y.toFixed(2), +v.z.toFixed(2)]; };
+    NET.socket.emit('shoot', { w: SHIELD_IDX, o: r(from.clone().setY(from.y - 0.3)), e: [r(to)] });
+    NET.shotsSent++;
+}
+function playRemoteShield(m, body) {
+    if (remoteShields.length > 12) return;
+    const a = new THREE.Vector3(m.o[0], m.o[1], m.o[2]), b = new THREE.Vector3(m.e[0][0], m.e[0][1], m.e[0][2]);
+    const mesh = shieldMesh();
+    mesh.position.copy(a);
+    remoteShields.push({ mesh: mesh, a: a, b: b, body: body, t: 0 });
+    sfxShieldThrow(a);
+    setTimeout(function () { sfxShieldClang(b); }, 1000 * a.distanceTo(b) / SHIELD_FLY.speed);
+}
+
 function curW() { return ARSENAL[currentWpn]; }
 /* Rounds into weapon i's reserve, never past its reserveMax (step F4: one rule for every
    reward - a kill, a wave, a mission, DEAD-EYE). Keeps `reserve` in step for the one in hand. */
@@ -12555,6 +12760,7 @@ function addReserve(i, n) {
 function bindWeaponVisual() {
     const w = curW();
     for (let i = 0; i < ARSENAL.length; i++) ARSENAL[i].model.visible = (i === currentWpn);
+    if (w.thrown && SHIELD.state !== 'hand') w.model.visible = false;      // step F6: still in the air
     const ud = w.model.userData;
     WPN.muzzle = ud.muzzle;
     WPN.ejectPort = ud.eject;
@@ -12730,13 +12936,14 @@ function updateAmmoUI() {
     const w = curW();
     const mag = w.mag;
     ui.wpnName.innerText = w.name;
-    ui.ammoBig.innerHTML = clip + ' <small>/ ' + reserve + '</small>';
+    ui.ammoBig.innerHTML = w.thrown ? (clip ? 'READY' : '...') : clip + ' <small>/ ' + reserve + '</small>';
     let html = '';
     const dots = Math.min(mag, 16);
     const filled = Math.round((clip / mag) * dots);
     for (let i = 0; i < dots; i++) html += '<div class="bullet' + (i < filled ? '' : ' spent') + '"></div>';
     ui.bullets.innerHTML = html;
     if (isReloading) ui.hint.innerText = 'RELOADING...';
+    else if (w.thrown) ui.hint.innerText = '';
     else if (clip === 0) ui.hint.innerText = reserve > 0 ? 'PRESS R' : 'NO AMMO';
     else ui.hint.innerText = '';
 }
@@ -12846,7 +13053,8 @@ function gameOver() {
 }
 function resetGame() {
     playerHealth = playerMaxHealth; playerSprint = 100;
-    unlockedWeapons = 1; currentWpn = 0;
+    unlockedWeapons = 1; currentWpn = 0; bossesDown = 0;
+    resetShield();
     for (let i = 0; i < ARSENAL.length; i++) {
         wpnAmmo[i].clip = ARSENAL[i].mag;
         wpnAmmo[i].reserve = ARSENAL[i].reserveMax;
@@ -12902,14 +13110,24 @@ function spawnBoss() {
 /* What killing a boss is worth. Online everybody in the room gets it, because
    everybody in the room was in the fight - the server decided it died, and it
    died once. */
+/* step F6: the shield is the reward for the seventh boss (the ghost, in the room's order), so
+   the sixth hands out the ammunition DEAD-EYE used to come with, and DEAD-EYE (all of it open)
+   moves to the eighth and after. Counted per player, like the guns: a latecomer has fewer. */
+let bossesDown = 0;
+const SHIELD_AT_BOSS = 7;
 function applyBossReward() {
-    if (unlockedWeapons < ARSENAL.length) {
+    bossesDown++;
+    const guns = SHIELD_IDX;                     // the guns before it, 6
+    if (unlockedWeapons < guns || (unlockedWeapons === guns && bossesDown >= SHIELD_AT_BOSS)) {
         unlockedWeapons++;
         const nw = ARSENAL[unlockedWeapons - 1];
         pushFeed('WEAPON UNLOCKED: ' + nw.name + '  [' + unlockedWeapons + ']');
         wpnAmmo[unlockedWeapons - 1].clip = nw.mag;
         wpnAmmo[unlockedWeapons - 1].reserve = nw.reserveMax;
         switchWeapon(unlockedWeapons - 1);
+    } else if (unlockedWeapons < ARSENAL.length) {
+        for (let i = 0; i < ARSENAL.length; i++) addReserve(i, 40);
+        pushFeed('EXTRA AMMO — the next boss brings the SHIELD');
     } else {
         deadEye = true;
         for (let i = 0; i < ARSENAL.length; i++) addReserve(i, 40);
@@ -12968,33 +13186,7 @@ function fireOneRay(spread, dmgBody, dmgHead, range) {
 
     shootRay.set(camera.position, dir);
     shootRay.far = range || 200;
-    const targets = [];
-    // Online the bandits belong to the server; offline they are the local ones
-    if (onlineBandits()) {
-        const bIds = Object.keys(serverBandits);
-        for (let i = 0; i < bIds.length; i++) {
-            const sb = serverBandits[bIds[i]];
-            if (sb.alive) targets.push(sb.mesh);
-        }
-        // step 30c: while its bones are in the air there is nothing there to hit,
-        // and step 31d: nor while the ghost is mist on its way to you
-        if (netBoss.active && netBoss.alive && netBoss.mesh && !SCATTER.hidden && !DASH.hidden) targets.push(netBoss.mesh);
-    } else {
-        for (let i = 0; i < bots.length; i++) if (bots[i].alive) targets.push(bots[i].mesh);
-    }
-    // Other players are only in the line of fire when the mode allows it. With
-    // friendly fire off they are not targets at all, so shots pass straight
-    // through a team mate to the bandit behind them.
-    if (NET.mode.friendlyFire) {
-        const remoteIds = Object.keys(remoteBodies);
-        for (let i = 0; i < remoteIds.length; i++) {
-            const rb = remoteBodies[remoteIds[i]];
-            const who = PLAYERS[remoteIds[i]];
-            if (rb.alive !== false && !(who && who.away)) targets.push(rb.mesh);
-        }
-    }
-    targets.push(world);
-    const hits = shootRay.intersectObjects(targets, true);
+    const hits = shootRay.intersectObjects(shotTargets(), true);
 
     const muzzleWorld = new THREE.Vector3();
     muzzleAnchor.getWorldPosition(muzzleWorld);
@@ -13065,6 +13257,38 @@ function fireOneRay(spread, dmgBody, dmgHead, range) {
     netShotEnds.push(end.x, end.y, end.z);
 }
 
+/* Everything a round (or the shield, step F6) can meet, in the order fireOneRay always
+   asked for it: the bandits, the boss, the other players when the mode allows it, the town. */
+function shotTargets() {
+    const targets = [];
+    // Online the bandits belong to the server; offline they are the local ones
+    if (onlineBandits()) {
+        const bIds = Object.keys(serverBandits);
+        for (let i = 0; i < bIds.length; i++) {
+            const sb = serverBandits[bIds[i]];
+            if (sb.alive) targets.push(sb.mesh);
+        }
+        // step 30c: while its bones are in the air there is nothing there to hit,
+        // and step 31d: nor while the ghost is mist on its way to you
+        if (netBoss.active && netBoss.alive && netBoss.mesh && !SCATTER.hidden && !DASH.hidden) targets.push(netBoss.mesh);
+    } else {
+        for (let i = 0; i < bots.length; i++) if (bots[i].alive) targets.push(bots[i].mesh);
+    }
+    // Other players are only in the line of fire when the mode allows it. With
+    // friendly fire off they are not targets at all, so shots pass straight
+    // through a team mate to the bandit behind them.
+    if (NET.mode.friendlyFire) {
+        const remoteIds = Object.keys(remoteBodies);
+        for (let i = 0; i < remoteIds.length; i++) {
+            const rb = remoteBodies[remoteIds[i]];
+            const who = PLAYERS[remoteIds[i]];
+            if (rb.alive !== false && !(who && who.away)) targets.push(rb.mesh);
+        }
+    }
+    targets.push(world);
+    return targets;
+}
+
 /* Cut a reload short. Nothing has gone in yet (step F3: the whole magazine goes in at the end) */
 function cancelReload() {
     if (!isReloading) return;
@@ -13080,6 +13304,7 @@ function shoot(manual) {
     const w = curW();
     if (now - lastShotTime < w.fireCd) return;
     if (!manual && !w.auto) return;
+    if (w.thrown) { throwShield(now); return; }                // step F6
     /* step F2: only a reload started with rounds still in can be cut short by a click. One
        started from empty used to end at the first click after the first round went in (0.57s),
        so a player who kept clicking fired that one round, again and again - "the WINCHESTER
@@ -13130,6 +13355,7 @@ function shoot(manual) {
 }
 
 function startReload() {
+    if (curW().thrown) return;                   // step F6: the shield comes back by itself
     const mag = curW().mag;
     if (isReloading || clip >= mag || reserve <= 0 || playerHealth <= 0) return;
     isReloading = true;
@@ -13281,6 +13507,7 @@ document.addEventListener('keydown', function (e) {
         if (e.code === 'Digit4') switchWeapon(3);
         if (e.code === 'Digit5') switchWeapon(4);
         if (e.code === 'Digit6') switchWeapon(5);
+        if (e.code === 'Digit7') switchWeapon(6);        // step F6: the shield
     }
     if (e.code === 'Space' && onGround) {
         velY = 6.1; onGround = false; sfxJump();
@@ -13752,6 +13979,7 @@ function animate() {
     updateRoar(delta);                   // step 33d
     updateNetHazards(delta);
     updateBanditBullets(delta);
+    updateShield(delta);                 // step F6
     updateModelRigs(delta);
     refreshNetDebug(now);
     tickScoreboard(now);

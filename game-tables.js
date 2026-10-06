@@ -26,6 +26,9 @@
         { id: "sniper", body: 120, head: 220, pellets: 1, range: 280, fireCd: 980 },
         { id: "ar", body: 22, head: 44, pellets: 1, range: 160, fireCd: 105 },
         { id: "shotgun", body: 14, head: 20, pellets: 8, range: 45, fireCd: 720 },
-        { id: "deagle", body: 58, head: 115, pellets: 1, range: 120, fireCd: 260 }
+        { id: "deagle", body: 58, head: 115, pellets: 1, range: 120, fireCd: 260 },
+        /* step F6: the shield, thrown - one hit a throw (no head bonus), out to 40 m.
+           fireCd is the shortest time between two throws that come straight back. */
+        { id: "shield", body: 70, head: 70, pellets: 1, range: 40, fireCd: 600 }
     ]
 });

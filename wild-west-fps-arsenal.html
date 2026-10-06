@@ -225,6 +225,11 @@
         padding: 7px 13px; cursor: pointer;
     }
     #room-box button:hover { background: rgba(120,72,24,0.85); }
+    /* step F5b: the level a new private room is made with */
+    #level-box { margin-top: 9px; font-size: 12px; color: #9c8156; direction: rtl;
+        display: flex; gap: 6px; align-items: center; justify-content: center; }
+    #room-box #level-box button { padding: 4px 11px; color: #c9a978; background: rgba(40,24,8,0.6); border-color: #6b451f; }
+    #room-box #level-box button.on { color: #ffd77a; background: rgba(120,72,24,0.85); border-color: #c08a44; }
     /* graphics quality (map M13) - under the room panel */
     #gfx-box {
         margin-top: 10px; pointer-events: auto; direction: rtl;
@@ -408,6 +413,11 @@
             <button id="btn-copy">&#1492;&#1506;&#1514;&#1511; &#1511;&#1497;&#1513;&#1493;&#1512;</button>
             <button id="btn-leave">&#1495;&#1494;&#1512;&#1492; &#1500;&#1500;&#1493;&#1489;&#1497;</button>
         </div>
+        <div id="level-box">&#1512;&#1502;&#1514; &#1511;&#1493;&#1513;&#1497; &#1500;&#1495;&#1491;&#1512; &#1495;&#1491;&#1513;:
+            <button data-level="easy">&#1511;&#1500;</button>
+            <button data-level="normal" class="on">&#1512;&#1490;&#1497;&#1500;</button>
+            <button data-level="hard">&#1511;&#1513;&#1492;</button>
+        </div>
         <div id="room-msg"></div>
     </div>
     <div id="gfx-box">&#1490;&#1512;&#1508;&#1497;&#1511;&#1492;:
@@ -452,6 +462,8 @@ const NET = {
        is the safe default: if the mode never arrives we would rather bullets
        pass through team mates than hurt them. */
     mode: { id: 'coop', label: 'CO-OP', friendlyFire: false },
+    level: 'normal',            // step F5b: the room's level, from room-joined (older servers: none = normal)
+    newLevel: 'normal',         // the one picked on the menu for the next room we create
     room: null,
     available: (typeof io === 'function'),
     sent: 0,
@@ -1327,11 +1339,15 @@ function setRoomMsg(text, good) {
     roomMsgEl.className = good ? 'ok' : '';
 }
 
+const LEVEL_NAMES = { easy: 'קל', normal: 'רגיל', hard: 'קשה' };
 function refreshRoomUI() {
     if (roomCodeEl) roomCodeEl.textContent = NET.room || '---';
-    if (roomModeEl) roomModeEl.textContent = NET.room ? ('· ' + NET.mode.label) : '';
+    // step F5b: the level too, so whoever joins sees what they joined
+    if (roomModeEl) roomModeEl.textContent = NET.room ? ('· ' + NET.mode.label + ' · ' + levelName(NET.level)) : '';
     setRoomMsg('', false);
 }
+
+function levelName(id) { return LEVEL_NAMES[id] || LEVEL_NAMES.normal; }
 
 function shareLink() {
     if (!NET.room || NET.room === 'PUBLIC') return location.href.split('#')[0];
@@ -1358,7 +1374,7 @@ function shareLink() {
 
     if (create) create.addEventListener('click', function () {
         if (needServer()) return;
-        NET.socket.emit('create-room', {});
+        NET.socket.emit('create-room', { level: NET.newLevel });
         setRoomMsg('יוצר חדר...', true);
     });
 
@@ -1368,6 +1384,14 @@ function shareLink() {
         if (!code) { setRoomMsg('הכנס קוד', false); return; }
         NET.socket.emit('join-room', { code: code });
         setRoomMsg('מצטרף ל-' + code + '...', true);
+    });
+
+    // step F5b: easy / normal / hard for the next room we create
+    box.querySelectorAll('#level-box button').forEach(function (b) {
+        b.addEventListener('click', function () {
+            NET.newLevel = b.dataset.level;
+            box.querySelectorAll('#level-box button').forEach(function (o) { o.classList.toggle('on', o === b); });
+        });
     });
 
     if (roomInputEl) roomInputEl.addEventListener('keydown', function (e) {
@@ -1455,6 +1479,7 @@ function initNetwork() {
         if (!data) return;
         NET.room = data.code;
         if (data.mode) NET.mode = data.mode;
+        NET.level = data.level || 'normal';
         setPlayerMaxHealth(data.maxHealth || 100);        // step 32: the room's (older servers: 100)
         SCORES.rows = Array.isArray(data.scores) ? data.scores : [];
         Object.keys(reviveMarkers).forEach(function (id) { setDownedMarker(id, false); });

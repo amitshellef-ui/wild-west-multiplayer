@@ -52,6 +52,23 @@ const DIFFICULTY = {
     health: [100, 150]             // what it takes to drop one
 };
 
+/* ---- The room's level (step F5b) --------------------------------------------
+   Chosen with a new private room; the lobbies are always normal, which is the
+   game as it was. A multiplier on what each bandit is worth - its health, the
+   wait between its shots, its aim error (lower lands closer) - never on how
+   many there are (that is the wave and the crowd, above). Bosses are not
+   touched. */
+const LEVELS = {
+    easy: { id: "easy", health: 0.75, fireDelay: 1.3, spread: 1.35 },
+    normal: { id: "normal", health: 1, fireDelay: 1, spread: 1 },
+    hard: { id: "hard", health: 1.3, fireDelay: 0.8, spread: 0.75 }
+};
+const DEFAULT_LEVEL = "normal";
+function levelOf(room) {
+    const id = room && room.level;
+    return (typeof id === "string" && Object.prototype.hasOwnProperty.call(LEVELS, id)) ? LEVELS[id] : LEVELS[DEFAULT_LEVEL];
+}
+
 function difficulty(wave) {
     const n = (typeof wave === "number" && wave > 0) ? wave : 1;
     const t = Math.min(1, (n - 1) / (DIFFICULTY.fullAtWave - 1));
@@ -68,9 +85,17 @@ function difficulty(wave) {
    a wave, not once a bullet. */
 function difficultyFor(room) {
     if (!room) return difficulty(1);
-    if (!room.difficulty || room.difficultyWave !== room.wave) {
-        room.difficulty = difficulty(room.wave);
+    const L = levelOf(room);
+    if (!room.difficulty || room.difficultyWave !== room.wave || room.difficultyLevel !== L.id) {
+        const d = difficulty(room.wave);
+        room.difficulty = {
+            respawnMs: d.respawnMs,
+            fireDelay: Math.round(d.fireDelay * L.fireDelay),
+            spreadScale: Math.round(d.spreadScale * L.spread * 1000) / 1000,
+            health: Math.round(d.health * L.health)
+        };
         room.difficultyWave = room.wave;
+        room.difficultyLevel = L.id;
     }
     return room.difficulty;
 }
@@ -164,6 +189,6 @@ function stepRoom(room, players, now, sink) {
 }
 
 module.exports = {
-    WAVE, DIFFICULTY, CROWD, banditCap, capFor, respawnMsFor, initRoom, stepRoom, advance,
+    WAVE, DIFFICULTY, CROWD, LEVELS, DEFAULT_LEVEL, levelOf, banditCap, capFor, respawnMsFor, initRoom, stepRoom, advance,
     secondsToWave, difficulty, difficultyFor
 };

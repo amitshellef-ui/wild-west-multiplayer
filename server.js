@@ -139,10 +139,11 @@ const rooms = {};                      // code -> room record
 const players = {};                    // player id -> player record (see RECONNECTING)
 const MAX_HEALTH = 100;                // where every room starts (step 32: it grows - maxHealthOf)
 
-function createRoom(code, modeId) {
+function createRoom(code, modeId, levelId) {
     rooms[code] = {
         code: code,
         mode: MODES[modeId] || MODES[DEFAULT_MODE],
+        level: waves.levelOf({ level: levelId }).id,     // step F5b: easy / normal / hard (lobbies: normal)
         createdAt: Date.now()
     };
     resetRoomState(rooms[code], Date.now());
@@ -790,6 +791,7 @@ function placeInRoom(socket, p, code) {
     socket.emit("room-joined", {
         code: code,
         mode: rooms[code].mode,
+        level: rooms[code].level,
         players: playersIn(code),
         wave: rooms[code].wave || 1,
         cap: waves.capFor(rooms[code]),
@@ -863,6 +865,7 @@ io.on("connection", (socket) => {
         socket.emit("room-joined", {
             code: back.room,
             mode: room.mode,
+            level: room.level,
             players: playersIn(back.room),
             wave: room.wave || 1,
             cap: waves.capFor(room),
@@ -951,8 +954,8 @@ function registerHandlers(socket) {
         if (!code) { socket.emit("room-error", { reason: "FULL" }); return; }
 
         const modeId = (m && typeof m.mode === "string" && Object.prototype.hasOwnProperty.call(MODES, m.mode)) ? m.mode : DEFAULT_MODE;   // not "constructor" (review S8)
-        createRoom(code, modeId);
-        console.log("Room created:", code, rooms[code].mode.label);
+        createRoom(code, modeId, m && m.level);        // an unknown level is normal (waves.levelOf)
+        console.log("Room created:", code, rooms[code].mode.label, rooms[code].level);
         placeInRoom(socket, p, code);
     });
 

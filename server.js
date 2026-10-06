@@ -11,6 +11,7 @@ const bandits = require("./bandits");
 const boss = require("./boss");
 const waves = require("./waves");
 const missions = require("./missions");
+const boogie = require("./boogie");          // step F7a: the BOOGIE BOMBs on the ground
 
 const app = express();
 const server = http.createServer(app);
@@ -158,6 +159,7 @@ function resetRoomState(room, now) {
     boss.initRoom(room, now);
     waves.initRoom(room, now);
     missions.initRoom(room);
+    boogie.initRoom(room);
     room.won = null;
     room.wipeAt = 0;
     room.startedAt = now;
@@ -281,8 +283,15 @@ function removePlayer(p) {
     if (room) {
         scoresChanged(room);
         io.to(room).emit("player-left", { id: p.id });
+        dropBoogie(room, p);
         dropRoomIfEmpty(room);
     }
+}
+
+/* Step F7a: somebody carrying a BOOGIE BOMB left - it goes back on the ground for the rest. */
+function dropBoogie(code, p) {
+    const room = rooms[code];
+    if (room && boogie.drop(room, p)) io.to(code).emit("boogie", { items: boogie.publicState(room) });
 }
 
 /* =========================================================================
@@ -809,6 +818,7 @@ function placeInRoom(socket, p, code) {
     if (previous) {
         socket.leave(previous);
         socket.to(previous).emit("player-left", { id: p.id });
+        dropBoogie(previous, p);
     }
 
     p.room = code;
@@ -845,6 +855,7 @@ function placeInRoom(socket, p, code) {
         scores: scoreRows(code),
         mission: missions.publicState(rooms[code], Date.now()),
         won: rooms[code].won || null,
+        boogie: boogie.publicState(rooms[code]),
         maxHealth: maxHealthOf(p)
     });
     socket.to(code).emit("player-joined", publicPlayer(p));
@@ -920,6 +931,7 @@ io.on("connection", (socket) => {
             mission: missions.publicState(room, Date.now()),
             won: room.won || null,
             maxHealth: maxHealthOf(back),
+            boogie: boogie.publicState(room),
             resumed: true
         });
         socket.to(back.room).emit("player-back", publicPlayer(back));
@@ -1067,6 +1079,30 @@ function registerHandlers(socket) {
         socket.to(p.room).emit("player-shot", {
             id: p.id, w: shot.w, o: shot.o, e: shot.e
         });
+    });
+
+    /* ---- BOOGIE BOMB (step F7a) ----
+       "I am standing on one" and "mine landed here". Each is checked against the
+       room's own copy (boogie.js); the answer goes to the whole room. */
+    on("boogie-pick", (m) => {
+        const p = players[socket.data.pid];
+        if (!p || !p.room || !m || typeof m.id !== "number") return;
+        const now = Date.now();
+        if (now - (p.boogieAt || 0) < 200) return;
+        p.boogieAt = now;
+        const room = rooms[p.room];
+        if (room && boogie.pick(room, p, m.id)) io.to(p.room).emit("boogie", { items: boogie.publicState(room), by: p.id });
+    });
+    on("boogie-throw", (m) => {
+        const p = players[socket.data.pid];
+        if (!p || !p.room || !m) return;
+        const room = rooms[p.room];
+        if (!room || room.won) return;
+        const res = boogie.land(room, p, m.x, m.z, Date.now());
+        if (!res) return;
+        io.to(p.room).emit("boogie-boom", { by: p.id, x: res.x, z: res.z, b: res.bandits, boss: res.boss,
+            ms: boogie.BOOGIE.banditMs, r: boogie.BOOGIE.radius });
+        io.to(p.room).emit("boogie", { items: boogie.publicState(room) });
     });
 
     /* ---- Reload relay (step 26c): so the others see the soldier change
@@ -1354,7 +1390,8 @@ function registerHandlers(socket) {
             cap: waves.capFor(room),
             banditHp: waves.difficultyFor(room).health,
             scores: scoreRows(code),
-            maxHealth: room.maxHealth                 // step 32: 100 again
+            maxHealth: room.maxHealth,                // step 32: 100 again
+            boogie: boogie.publicState(room)          // step F7a: three new ones on the ground
         });
         // then everybody on their feet, at a spawn point, full health
         for (const id in players) {
@@ -1477,6 +1514,7 @@ setInterval(() => {
         // step 31d: nothing fills `blinks` any more - GHOST DASH took VANISH's place
         for (let i = 0; i < sink.blinks.length; i++) io.to(code).emit("boss-blink", sink.blinks[i]);
         for (let i = 0; i < sink.roars.length; i++) io.to(code).emit("boss-roar", sink.roars[i]);
+        for (let i = 0; i < sink.dances.length; i++) io.to(code).emit("boss-dance", sink.dances[i]);      // step F7a
         // step 30b: the skeleton's HIGH NOON - a mark, and how it ended (shot / lost)
         for (let i = 0; i < sink.duels.length; i++) io.to(code).emit("boss-duel", sink.duels[i]);
         // step 30c: its BONE SCATTER - collapse, gone, rise, strike, the blow, done

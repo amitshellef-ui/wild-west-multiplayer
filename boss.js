@@ -76,6 +76,7 @@ const BOSS = {
     radius: 0.85,
     eyeHeight: 1.75 * 1.62,
     sightRange: 55,
+    danceWaitMs: 4000,         // step F7a: a BOOGIE BOMB's dance waits this long for an ability to end
     keepDistance: 9,
     fireRange: 38,
     snipeRange: 70,
@@ -1697,6 +1698,13 @@ function tickAbility(room, b, players, near, now, dt, sink) {
     }
 }
 
+/* In the middle of one of its own moves - the planted ones (the walking stands aside for them).
+   Shared by the walking below and the BOOGIE BOMB's dance (step F7a). */
+function busyWithAbility(b, now) {
+    return !!b.duel || !!(b.staggerUntil && now < b.staggerUntil) || !!b.scatter || !!b.harvest || !!b.spectral ||
+        !!b.grave || !!b.dash || !!b.ember || !!b.tail || !!b.roar;
+}
+
 /* ---- The boss itself ---------------------------------------------------- */
 /* The moment it turns. Once only - health does not go back up. */
 function enterPhase2(room, b, players, now, sink) {
@@ -1747,6 +1755,20 @@ function stepBoss(room, b, players, now, dt, sink) {
        again - and while it lives no wave turns over, so a boss that never found a
        player standing still stalled the room. It patrols only with nobody standing. */
     b.state = near ? "chase" : "patrol";
+
+    /* step F7a: a BOOGIE BOMB landed by it. It dances the moment it is free - never in the middle
+       of one of its abilities, which would leave the pages drawing half of one - and a dance asked
+       for while it stays busy for 4 s more is forgotten. Dancing: no step, no shot, no ability. */
+    if (b.danceWant) {
+        if (now - b.danceAsk > BOSS.danceWaitMs) b.danceWant = 0;
+        else if (!busyWithAbility(b, now) && !(b.chargeUntil && now < b.chargeUntil) && b.gState !== "spin" && b.gState !== "fire") {
+            b.danceUntil = now + b.danceWant;
+            b.danceWant = 0;
+            b.path = null;
+            sink.dances.push({ ms: b.danceUntil - now });
+        }
+    }
+    if (b.danceUntil && now < b.danceUntil) { bandits.recordTrail(b); return; }
 
     tickAbility(room, b, players, near, now, dt, sink);
 
@@ -1808,7 +1830,7 @@ function stepBoss(room, b, players, now, dt, sink) {
     // its gun for a SPECTRAL SHOT until it is down again (step 31b), and its hand for a GRAVE BURST (step 31c),
     // and all through a GHOST DASH (step 31d) - the charge itself is tickDash's, not the walking's;
     // the dragon from takeoff to landing in an EMBER RAIN (step 33b), and all through a TAIL SWEEP (step 33c)
-    const dueling = !!b.duel || (b.staggerUntil && now < b.staggerUntil) || !!b.scatter || !!b.harvest || !!b.spectral || !!b.grave || !!b.dash || !!b.ember || !!b.tail || !!b.roar;
+    const dueling = busyWithAbility(b, now);
     const planted = b.gState === "spin" || b.gState === "fire" || dueling;
     const baseSpeed = b.type.speed * (b.phase === 2 ? PHASE2.speedScale : 1);
     const speed = b.state === "chase" ? baseSpeed : baseSpeed * 0.55;
@@ -1982,6 +2004,7 @@ function emptySink() {
         tails: [],                                                  // step 33c: its TAIL SWEEP
         roarAttacks: [],                                            // step 33d: its ROAR (not `roars` - that is the old swoop/phase roar sound)
         bites: [],                                                  // step 33d2: a hatchling leaps
+        dances: [],                                                 // step F7a: the boss dances to a BOOGIE BOMB
         bossSpawn: null, bossDied: null, bossPhase: null, wave: null,
         missionHits: [], missionEnd: null, missionState: null      // step 24, see missions.js
     };

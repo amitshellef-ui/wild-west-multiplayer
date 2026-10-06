@@ -358,6 +358,9 @@ function stepBandit(room, b, players, now, dt, sink) {
         if (now < b.hatchAt) return;
         hatchEgg(b);
     }
+    /* step F7a: dancing to a BOOGIE BOMB - not a step, not a shot, until it is over (eggs never
+       dance: boogie.js leaves them out). It can still be shot: that is the point. */
+    if (b.danceUntil && now < b.danceUntil) { recordTrail(b); return; }
     if (b.kind === "hatch") { stepHatchling(room, b, players, now, dt, sink); return; }
 
     let near = nearestPlayer(room, players, b.x, b.z);

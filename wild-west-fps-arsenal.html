@@ -6656,7 +6656,7 @@ function showBossEnraged(bt, where, loud) {
    - it has no bone masks, so every clip is cut once into a lower half (legs and
      hips) and an upper half. The legs keep walking while the arms shoot.
    ========================================================================= */
-const MODEL_BASE_CDN = 'https://cdn.jsdelivr.net/gh/amitshellef-ui/wild-west-multiplayer@54dffb7b0e615dd48a474b50057991a609cc1d06/models/';   // step Fly: + dragon.glb whose Fly moves the whole body (step Strafe: cowboy StrafeL / StrafeR)
+const MODEL_BASE_CDN = 'https://cdn.jsdelivr.net/gh/amitshellef-ui/wild-west-multiplayer@0400433ee4f174cbd6fe4358212bd5dc42b25839/models/';   // step F7c: + the cowboy's Dance (step Fly: dragon Fly; step Strafe: cowboy StrafeL / StrafeR)
 const MODEL_BASE_LOCAL = '/models/';
 const MODEL_FORCE_CUBES = /[?&]cubes\b/.test(location.search);   // ?cubes = the old rig, for comparisons
 const MODEL_HITBOX_MUL = 1.2;                                       // the same margin the cube rig uses
@@ -7319,7 +7319,8 @@ const MODEL_DEATH_SPEED = 1.5;
 
 function rigDie(rig) {
     // (a ghost can die in the middle of turning up - step 31a)
-    if (!rig || rig.kind !== 'model' || (rig.full && rig.full !== 'Appear')) return;
+    // (and in the middle of a BOOGIE BOMB's Dance - step F7c)
+    if (!rig || rig.kind !== 'model' || (rig.full && rig.full !== 'Appear' && rig.full !== 'Dance')) return;
     rigFull(rig, 'Death', { speed: MODEL_DEATH_SPEED, fade: 0.15 });
 }
 
@@ -13208,8 +13209,9 @@ function resetGame() {
    7 m dances - no walking, no shooting - bandits 4 s, the boss 2.5 s, and they can
    be shot all the while. Online the room holds the balls (boogie.js): who has one,
    where it landed and who dances is the server's word; offline it is ours.
-   The dance itself is drawn in code - a hop and a twist on the beat - until the
-   models have a Dance clip of their own (step F7c).
+   The cowboy (every bandit and the six cowboy bosses) dances its own Dance clip, a disco
+   step-touch at the same 120 bpm (step F7c, 3D/cowboy/cowboy_dance.py); a model without one -
+   the skeleton, robot, ghost, dragon - gets a hop and a twist on the beat drawn in code.
    ========================================================================= */
 const BOOGIE_LOOK = {
     pickReach: 1.4,     // m - the server allows 1.8
@@ -13328,13 +13330,20 @@ function startDance(body, now, ms) {
    the frame (online: from the server's packets; offline: kept by updateBot, so from yaw0). */
 function danceStep(body, now, offline) {
     const m = body.mesh;
+    // step F7c: a model with a Dance clip of its own (the cowboy) dances it; the rest keep the hop below
+    const R = (body.rig && body.rig.model) || body.model;
     if (!(body.danceUntil > now)) {
         if (body.danceUntil) {                         // it is over: stand straight, face where it faced
             body.danceUntil = 0;
             m.rotation.z = 0;
             if (offline) m.rotation.y = body.danceYaw0;
+            if (R && R.full === 'Dance') rigStand(R, 0.25);
         }
         return false;
+    }
+    if (R && R.kind === 'model' && (R.full === 'Dance' || (!R.full && rigFull(R, 'Dance', { loop: true, fade: 0.2 })))) {
+        if (offline) m.rotation.y = body.danceYaw0;    // it dances where it stood, facing where it faced
+        return true;
     }
     const beat = (now - body.danceT0) / 1000 * BOOGIE_LOOK.bpm / 60 * Math.PI;   // half a turn of sin a beat
     const k = body.scale || (body.rig && body.rig.scale) || 1;

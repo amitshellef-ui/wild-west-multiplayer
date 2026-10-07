@@ -6657,7 +6657,7 @@ function showBossEnraged(bt, where, loud) {
    - it has no bone masks, so every clip is cut once into a lower half (legs and
      hips) and an upper half. The legs keep walking while the arms shoot.
    ========================================================================= */
-const MODEL_BASE_CDN = 'https://cdn.jsdelivr.net/gh/amitshellef-ui/wild-west-multiplayer@c1eda270debda932487341c77c76ea7f83845ddb/models/';   // step Walk: the cowboy's new Walk (F7c: Dance; Fly: dragon Fly; Strafe: StrafeL / StrafeR)
+const MODEL_BASE_CDN = 'https://cdn.jsdelivr.net/gh/amitshellef-ui/wild-west-multiplayer@9827a516860899855086666fd84750aa8902e9be/models/';   // ghost Dance (Walk: the cowboy's new Walk; F7c: cowboy Dance; Fly: dragon Fly; Strafe: StrafeL / StrafeR)
 const MODEL_BASE_LOCAL = '/models/';
 const MODEL_FORCE_CUBES = /[?&]cubes\b/.test(location.search);   // ?cubes = the old rig, for comparisons
 const MODEL_HITBOX_MUL = 1.2;                                       // the same margin the cube rig uses
@@ -13218,8 +13218,9 @@ function resetGame() {
    be shot all the while. Online the room holds the balls (boogie.js): who has one,
    where it landed and who dances is the server's word; offline it is ours.
    The cowboy (every bandit and the six cowboy bosses) dances its own Dance clip, a disco
-   step-touch at the same 120 bpm (step F7c, 3D/cowboy/cowboy_dance.py); a model without one -
-   the skeleton, robot, ghost, dragon - gets a hop and a twist on the beat drawn in code.
+   step-touch at the same 120 bpm (step F7c, 3D/cowboy/cowboy_dance.py), and so does the ghost
+   (in the air, 3D/ghost/ghost_dance.py); the dragon goes up instead (danceLift); a model without
+   one - the skeleton, the robot - gets a hop and a twist on the beat drawn in code.
    ========================================================================= */
 const BOOGIE_LOOK = {
     pickReach: 1.4,     // m - the server allows 1.8

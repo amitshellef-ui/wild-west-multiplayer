@@ -1943,6 +1943,7 @@ function initNetwork() {
     NET.socket.on('boss-dance', function (m) {
         if (!m || !netBoss.active || !netBoss.alive || !netBoss.mesh) return;
         startDance(netBoss, performance.now(), m.ms || BOOGIE_LOOK.bossMs);
+        netBoss.danceLift = !!(netBoss.type && netBoss.type.id === 'dragon');    // it goes up instead
     });
     NET.socket.on('player-reload', function (m) {
         if (!m || !m.id || typeof m.ms !== 'number') return;
@@ -13224,6 +13225,7 @@ const BOOGIE_LOOK = {
     pickReach: 1.4,     // m - the server allows 1.8
     throwSpeed: 18, throwUp: 4, gravity: 18,
     radius: 7, banditMs: 4000, bossMs: 2500,
+    dragonMs: 5000, liftTo: 6, upMs: 800, downMs: 700,     // the dragon goes up instead (boss.js liftOf: the same curve)
     fxMs: 4000,         // the lights and the music
     bpm: 120
 };
@@ -13325,7 +13327,9 @@ function boogieLanded(at) {
         if (!b.alive) return;
         const reach = BOOGIE_LOOK.radius + (b.isBoss ? 0.85 : 0);
         if (Math.hypot(b.mesh.position.x - at.x, b.mesh.position.z - at.z) > reach) return;
-        startDance(b, now, b.isBoss ? BOOGIE_LOOK.bossMs : BOOGIE_LOOK.banditMs);
+        const lift = b.isBoss && b.bossType && b.bossType.id === 'dragon';
+        startDance(b, now, lift ? BOOGIE_LOOK.dragonMs : b.isBoss ? BOOGIE_LOOK.bossMs : BOOGIE_LOOK.banditMs);
+        b.danceLift = lift;
     });
     boogieBoom(at.x, at.z);
 }
@@ -13344,9 +13348,19 @@ function danceStep(body, now, offline) {
             body.danceUntil = 0;
             m.rotation.z = 0;
             if (offline) m.rotation.y = body.danceYaw0;
-            if (R && R.full === 'Dance') rigStand(R, 0.25);
+            if (R && (R.full === 'Dance' || (body.danceLift && R.full === 'Hover'))) rigStand(R, 0.25);
+            body.danceLift = false;
         }
         return false;
+    }
+    // the dragon: up into the air and hanging there on its wings (Hover), then down
+    if (body.danceLift) {
+        const up = Math.min(1, (now - body.danceT0) / BOOGIE_LOOK.upMs);
+        const down = Math.min(1, Math.max(0, 1 - (body.danceUntil - now) / BOOGIE_LOOK.downMs));
+        m.position.y += BOOGIE_LOOK.liftTo * Math.min(up * (2 - up), 1 - down * down);
+        if (R && R.kind === 'model' && !R.full) rigFull(R, 'Hover', { loop: true, fade: 0.25 });
+        if (offline) m.rotation.y = body.danceYaw0;
+        return true;
     }
     if (R && R.kind === 'model' && (R.full === 'Dance' || (!R.full && rigFull(R, 'Dance', { loop: true, fade: 0.2 })))) {
         if (offline) m.rotation.y = body.danceYaw0;    // it dances where it stood, facing where it faced

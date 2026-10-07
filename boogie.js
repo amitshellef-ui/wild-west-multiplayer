@@ -20,7 +20,8 @@ const BOOGIE = {
     throwReach: 32,     // m - how far from the thrower it may land (an 18 m/s lob lands ~25 m off at most)
     radius: 7,          // m around where it lands
     banditMs: 4000,
-    bossMs: 2500
+    bossMs: 2500,
+    dragonMs: 5000      // the dragon does not dance: it goes up and hangs there (the user's call, 2026-10-07)
 };
 
 /* Ground a player can walk to and a bandit could stand on, away from the others. */
@@ -77,9 +78,10 @@ function land(room, p, x, z, now) {
     }
     const B = room.boss;
     if (B && B.alive && Math.hypot(B.x - x, B.z - z) <= BOOGIE.radius + (B.radius || 0.85)) {
-        B.danceWant = BOOGIE.bossMs;          // boss.js starts it the moment the boss is free (step F7a)
+        const ms = B.type && B.type.id === "dragon" ? BOOGIE.dragonMs : BOOGIE.bossMs;
+        B.danceWant = ms;                     // boss.js starts it the moment the boss is free (step F7a)
         B.danceAsk = now;
-        out.boss = BOOGIE.bossMs;
+        out.boss = ms;
     }
     return out;
 }

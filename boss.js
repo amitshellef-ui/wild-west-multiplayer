@@ -1316,9 +1316,16 @@ function emberTargets(room, players, b) {
 
 /* How high it is flying at `now` - 0 on the ground. The clients draw the same curve. */
 function liftOf(b, now) {
+    const t = now === undefined ? Date.now() : now;
+    /* a BOOGIE BOMB: the dragon does not dance, it goes up (step F7 dragon lift) - up as in a
+       takeoff, held at liftTo, down as in a landing at the end */
+    if (b && b.type && b.type.id === "dragon" && b.danceUntil && t < b.danceUntil && b.danceFrom) {
+        const up = Math.min(1, Math.max(0, (t - b.danceFrom) / DRAGON.takeoffMs));
+        const down = Math.min(1, Math.max(0, 1 - (b.danceUntil - t) / DRAGON.landMs));
+        return DRAGON.liftTo * Math.min(up * (2 - up), 1 - down * down);
+    }
     const s = b && b.ember;
     if (!s) return 0;
-    const t = now === undefined ? Date.now() : now;
     if (s.e === "takeoff") {
         const k = Math.min(1, Math.max(0, 1 - (s.until - t) / DRAGON.takeoffMs));
         return DRAGON.liftTo * k * (2 - k);
@@ -1763,6 +1770,7 @@ function stepBoss(room, b, players, now, dt, sink) {
         if (now - b.danceAsk > BOSS.danceWaitMs) b.danceWant = 0;
         else if (!busyWithAbility(b, now) && !(b.chargeUntil && now < b.chargeUntil) && b.gState !== "spin" && b.gState !== "fire") {
             b.danceUntil = now + b.danceWant;
+            b.danceFrom = now;                 // (the dragon's lift curve, liftOf)
             b.danceWant = 0;
             b.path = null;
             sink.dances.push({ ms: b.danceUntil - now });

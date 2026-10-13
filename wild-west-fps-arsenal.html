@@ -1812,6 +1812,7 @@ function initNetwork() {
     NET.socket.on('boss-shot', function (m) {
         if (!m || !m.o || !m.d) return;
         if (m.k === 'spectral') { onSpectralRound(m); return; }     // step 31b: not an ordinary round
+        if (m.k === 'ember') { onBurnRound(m); return; }            // step 34b: THE BURNING MAN's EMBER REVOLVERS
         const flashAt = new THREE.Vector3(m.o[0], m.o[1], m.o[2]);
         if (netBoss.rig && netBoss.rig.parts.muzzle) {
             // it is drawn slightly in the past, so the flash belongs on its gun
@@ -1878,6 +1879,7 @@ function initNetwork() {
     NET.socket.on('boss-scatter', onBossScatter);       // step 30c: BONE SCATTER
     NET.socket.on('boss-harvest', onBossHarvest);       // step 30d: BONE HARVEST
     NET.socket.on('boss-spectral', onBossSpectral);     // step 31b: the ghost's SPECTRAL SHOT
+    NET.socket.on('boss-burning', onBossBurning);       // step 34: THE BURNING MAN
     NET.socket.on('boss-grave', onBossGrave);           // step 31c: its GRAVE BURST
     NET.socket.on('boss-dash', onBossDash);             // step 31d: its GHOST DASH
     NET.socket.on('boss-ember', onBossEmber);           // step 33b: the dragon's EMBER RAIN
@@ -6598,6 +6600,16 @@ const BOSS_SKELETON = {
 /* The ghost's SPECTRAL SHOT (step 31b) and GRAVE BURST (step 31c) - GHOST in boss.js;
    online those are the ones that count. Single player has neither (its ghost only
    vanishes and fires). */
+/* step 34b: THE BURNING MAN's EMBER REVOLVERS - BURNING in boss.js; online those are the ones
+   that count (t9-tables checks the two are the same). Online only, like the other bosses' abilities. */
+const BOSS_BURNING = {
+    revolversFirstMs: 6000, revolversEveryMs: 9000, revolversRange: 35,
+    drawMs: 330, rounds: 12, roundEveryMs: 120, roundSpread: 0.105, holsterMs: 330,
+    emberDamage: 8, emberSpeed: 14, emberReach: 40, gunHeight: 2, gunSide: 0.38,
+    burnMs: 3000, burnDps: 8, burnTickMs: 250,
+    gapMs: 2500,
+    p2: { revolversEveryMs: 6000 }
+};
 const BOSS_GHOST = {
     spectralFirstMs: 5000, spectralEveryMs: 7000, spectralRange: 45,
     raiseMs: 250, flashMs: 600, lockMs: 250, lowerMs: 500,
@@ -8561,6 +8573,7 @@ function clearBanditBullets() {
     for (let i = 0; i < banditBullets.length; i++) scene.remove(banditBullets[i].mesh);
     banditBullets.length = 0;
     clearSpectralRounds();                 // step 31b
+    clearBurnRounds();                     // step 34b
 }
 
 function showBanditHealth(body) {
@@ -8723,6 +8736,7 @@ function destroyNetBoss() {
     emberClear(false);                                       // step 33b
     tailClear();                                             // step 33c
     roarClear();                                             // step 33d
+    burnClear();                                             // step 34b
     if (SCATTER.e || SCATTER.standAt || SCATTER.bones.length) scatterStep({ e: 'clear' });   // step 30c
     if (netBoss.mesh) {
         banditGroup.remove(netBoss.mesh);
@@ -8773,6 +8787,7 @@ function onBossState(m) {
         emberFromSnapshot(r);                // step 33b: the dragon's EMBER RAIN
         tailFromSnapshot(r);                 // step 33c: its TAIL SWEEP
         roarFromSnapshot(r);                 // step 33d: its ROAR
+        burnFromSnapshot(r);                 // step 34b: THE BURNING MAN's EMBER REVOLVERS
         netBoss.buf.push({ t: performance.now(), x: r[0], z: r[1], yaw: r[2] });
         if (netBoss.buf.length > 14) netBoss.buf.shift();
         netBoss.countdown = -1;
@@ -9367,6 +9382,7 @@ function startNetBossDeath() {
     emberClear(true);                                                                        // step 33b: shot down in the air, it falls
     tailClear();                                                                             // step 33c
     roarClear();                                                                             // step 33d
+    burnClear();                                                                             // step 34b
     if (DUEL.on || DUEL.standAt) duelEnd('clear');
     netBoss.alive = false;
     netBoss.deathT = 0;
@@ -9620,6 +9636,213 @@ function dropSpectralRound(R) {
 function clearSpectralRounds() {
     SPECTRAL.rounds.forEach(dropSpectralRound);
     SPECTRAL.rounds.length = 0;
+}
+
+/* =========================================================================
+   THE BURNING MAN - EMBER REVOLVERS (step 34b)
+   The server says when (boss-burning "ember": who, the draw, how many rounds and how
+   often), fires each round itself (boss-shot k "ember", g "R" / "L" - which gun) and
+   decides who burns ("burn": who, for how long). Here: EmberDraw -> EmberFire (a loop,
+   right and left in turn) -> EmberEnd, the rounds - slow orange embers that glow, stopped
+   by walls like any round - and the burning: for us an orange flicker round the edge of
+   the screen, for another player flames rising off them.
+   ========================================================================= */
+const BURN = { on: false, target: '', fireAt: 0, standAt: 0, lastAt: 0, told: false, rounds: [], meUntil: 0, hud: null, others: {}, sparkAt: 0 };
+const BURN_HEX = 0xff7a1a;
+const BURN_CLIPS = { EmberDraw: 1, EmberFire: 1, EmberEnd: 1 };
+const burnAt = new THREE.Vector3();
+
+function burnRig() {
+    return netBoss.rig && netBoss.rig.model && netBoss.rig.model.kind === 'model' && netBoss.type && netBoss.type.id === 'burning' ? netBoss.rig.model : null;
+}
+/* the tip of the gun that fired: its own bone in the model, else the boss's one muzzle */
+function burnMuzzle(side, out) {
+    const rig = burnRig();
+    const bone = rig && rig.bones && rig.bones[side === 'L' ? 'muzzleL' : 'muzzleR'];
+    if (bone) return bone.getWorldPosition(out);
+    if (netBoss.rig && netBoss.rig.parts.muzzle) return netBoss.rig.parts.muzzle.getWorldPosition(out);
+    return netBoss.mesh ? out.copy(netBoss.mesh.position).setY(BOSS_BURNING.gunHeight) : out.set(0, BOSS_BURNING.gunHeight, 0);
+}
+function burnGlowMap() {
+    if (burnGlowMap.tex) return burnGlowMap.tex;
+    const c = document.createElement('canvas');
+    c.width = c.height = 64;
+    const x = c.getContext('2d');
+    const g = x.createRadialGradient(32, 32, 1, 32, 32, 31);
+    g.addColorStop(0, 'rgba(255,250,220,1)');
+    g.addColorStop(0.25, 'rgba(255,190,80,0.95)');
+    g.addColorStop(0.6, 'rgba(255,100,20,0.45)');
+    g.addColorStop(1, 'rgba(200,40,0,0)');
+    x.fillStyle = g; x.fillRect(0, 0, 64, 64);
+    return (burnGlowMap.tex = new THREE.CanvasTexture(c));
+}
+const burnCoreGeo = new THREE.SphereGeometry(0.075, 8, 6);
+const burnCoreMat = new THREE.MeshBasicMaterial({ color: 0xffd27a });
+// made on first use, with its map in it from the start (a map added later leaves r128's sprite shader without one: a square)
+function burnGlowMat() {
+    return burnGlowMat.m || (burnGlowMat.m = new THREE.SpriteMaterial({ map: burnGlowMap(), color: 0xffffff, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+}
+function burnHud() {
+    if (BURN.hud) return BURN.hud;
+    const d = document.createElement('div');
+    d.id = 'burn-hud';
+    d.style.cssText = 'position:fixed;inset:0;z-index:30;pointer-events:none;display:none;' +
+        'background:radial-gradient(ellipse at center, rgba(255,120,20,0) 45%, rgba(255,110,10,0.35) 75%, rgba(200,40,0,0.7) 100%)';
+    document.body.appendChild(d);
+    return (BURN.hud = d);
+}
+function sfxBurnIgnite(pos) {
+    const d = chain(pos, 0.9, 30); if (!d) return;
+    noiseBurst(d, { type: 'lowpass', freq: 1400, sweepTo: 300, q: 0.7, dur: 0.45, vol: 0.5 });
+    tone(d, { type: 'sawtooth', f0: 90, f1: 55, dur: 0.3, vol: 0.12 });
+}
+function sfxEmberShot(pos) {
+    const d = chain(pos, 0.9, 70); if (!d) return;
+    tone(d, { type: 'square', f0: 220, f1: 70, dur: 0.12, vol: 0.22 });
+    noiseBurst(d, { type: 'bandpass', freq: 1800, sweepTo: 600, q: 1.2, dur: 0.16, vol: 0.4 });
+}
+
+function burnClear() {
+    const rig = burnRig();
+    // a whole-body clip would keep Death from playing (rigDie) - let go of it
+    if (rig && BURN_CLIPS[rig.full]) rig.full = null;
+    BURN.on = false; BURN.target = ''; BURN.fireAt = 0; BURN.standAt = 0; BURN.lastAt = 0;
+}
+
+function burnStep(m, late) {
+    const now = performance.now();
+    const rig = burnRig();
+    BURN.lastAt = now;
+    if (m.e === 'ember') {
+        BURN.on = true; BURN.target = m.p || '';
+        BURN.fireAt = now + (typeof m.ms === 'number' ? m.ms : BOSS_BURNING.drawMs);
+        BURN.standAt = 0;
+        if (rig) rigFull(rig, 'EmberDraw', { fade: 0.08 });
+        if (netBoss.mesh) sfxRevolver(netBoss.mesh.position);
+        if (!late && !BURN.told) {
+            BURN.told = true;
+            pushFeed('EMBER REVOLVERS \u2014 SLOW ROUNDS THAT SET YOU ALIGHT. STEP ASIDE OR TAKE COVER');
+        }
+    } else if (m.e === 'holster') {
+        BURN.on = false;
+        if (rig && BURN_CLIPS[rig.full]) rigFull(rig, 'EmberEnd', { fade: 0.06 });
+        BURN.standAt = now + (typeof m.ms === 'number' ? m.ms : BOSS_BURNING.holsterMs) + 40;
+    } else if (m.e === 'ember-done') {
+        BURN.on = false; BURN.target = '';
+        if (rig && BURN_CLIPS[rig.full] && !BURN.standAt) BURN.standAt = now + 30;
+    } else if (m.e === 'burn') {
+        const ms = typeof m.ms === 'number' ? m.ms : BOSS_BURNING.burnMs;
+        if (m.p === NET.id) {
+            if (BURN.meUntil < now) sfxBurnIgnite(camera.position);
+            BURN.meUntil = now + ms;
+        } else if (m.p) BURN.others[m.p] = now + ms;
+    }
+}
+
+function onBossBurning(m) {
+    if (!m || typeof m.e !== 'string') return;
+    if (m.e === 'burn') { burnStep(m, false); return; }      // the burning goes on even if the boss is gone
+    if (!netBoss.active || !netBoss.alive) return;
+    burnStep(m, false);
+}
+
+/* The snapshot's fields 8-10 with 31 in 8 (a latecomer, or a missed event) */
+function burnFromSnapshot(r) {
+    const rig = burnRig();
+    if (!rig) return;
+    const now = performance.now();
+    if (r[8] === 31) {
+        BURN.lastAt = now;
+        if (!BURN.on && typeof r[10] === 'number' && r[10] > 1) {
+            BURN.on = true; BURN.target = r[9] || ''; BURN.fireAt = now; BURN.standAt = 0;
+            rigFull(rig, 'EmberFire', { loop: true, fade: 0.1 });
+        }
+    } else if ((BURN.on || BURN_CLIPS[rig.full]) && now - BURN.lastAt > 1500 && !BURN.standAt) {
+        BURN.on = false; BURN.standAt = now;                   // the end never arrived: back on the feet
+    }
+}
+
+/* A round left (boss-shot, k "ember"): from the gun that fired, along the server's line. */
+function onBurnRound(m) {
+    const from = new THREE.Vector3(m.o[0], m.o[1], m.o[2]);
+    if (netBoss.active && netBoss.mesh) burnMuzzle(m.g, from);
+    const rig = burnRig();
+    if (rig && !BURN_CLIPS[rig.full]) rigFull(rig, 'EmberFire', { loop: true, fade: 0.05 });
+    BURN.on = true; BURN.lastAt = performance.now();
+    muzzleFlashAt(from, 2.6);
+    sfxEmberShot(from);
+    makeBurnRound(from, m.d);
+}
+function makeBurnRound(from, d) {
+    const g = new THREE.Group();
+    const core = new THREE.Mesh(burnCoreGeo, burnCoreMat);
+    const glow = new THREE.Sprite(burnGlowMat());
+    glow.scale.set(0.6, 0.6, 1);
+    core.raycast = function () { }; glow.raycast = function () { };
+    g.add(core); g.add(glow);
+    g.position.copy(from);
+    scene.add(g);
+    BURN.rounds.push({ g: g, dir: new THREE.Vector3(d[0], d[1], d[2]).normalize(), gone: 0, whizzed: false, spark: 0 });
+    if (BURN.rounds.length > 40) scene.remove(BURN.rounds.shift().g);
+}
+function clearBurnRounds() {
+    BURN.rounds.forEach(function (R) { scene.remove(R.g); });
+    BURN.rounds.length = 0;
+}
+
+function updateBurning(delta) {
+    const now = performance.now();
+    const rig = burnRig();
+    if (rig && BURN.on && rig.full === 'EmberDraw' && now >= BURN.fireAt) rigFull(rig, 'EmberFire', { loop: true, fade: 0.05 });
+    if (BURN.standAt && now >= BURN.standAt) {
+        BURN.standAt = 0;
+        if (rig && netBoss.alive && !BURN.on && BURN_CLIPS[rig.full]) rigStand(rig, 0.25);
+    }
+    /* the rounds: slow, glowing, a spark now and then; a wall or the ground ends them */
+    for (let i = BURN.rounds.length - 1; i >= 0; i--) {
+        const R = BURN.rounds[i];
+        const step = BOSS_BURNING.emberSpeed * delta;
+        const p = R.g.position;
+        const nx = p.x + R.dir.x * step, ny = p.y + R.dir.y * step, nz = p.z + R.dir.z * step;
+        let done = false;
+        if (ny <= 0.03) { spawnParticles(new THREE.Vector3(nx, 0.05, nz), BURN_HEX, 5, 1.6); done = true; }
+        else if (collidesAt(nx, nz, 0.08)) {
+            const q = new THREE.Vector3(nx, ny, nz);
+            spawnParticles(q, BURN_HEX, 8, 2.2);
+            sfxWoodHit(q);
+            done = true;
+        } else {
+            p.set(nx, ny, nz);
+            R.gone += step;
+            R.g.children[1].material.rotation = now * 0.01;
+            if ((R.spark += delta) > 0.09) { R.spark = 0; spawnParticles(p.clone(), 0xffa040, 1, 0.5); }
+            const dc = p.distanceTo(camera.position);
+            if (!R.whizzed && dc < 2.2) { R.whizzed = true; sfxRicochet(p); }
+            if (R.gone > BOSS_BURNING.emberReach || dc < 0.62) done = true;
+        }
+        if (done) { scene.remove(R.g); BURN.rounds.splice(i, 1); }
+    }
+    /* us, alight: the edge of the screen flickers orange */
+    const hud = BURN.hud || (BURN.meUntil > now ? burnHud() : null);
+    if (hud) {
+        if (BURN.meUntil > now && playerHealth > 0) {
+            hud.style.display = 'block';
+            hud.style.opacity = (0.55 + 0.35 * Math.sin(now * 0.025) * Math.sin(now * 0.011)).toFixed(2);
+        } else hud.style.display = 'none';
+    }
+    /* another player alight: flames rising off them */
+    if (now - BURN.sparkAt > 110) {
+        BURN.sparkAt = now;
+        for (const id in BURN.others) {
+            if (BURN.others[id] < now) { delete BURN.others[id]; continue; }
+            const body = remoteBodies[id];
+            if (body && body.mesh && body.mesh.visible) {
+                const q = body.mesh.position.clone();
+                q.y += 0.8 + Math.random() * 0.9; q.x += (Math.random() - 0.5) * 0.4; q.z += (Math.random() - 0.5) * 0.4;
+                spawnParticles(q, Math.random() < 0.5 ? BURN_HEX : 0xffc040, 2, 1.2);
+            }
+        }
+    }
 }
 
 function updateSpectral(delta) {
@@ -14375,6 +14598,7 @@ function animate() {
     updateScatter(delta);
     updateHarvest(delta);
     updateSpectral(delta);
+    updateBurning(delta);                // step 34b
     updateGrave(delta);
     updateDash(delta);
     updateEmber(delta);                  // step 33b

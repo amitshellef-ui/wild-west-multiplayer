@@ -1515,6 +1515,8 @@ setInterval(() => {
         for (let i = 0; i < sink.blinks.length; i++) io.to(code).emit("boss-blink", sink.blinks[i]);
         for (let i = 0; i < sink.roars.length; i++) io.to(code).emit("boss-roar", sink.roars[i]);
         for (let i = 0; i < sink.dances.length; i++) io.to(code).emit("boss-dance", sink.dances[i]);      // step F7a
+        // step 34: THE BURNING MAN - ember (the guns come out), burn (who is alight), holster, ember-done
+        for (let i = 0; i < sink.burning.length; i++) io.to(code).emit("boss-burning", sink.burning[i]);
         // step 30b: the skeleton's HIGH NOON - a mark, and how it ended (shot / lost)
         for (let i = 0; i < sink.duels.length; i++) io.to(code).emit("boss-duel", sink.duels[i]);
         // step 30c: its BONE SCATTER - collapse, gone, rise, strike, the blow, done

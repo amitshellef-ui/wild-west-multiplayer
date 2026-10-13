@@ -261,7 +261,8 @@ function stepBullets(room, players, dt, sink) {
                 sink.hits.push({
                     playerId: p.id,
                     damage: bl.dmg || BANDIT.bulletDamage,
-                    from: bl.from
+                    from: bl.from,
+                    burn: bl.burn ? 1 : 0          // step 34b: an EMBER round sets them alight (boss.js applyBurns)
                 });
                 struck = true;
                 break;

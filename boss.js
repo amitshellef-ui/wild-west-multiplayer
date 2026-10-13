@@ -26,8 +26,9 @@
      snipe     one accurate round from further than you can answer
      spray     a wall of lead, cheap per bullet
      burning   THE BURNING MAN (step 34a - took DYNAMITE DAISY's place, F8): a model of
-               its own with two revolvers; for now only its gun. Its abilities come
-               one step at a time (34b-34d, PLAN-BURNING.md). DYNAMITE DAISY's TNT
+               its own with two revolvers. EMBER REVOLVERS (34b): twelve slow glowing
+               rounds from both guns that set you alight - see BURNING. The rest come
+               one step at a time (34c-34d, PLAN-BURNING.md). DYNAMITE DAISY's TNT
                code below stays until the cowboy-skinned bosses all leave (end of F8)
      ghost     turns to mist, is gone for a second and comes out of the ground
                beside somebody at a run - GHOST DASH (step 31d, which took the
@@ -387,6 +388,28 @@ const PHASE2 = {
     cloudLife: 8
 };
 
+/* ---- THE BURNING MAN (step 34, F8 - PLAN-BURNING.md) -------------------------
+   EMBER REVOLVERS (step 34b). Every revolversEveryMs (the first revolversFirstMs after it
+   arrives; p2.revolversEveryMs in phase two) - when the nearest player is within
+   revolversRange and in sight - it stops and draws both guns (drawMs), then fires
+   `rounds` glowing rounds, one every roundEveryMs, right and left in turn, each a little
+   off the aim (roundSpread radians either way) at wherever that player is at the
+   moment it fires. They are slow (emberSpeed) - you can see them coming and step out
+   of the way, and a wall stops them like any round. Each that hits does emberDamage and
+   sets the player alight: burnDps for burnMs, counted every burnTickMs. Another hit
+   while burning starts the burnMs again; burns do not stack. A player who goes down
+   stops burning. Then the guns go back (holsterMs). All through it: planted, the
+   ordinary gun silent. b.revolvers = { e: draw / fire / holster, target, until, n }.
+   room.burns = { playerId: { until, next } }. */
+const BURNING = {
+    revolversFirstMs: 6000, revolversEveryMs: 9000, revolversRange: 35,
+    drawMs: 330, rounds: 12, roundEveryMs: 120, roundSpread: 0.105, holsterMs: 330,
+    emberDamage: 8, emberSpeed: 14, emberReach: 40, gunHeight: 2.0, gunSide: 0.38,
+    burnMs: 3000, burnDps: 8, burnTickMs: 250,
+    gapMs: 2500,
+    p2: { revolversEveryMs: 6000 }
+};
+
 /* Per-ability gunplay. Anything missing falls back to the first row. */
 const GUN = {
     skeleton: { shots: 1, spread: 0.02, perMetre: 0.0014, damage: 24, speed: 46 },
@@ -476,6 +499,7 @@ function spawnBoss(room, players, now) {
         emberAt: now + DRAGON.emberFirstMs,             // step 33b - read by the dragon only
         tailAt: now + DRAGON.tailFirstMs,               // step 33c - read by the dragon only
         roarAt: Infinity,                               // step 33d - set when the dragon turns (phase two)
+        revolversAt: now + BURNING.revolversFirstMs,    // step 34b - read by the burning man only
         chargeUntil: 0
     };
     room.bossAlive = true;
@@ -1590,12 +1614,99 @@ function tickRoar(room, b, players, now, sink) {
     }
 }
 
+/* ---- THE BURNING MAN's EMBER REVOLVERS (step 34b) ----------------------- */
+function revolversTarget(room, players, b) {
+    const near = nearestPlayer(room, players, b.x, b.z);
+    return near && near.dist <= BURNING.revolversRange && b.hasLos ? near.player : null;
+}
+
+function startRevolvers(b, p, now, sink) {
+    b.revolvers = { e: "draw", target: p.id, until: now + BURNING.drawMs, n: 0 };
+    sink.burning.push({ e: "ember", p: p.id, ms: BURNING.drawMs, n: BURNING.rounds, every: BURNING.roundEveryMs });
+}
+
+function endRevolvers(b, now, sink, off) {
+    b.revolvers = null;
+    b.lastShot = now + 400;                                     // a breath before the ordinary gun
+    sink.burning.push(off ? { e: "ember-done", off: 1 } : { e: "ember-done" });
+}
+
+/* draw -> a round every roundEveryMs, right and left in turn -> holster -> back to the fight */
+function tickRevolvers(room, b, players, now, sink) {
+    const r = b.revolvers;
+    if (r.e === "holster") { if (now >= r.until) endRevolvers(b, now, sink); return; }
+    if (now < r.until) return;
+    if (r.e === "draw") r.e = "fire";                           // r.until is now the first round's moment
+    let p = players[r.target];
+    if (!p || p.room !== room.code || !p.alive) {               // went down, died or left: the next nearest
+        p = revolversTarget(room, players, b);
+        if (!p) { r.e = "holster"; r.until = now + BURNING.holsterMs; sink.burning.push({ e: "holster", ms: BURNING.holsterMs }); return; }
+        r.target = p.id;
+    }
+    const side = r.n % 2 === 0 ? -1 : 1;                        // -1 the right gun (first), +1 the left
+    const lx = Math.cos(b.yaw), lz = -Math.sin(b.yaw);          // the boss's LEFT, turned with it (it faces (sin yaw, cos yaw))
+    const ox = b.x + lx * BURNING.gunSide * side, oy = BURNING.gunHeight, oz = b.z + lz * BURNING.gunSide * side;
+    const ty = typeof p.y === "number" ? p.y : 1.72;
+    let dx = p.x - ox, dy = ty - oy, dz = p.z - oz;
+    const turn = (Math.random() * 2 - 1) * BURNING.roundSpread;
+    const c = Math.cos(turn), s2 = Math.sin(turn);
+    const rx = dx * c - dz * s2, rz = dx * s2 + dz * c;
+    dx = rx; dz = rz;
+    const n = Math.hypot(dx, dy, dz) || 1;
+    dx /= n; dy /= n; dz /= n;
+    room.bullets.push({
+        x: ox, y: oy, z: oz, dx: dx, dy: dy, dz: dz, life: 0, from: -1,
+        dmg: BURNING.emberDamage, spd: BURNING.emberSpeed, maxLife: BURNING.emberReach / BURNING.emberSpeed, burn: 1
+    });
+    sink.bossShots.push({ k: "ember", o: [round2(ox), round2(oy), round2(oz)], d: [round3(dx), round3(dy), round3(dz)], g: side < 0 ? "R" : "L" });
+    r.n++;
+    if (r.n >= BURNING.rounds) { r.e = "holster"; r.until = now + BURNING.holsterMs; sink.burning.push({ e: "holster", ms: BURNING.holsterMs }); }
+    else r.until += BURNING.roundEveryMs;                       // on a clock of its own: 120 ms apart on average, on 50 ms ticks
+}
+
+/* Who an ember round reached this tick catches fire (bandits.js marks the hit `burn`),
+   and whoever is alight takes burnDps, a burnTickMs slice at a time, until it runs out. */
+function applyBurns(room, players, now, sink) {
+    const burns = room.burns || (room.burns = {});
+    for (let i = 0; i < sink.hits.length; i++) {
+        const h = sink.hits[i];
+        if (!h.burn) continue;
+        const was = burns[h.playerId];
+        burns[h.playerId] = { until: now + BURNING.burnMs, next: was ? was.next : now + BURNING.burnTickMs };
+        sink.burning.push({ e: "burn", p: h.playerId, ms: BURNING.burnMs });
+    }
+    for (const id in burns) {
+        const p = players[id], f = burns[id];
+        if (!p || p.room !== room.code || !p.alive) { delete burns[id]; continue; }
+        while (f.next <= now && f.next <= f.until) {
+            sink.hits.push({ playerId: id, damage: BURNING.burnDps * BURNING.burnTickMs / 1000, from: "boss" });
+            f.next += BURNING.burnTickMs;
+        }
+        if (now >= f.until) delete burns[id];
+    }
+}
+
 /* ---- Abilities ---------------------------------------------------------- */
 function tickAbility(room, b, players, near, now, dt, sink) {
     const id = b.type.id;
 
     if (id === "robot") { tickRobot(room, b, players, near, now, dt, sink); return; }
     if (id === "skeleton") { tickSkeleton(room, b, players, near, now, dt, sink); return; }
+
+    /* step 34: THE BURNING MAN - one ability at a time, gapMs between them */
+    if (id === "burning") {
+        if (b.revolvers) { tickRevolvers(room, b, players, now, sink); return; }
+        if (now >= b.revolversAt) {
+            const p = revolversTarget(room, players, b);
+            if (p) {
+                b.revolversAt = now + (b.phase === 2 ? BURNING.p2.revolversEveryMs : BURNING.revolversEveryMs);
+                startRevolvers(b, p, now, sink);
+                return;
+            }
+            b.revolversAt = now + 1000;                         // nobody near enough in sight - look again in a second
+        }
+        return;
+    }
 
     /* The dragon's swoop (step 28): the charge, with its own numbers. It rides
        on chargeUntil so the walking stands aside and the clients see the flag. */
@@ -1715,7 +1826,7 @@ function tickAbility(room, b, players, near, now, dt, sink) {
    Shared by the walking below and the BOOGIE BOMB's dance (step F7a). */
 function busyWithAbility(b, now) {
     return !!b.duel || !!(b.staggerUntil && now < b.staggerUntil) || !!b.scatter || !!b.harvest || !!b.spectral ||
-        !!b.grave || !!b.dash || !!b.ember || !!b.tail || !!b.roar;
+        !!b.grave || !!b.dash || !!b.ember || !!b.tail || !!b.roar || !!b.revolvers;
 }
 
 /* ---- The boss itself ---------------------------------------------------- */
@@ -1956,6 +2067,11 @@ function stepBoss(room, b, players, now, dt, sink) {
         else if (b.grave.x !== undefined) { faceX = b.grave.x; faceZ = b.grave.z; }
     }
     else if (b.tail) { /* step 33c: crouched, then spinning (the clients turn it): the yaw stays put */ }
+    else if (b.revolvers) {
+        // step 34b: the guns follow whoever they are for
+        const who = players[b.revolvers.target];
+        if (who) { faceX = who.x; faceZ = who.z; }
+    }
     else if (b.dash) {
         /* step 31d: it turns on its target only while it is coming out. Once the
            charge starts the yaw is the locked direction and nothing moves it, and
@@ -2001,6 +2117,7 @@ function stepRoom(room, players, now, dt, sink) {
 
     if (room.boss && room.boss.alive) stepBoss(room, room.boss, players, now, dt, sink);
     stepHazards(room, players, dt, sink);
+    applyBurns(room, players, now, sink);                       // step 34b: after the bullets of this tick
     return sink;
 }
 
@@ -2019,6 +2136,7 @@ function emptySink() {
         roarAttacks: [],                                            // step 33d: its ROAR (not `roars` - that is the old swoop/phase roar sound)
         bites: [],                                                  // step 33d2: a hatchling leaps
         dances: [],                                                 // step F7a: the boss dances to a BOOGIE BOMB
+        burning: [],                                                // step 34: THE BURNING MAN (ember / burn / holster / ember-done)
         bossSpawn: null, bossDied: null, bossPhase: null, wave: null,
         missionHits: [], missionEnd: null, missionState: null      // step 24, see missions.js
     };
@@ -2078,6 +2196,9 @@ function snapshot(room, now) {
     else if (b.tail) snap.push(TAIL_CODE[b.tail.e], "", Math.max(0, Math.round(b.tail.until - t)), b.tail.dir);
     /* step 33d: the ROAR - 28 swelling, 29 roaring, 30 laying eggs (step 33d2) (ms left in that part) */
     else if (b.roar) snap.push(ROAR_CODE[b.roar.e], "", Math.max(0, Math.round(b.roar.until - t)));
+    /* step 34b: THE BURNING MAN's EMBER REVOLVERS - 31 while the guns are out (who they are for,
+       rounds still to come). Its codes are 31-39. */
+    else if (b.revolvers) snap.push(31, b.revolvers.target, b.revolvers.e === "holster" ? 0 : BURNING.rounds - b.revolvers.n);
     return snap;
 }
 
@@ -2112,6 +2233,6 @@ function clearBoss(room) {
 }
 
 module.exports = {
-    BOSS, BOSS_TYPES, PHASE2, ROBOT, DRAGON, SKELETON, GHOST, GUN, initRoom, stepRoom, snapshot, hurt,
+    BOSS, BOSS_TYPES, PHASE2, ROBOT, DRAGON, SKELETON, GHOST, BURNING, GUN, initRoom, stepRoom, snapshot, hurt,
     secondsToBoss, clearBoss, emptySink, duelHeadshot, liftOf
 };

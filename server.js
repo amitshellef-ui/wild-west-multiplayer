@@ -1269,7 +1269,12 @@ function registerHandlers(socket) {
 
         const typeIndex = b.typeIndex;
         const healthBefore = b.health;
-        const res = boss.hurt(room, body * w.body + head * w.head, now);
+        /* step 34d: `legs` (optional, how many of the body hits were on the legs) - left out of what breaks
+           THE BURNING MAN's COAT ERUPTION, "shoot it in the chest". Missing or bad: 0 (all of it counts). */
+        let legs = typeof m.legs === "number" ? strictCount(m.legs, w.pellets) : 0;
+        if (legs < 0) legs = 0;
+        legs = Math.min(legs, body);
+        const res = boss.hurt(room, body * w.body + head * w.head, now, (body - legs) * w.body + head * w.head);
         /* What the shot actually took off, not what it was worth - the last
            shot on a boss with 20 left counts 20, not 96. */
         if (res) {

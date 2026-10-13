@@ -214,6 +214,41 @@ function blockedAt(ax, az, bx, bz) {
     return -1;
 }
 
+/* Step 34e: THE BURNING MAN's EMBER rounds burn through low wooden cover. The cover is the map's
+   low, small boxes (fences, crates, barrels: under coverMaxH high, under coverMaxArea m2) - one
+   list, made once from the colliders. An ember round that a piece of cover stops counts against
+   it; once it has taken coverHits of them it is burnt through, and ember rounds after that go
+   through it (it stays where it is, charred and burning - nobody walks or sees through it, and it
+   still stops every other round). room.charred = { colliderIndex: hits }, until the burning man
+   dies. Decided without the user (2026-10-13, PLAN-BURNING section 8, option 2). */
+const { COLLIDERS } = require("./map-data");
+const EMBER_COVER = { coverHits: 2, coverMaxH: 2.2, coverMaxArea: 4 };
+const COVER = [];
+COLLIDERS.forEach((c, i) => {
+    const w = c[3] - c[0], d = c[5] - c[2], h = c[4] - c[1];
+    if (h < EMBER_COVER.coverMaxH && w * d < EMBER_COVER.coverMaxArea) COVER.push(i);
+});
+function coverAt(x, z) {
+    for (let k = 0; k < COVER.length; k++) {
+        const c = COLLIDERS[COVER[k]];
+        if (x >= c[0] - 0.12 && x <= c[3] + 0.12 && z >= c[2] - 0.12 && z <= c[5] + 0.12) return COVER[k];
+    }
+    return -1;
+}
+/* blockedAt for an ember round: burnt-through cover does not stop it; says which cover stopped it */
+function blockedAtEmber(room, ax, az, bx, bz) {
+    const dist = Math.hypot(bx - ax, bz - az);
+    const steps = Math.max(1, Math.ceil(dist / 0.5));
+    for (let i = 1; i <= steps; i++) {
+        const t = i / steps, x = ax + (bx - ax) * t, z = az + (bz - az) * t;
+        if (!nav.collidesAt(x, z, 0.08)) continue;
+        const k = coverAt(x, z);
+        if (k >= 0 && room.charred && room.charred[k] >= EMBER_COVER.coverHits) continue;
+        return { t: t, k: k };
+    }
+    return null;
+}
+
 /* Step 24: did a round that just hit a wall hit the bank's wall? */
 function inBank(box, x, y, z) {
     const pad = 0.15;
@@ -242,7 +277,18 @@ function stepBullets(room, players, dt, sink) {
         /* step 31b: the ghost's SPECTRAL SHOT (`thru`) goes through the town - no wall
            stops it, so it never hits the bank's wall either - and is gone after
            `maxLife` seconds instead of the usual road. */
-        const wallAt = bl.thru ? -1 : blockedAt(bl.x, bl.z, nx, nz);
+        let wallAt;
+        if (bl.burn) {
+            // step 34e: an EMBER round - burnt-through cover lets it by, and cover it hits is charred
+            const hb = blockedAtEmber(room, bl.x, bl.z, nx, nz);
+            wallAt = hb ? hb.t : -1;
+            if (hb && hb.k >= 0) {
+                const ch = room.charred || (room.charred = {});
+                ch[hb.k] = (ch[hb.k] || 0) + 1;
+                const c = COLLIDERS[hb.k];
+                if (sink.burning) sink.burning.push({ e: "char", c: hb.k, n: ch[hb.k], b: [c[0], c[2], c[3], c[5], c[4]].map(round2) });
+            }
+        } else wallAt = bl.thru ? -1 : blockedAt(bl.x, bl.z, nx, nz);
         if (wallAt >= 0) {
             if (m && m.box && sink.missionHits) {
                 const hx = bl.x + (nx - bl.x) * wallAt, hy = bl.y + (ny - bl.y) * wallAt, hz = bl.z + (nz - bl.z) * wallAt;
@@ -928,5 +974,6 @@ function hurt(room, banditId, amount) {
 module.exports = {
     BANDIT, TICK_MS, initRoom, stepRoom, snapshot, hurt, aliveCount, banditList, fillTo,
     recordTrail, TRAIL_LENGTH, applyWave, summon, regularCount,
-    BROOD, layEggs, eggsFor, broodCount                              // step 33d2
+    BROOD, layEggs, eggsFor, broodCount,                             // step 33d2
+    EMBER_COVER, COVER, coverAt                                      // step 34e
 };

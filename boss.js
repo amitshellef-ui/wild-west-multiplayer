@@ -2377,23 +2377,27 @@ function snapshot(room, now) {
         b.erupt.e === "charge" ? Math.ceil(Math.max(0, b.erupt.need - b.erupt.dealt)) : "", Math.max(0, Math.round(b.erupt.until - t)));
     /* and the patches still burning, once a second (field 11: [[x, z, ms left], ...]), so somebody who
        walked in sees the fire that hurts - fields 8-10 are 0, "", 0 when it is doing nothing else */
-    if (room.fires && room.fires.length && b.type.id === "burning") {
+    const charred = room.charred && Object.keys(room.charred);
+    if (b.type.id === "burning" && ((room.fires && room.fires.length) || (charred && charred.length))) {
         room.fireSnap = (room.fireSnap || 0) + 1;
         if (room.fireSnap % 10 === 1) {
             if (snap.length === 8) snap.push(0, "", 0);
-            snap[11] = room.fires.map((f) => [round2(f.x), round2(f.z), Math.max(0, Math.round(f.until - t))]);
+            snap[11] = (room.fires || []).map((f) => [round2(f.x), round2(f.z), Math.max(0, Math.round(f.until - t))]);
+            /* step 34e: and the cover its embers have hit (field 12: [[collider, hits], ...]) */
+            if (charred && charred.length) snap[12] = charred.map((k) => [+k, room.charred[k]]);
         }
     }
     return snap;
 }
 
-function hurt(room, amount, now) {
+/* `charged` (step 34d): what of `amount` counts towards breaking a COAT ERUPTION - not the legs. Left out: all of it. */
+function hurt(room, amount, now, charged) {
     const b = room.boss;
     if (!b || !b.alive) return null;
     const t = now === undefined ? Date.now() : now;
     if (b.scatter && b.scatter.e === "gone") return null;       // step 30c: there is nothing there to hit
     if (b.dash && b.dash.e === "gone") return null;             // step 31d: nor while the ghost is mist
-    if (b.erupt && b.erupt.e === "charge") b.erupt.dealt += amount;           // step 34d: towards breaking it
+    if (b.erupt && b.erupt.e === "charge") b.erupt.dealt += (typeof charged === "number" ? charged : amount);   // step 34d: towards breaking it
     else if (b.erupt && b.erupt.e === "kneel") amount *= BURNING.kneelScale;  // step 34d: on its knees, every hit twice
     b.health -= amount;
     if (b.health <= 0) {
@@ -2402,6 +2406,7 @@ function hurt(room, amount, now) {
         room.bossAlive = false;
         room.boss = null;                       // the slot is free for the next one
         room.fires = [];                        // step 34c: its fire goes out with it
+        room.charred = {};                      // step 34e: and the cover it burnt is cover again
         room.nextBossAt = t + BOSS.nextBossMs;
         return { killed: true, boss: b };
     }

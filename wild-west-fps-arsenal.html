@@ -1168,20 +1168,22 @@ function registerBanditHit(id, headshot) {
 /* The boss is one target, so it needs no id - but it needs its own tally, or a
    shotgun that caught the boss and a bandit with the same pull would have its
    pellets counted twice by a server that only allows eight. */
-const netBossHits = { body: 0, head: 0 };
+const netBossHits = { body: 0, head: 0, legs: 0 };
 
-function registerBossHit(headshot) {
-    if (headshot) netBossHits.head++; else netBossHits.body++;
+/* step 34d: `legs` - how many of the body hits were on a box marked legs (the burning man's): the server
+   leaves those out of what breaks a COAT ERUPTION. Sent only when there are some. */
+function registerBossHit(headshot, legs) {
+    if (headshot) netBossHits.head++; else { netBossHits.body++; if (legs) netBossHits.legs++; }
 }
 
 function sendBossHits() {
     if (netBossHits.body === 0 && netBossHits.head === 0) return;
     if (NET.connected && NET.socket) {
-        NET.socket.emit('boss-hit', {
-            w: currentWpn, body: netBossHits.body, head: netBossHits.head
-        });
+        const m = { w: currentWpn, body: netBossHits.body, head: netBossHits.head };
+        if (netBossHits.legs) m.legs = netBossHits.legs;
+        NET.socket.emit('boss-hit', m);
     }
-    netBossHits.body = 0; netBossHits.head = 0;
+    netBossHits.body = 0; netBossHits.head = 0; netBossHits.legs = 0;
 }
 
 function sendBanditHits() {
@@ -6894,7 +6896,7 @@ const MODEL_SPECS = {
         steps: { Walk: [0, 16 / 24], Run: [0, 8 / 24] },
         shoot: { from: 7 / 24, to: 12 / 24, hold: 0.45, fadeIn: 0.1, fadeOut: 0.3 },
         hit: [
-            { bone: 'hips', center: [0, 0.50, 0.03], size: [0.60, 1.00, 0.40] },      // legs, boots and the inner coat
+            { bone: 'hips', center: [0, 0.50, 0.03], size: [0.60, 1.00, 0.40], legs: true },   // legs, boots and the inner coat (step 34d: `legs` - not counted towards breaking its COAT ERUPTION)
             { bone: 'spine', center: [0, 1.23, 0.04], size: [0.52, 0.50, 0.36] },
             { bone: 'head', center: [0, 1.74, 0.06], size: [0.26, 0.32, 0.30], head: true }   // skull and hat crown, not the brim
         ],
@@ -7090,6 +7092,7 @@ function createModelRig(key, isBoss, bt) {
         box.quaternion.copy(boneQ).invert();       // (the bone already carries the boss scale)
         box.visible = false;
         if (h.head) box.userData.head = true;
+        if (h.legs) box.userData.legs = true;      // step 34d
         bones[h.bone].add(box);
         hitboxes.push(box);
     });
@@ -9672,6 +9675,11 @@ const BURN = { on: false, target: '', fireAt: 0, standAt: 0, lastAt: 0, told: fa
 const BURN_HEX = 0xff7a1a;
 const BURN_CLIPS = { EmberDraw: 1, EmberFire: 1, EmberEnd: 1, WildfireStart: 1, EruptCharge: 1, EruptBlast: 1, KneelDrop: 1, Kneel: 1, KneelUp: 1 };
 const EMBER_GUN_CLIPS = { EmberDraw: 1, EmberFire: 1, EmberEnd: 1 };      // the revolvers' - a missed end stands only these
+/* step 34e: low wooden cover its EMBER rounds have hit (bandits.js EMBER_COVER: 2 hits burn through) -
+   charred after one, burning after two, and from then on ember rounds go through it (the server's too).
+   The server names it by its index in the colliders (the same list on both sides - mapFingerprint). */
+const CHAR = {};             // collider index -> { n, g, flames, top }
+const CHAR_HITS = 2;
 /* step 34d: COAT ERUPTION - charge (the coat goes white, the world dull for whoever is near, a ring
    on the ground at the blast's reach, how much it still takes to break it), then the blast, or on
    its knees taking double, then up */
@@ -9845,6 +9853,51 @@ function eruptStep(m, late) {
     }
 }
 
+function charBox(k) {
+    const c = colliders[k];
+    return c ? { x0: c.min.x, z0: c.min.z, x1: c.max.x, z1: c.max.z, h: c.max.y } : null;
+}
+function charCover(k, n) {
+    const B = charBox(k);
+    if (!B) return;
+    let C = CHAR[k];
+    if (!C) {
+        const w = B.x1 - B.x0, d = B.z1 - B.z0;
+        const g = new THREE.Group();
+        const shell = new THREE.Mesh(new THREE.BoxGeometry(w + 0.05, B.h + 0.02, d + 0.05),
+            new THREE.MeshBasicMaterial({ color: 0x120804, transparent: true, opacity: 0.5, depthWrite: false }));
+        shell.position.set((B.x0 + B.x1) / 2, B.h / 2, (B.z0 + B.z1) / 2);
+        shell.raycast = function () { };
+        g.add(shell);
+        scene.add(g);
+        C = CHAR[k] = { n: 0, g: g, flames: [], cx: (B.x0 + B.x1) / 2, cz: (B.z0 + B.z1) / 2, w: w, d: d, h: B.h, smoke: 0 };
+    }
+    if (n <= C.n) return;
+    C.n = n;
+    spawnParticles(new THREE.Vector3(C.cx, C.h * 0.7, C.cz), BURN_HEX, 10, 2.5);
+    if (n >= CHAR_HITS && !C.flames.length) {
+        for (let i = 0; i < 3; i++) {
+            const sp = new THREE.Sprite(burnGlowMat());
+            sp.raycast = function () { };
+            sp.position.set(C.cx + (i - 1) * C.w * 0.3, C.h + 0.25, C.cz + (i - 1) * C.d * 0.3);
+            C.g.add(sp); C.flames.push({ sp: sp, ph: Math.random() * 6 });
+        }
+        if (netBoss.mesh) sfxBurnIgnite(new THREE.Vector3(C.cx, 1, C.cz));
+    }
+}
+function clearCharred() {
+    for (const k in CHAR) { scene.remove(CHAR[k].g); CHAR[k].g.children.forEach(function (o) { if (o.geometry && !o.isSprite) { o.geometry.dispose(); o.material.dispose(); } }); delete CHAR[k]; }
+}
+/* is this point inside cover that ember rounds now go through? */
+function charredThrough(x, z) {
+    for (const k in CHAR) {
+        const C = CHAR[k];
+        if (C.n < CHAR_HITS) continue;
+        if (Math.abs(x - C.cx) <= C.w / 2 + 0.12 && Math.abs(z - C.cz) <= C.d / 2 + 0.12) return true;
+    }
+    return false;
+}
+
 function burnHud() {
     if (BURN.hud) return BURN.hud;
     const d = document.createElement('div');
@@ -9873,6 +9926,7 @@ function burnClear() {
     BURN.on = false; BURN.target = ''; BURN.fireAt = 0; BURN.standAt = 0; BURN.lastAt = 0;
     BURN.wildUntil = 0; BURN.wildStandAt = 0;
     clearFireSpots();                      // step 34c: the server puts its fire out when it dies
+    clearCharred();                        // step 34e: and its burnt cover is cover again
 }
 
 function burnStep(m, late) {
@@ -9907,6 +9961,8 @@ function burnStep(m, late) {
             BURN.wildTold = true;
             pushFeed('WILDFIRE WALK — IT LEAVES FIRE BEHIND IT. LEAD IT WHERE YOU DO NOT NEED THE GROUND');
         }
+    } else if (m.e === 'char') {
+        if (typeof m.c === 'number' && typeof m.n === 'number') charCover(m.c, m.n);      // step 34e
     } else if (m.e === 'spot') {
         if (m.p) makeFireSpot(m.p[0], m.p[1], m.r || BOSS_BURNING.spotRadius, typeof m.g === 'number' ? m.g : BOSS_BURNING.spotGrowMs, typeof m.ms === 'number' ? m.ms : BOSS_BURNING.spotLifeMs);
     } else if (m.e === 'wild-done') {
@@ -9956,6 +10012,9 @@ function burnFromSnapshot(r) {
     if ((r[8] === 33 || r[8] === 34) && typeof r[10] === 'number') {
         if (!BURN.wildUntil) BURN.wildUntil = now + r[10] + (r[8] === 33 ? BOSS_BURNING.wildMs : 0);
     } else if (BURN.wildUntil && now > BURN.wildUntil + 1500) BURN.wildUntil = 0;
+    if (Array.isArray(r[12])) {                  // step 34e: the cover its embers have hit [[collider, hits], ...]
+        r[12].forEach(function (c) { if (Array.isArray(c) && c.length >= 2) charCover(c[0], c[1]); });
+    }
     if (Array.isArray(r[11])) {
         r[11].forEach(function (f) {
             if (!Array.isArray(f) || f.length < 3) return;
@@ -10009,7 +10068,7 @@ function updateBurning(delta) {
         const nx = p.x + R.dir.x * step, ny = p.y + R.dir.y * step, nz = p.z + R.dir.z * step;
         let done = false;
         if (ny <= 0.03) { spawnParticles(new THREE.Vector3(nx, 0.05, nz), BURN_HEX, 5, 1.6); done = true; }
-        else if (collidesAt(nx, nz, 0.08)) {
+        else if (collidesAt(nx, nz, 0.08) && !charredThrough(nx, nz)) {      // step 34e: burnt-through cover lets it by
             const q = new THREE.Vector3(nx, ny, nz);
             spawnParticles(q, BURN_HEX, 8, 2.2);
             sfxWoodHit(q);
@@ -10049,6 +10108,15 @@ function updateBurning(delta) {
         ERUPT.standAt = 0;
         if (ERUPT.e === 'blast' || ERUPT.e === 'up' || !ERUPT.e) { if (ERUPT.e !== 'up') ERUPT.e = ''; }
         if (rig && netBoss.alive && BURN_CLIPS[rig.full] && (rig.full === 'EruptBlast' || rig.full === 'KneelUp' || !ERUPT.e)) rigStand(rig, 0.25);
+    }
+    /* step 34e: burnt cover - its flames flicker, sparks off it now and then */
+    for (const k in CHAR) {
+        const C = CHAR[k];
+        for (let i = 0; i < C.flames.length; i++) {
+            const F = C.flames[i], fl = 0.75 + 0.35 * Math.sin(now * 0.012 + F.ph) * Math.sin(now * 0.006 + F.ph * 2);
+            F.sp.scale.set(0.7 * fl, 1.1 * fl, 1);
+        }
+        if (C.flames.length && (C.smoke += delta) > 0.25) { C.smoke = 0; spawnParticles(new THREE.Vector3(C.cx, C.h + 0.3, C.cz), Math.random() < 0.5 ? BURN_HEX : 0x553322, 1, 1.0); }
     }
     /* step 34c: back on its feet after the flare; flames off its coat while it walks the fire */
     if (BURN.wildStandAt && now >= BURN.wildStandAt) {
@@ -14081,7 +14149,7 @@ function fireOneRay(spread, dmgBody, dmgHead, range) {
             sfxHitMarker();
             sfxFleshHit(h.point);
             spawnParticles(h.point, head ? 0xff5050 : 0xc03a2a, head ? 18 : 11, 3.5);
-            registerBossHit(head);
+            registerBossHit(head, !head && !!h.object.userData.legs);
             spawnTracer(muzzleWorld, end, 0xffe8a0, 0.06);
             netShotEnds.push(end.x, end.y, end.z);
             return;

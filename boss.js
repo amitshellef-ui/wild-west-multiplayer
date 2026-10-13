@@ -25,7 +25,10 @@
                (step 27 - see ROBOT)
      snipe     one accurate round from further than you can answer
      spray     a wall of lead, cheap per bullet
-     dynamite  lobs a stick that lands where you were
+     burning   THE BURNING MAN (step 34a - took DYNAMITE DAISY's place, F8): a model of
+               its own with two revolvers; for now only its gun. Its abilities come
+               one step at a time (34b-34d, PLAN-BURNING.md). DYNAMITE DAISY's TNT
+               code below stays until the cowboy-skinned bosses all leave (end of F8)
      ghost     turns to mist, is gone for a second and comes out of the ground
                beside somebody at a run - GHOST DASH (step 31d, which took the
                old VANISH's place); every few seconds raises its gun in both
@@ -61,7 +64,9 @@ const BOSS_TYPES = [
     { id: "robot", name: "TIN-STAR MARSHAL", ability: "GATLING ARM", hp: 1400, fireDelay: 90, speed: 2.4, radius: 0.95 },
     { id: "snipe", name: "WIDOW-MAKER SAL", ability: "LONGSHOT", hp: 750, fireDelay: 2100, speed: 2.6 },
     { id: "spray", name: "MACHINE-GUN MURPHY", ability: "LEAD STORM", hp: 1000, fireDelay: 120, speed: 3.0 },
-    { id: "dynamite", name: "DYNAMITE DAISY", ability: "TNT TOSS", hp: 850, fireDelay: 1600, speed: 3.2 },
+    // step 34a (F8) - THE BURNING MAN in DYNAMITE DAISY's place: a model of its own, two revolvers
+    // fired one at a time (GUN.burning). Its abilities come in 34b-34d.
+    { id: "burning", name: "THE BURNING MAN", ability: "COAT ERUPTION", hp: 1000, fireDelay: 1200, speed: 3.0 },
     { id: "ghost", name: "GHOST-WALKER COLE", ability: "GHOST DASH", hp: 800, fireDelay: 900, speed: 4.0 },
     { id: "slam", name: "THUNDER-HOOF BART", ability: "EARTHQUAKE", hp: 1300, fireDelay: 1400, speed: 2.8 },
     { id: "poison", name: "POISON-DOC REED", ability: "TOXIC CLOUD", hp: 880, fireDelay: 1300, speed: 3.0 },
@@ -357,7 +362,7 @@ const GHOST = {
      charge    charges back to back
      snipe     calls three bandits to her and backs off to 18 metres
      spray     every 3 seconds, a ring of 12 rounds in every direction
-     dynamite  three sticks in a fan
+     burning   only the common part for now (fires a third faster) - step 34
      ghost     two GHOST DASHes back to back, and a SPECTRAL SHOT every 5 seconds (GHOST.p2)
      slam      a wider, more frequent quake
      poison    two bottles a throw, and the cloud lingers for 8 seconds
@@ -392,6 +397,7 @@ const GUN = {
     ghost: { shots: 1, spread: 0.022, perMetre: 0.0016, damage: 15, speed: 42 },
     slam: { shots: 1, spread: 0.022, perMetre: 0.0016, damage: 18, speed: 42 },
     dynamite: { shots: 0 },
+    burning: { shots: 1, spread: 0.022, perMetre: 0.0016, damage: 14, speed: 42 },      // step 34a
     poison: { shots: 0 },
     dragon: { shots: 0 }
 };

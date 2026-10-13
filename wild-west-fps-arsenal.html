@@ -6491,7 +6491,8 @@ const BOSS_TYPES = [
     { id: 'robot', name: 'TIN-STAR MARSHAL', ability: 'GATLING ARM', hp: 1400, fireDelay: 90, speed: 2.4, radius: 0.95, shirt: 0x5a5e66, pants: 0x3a3d44, hat: 0x2a2c30, coat: 0x6a6e78, eye: 0x33ffee },
     { id: 'snipe', name: 'WIDOW-MAKER SAL', ability: 'LONGSHOT', hp: 750, fireDelay: 2100, speed: 2.6, shirt: 0x243018, pants: 0x1a2214, hat: 0x101408, coat: 0x2a3820, eye: 0x66ff88 },
     { id: 'spray', name: 'MACHINE-GUN MURPHY', ability: 'LEAD STORM', hp: 1000, fireDelay: 120, speed: 3.0, shirt: 0x3a3a48, pants: 0x222228, hat: 0x18181c, coat: 0x404050, eye: 0x88ccff },
-    { id: 'dynamite', name: 'DYNAMITE DAISY', ability: 'TNT TOSS', hp: 850, fireDelay: 1600, speed: 3.2, shirt: 0x6a1820, pants: 0x2a1418, hat: 0x3a1014, coat: 0x5a2028, eye: 0xff3344 },
+    // step 34a (F8): THE BURNING MAN in DYNAMITE DAISY's place - a model of its own (BOSS_LOOKS); these colours are for the cube rig if it cannot load
+    { id: 'burning', name: 'THE BURNING MAN', ability: 'COAT ERUPTION', hp: 1000, fireDelay: 1200, speed: 3.0, shirt: 0x2a1a12, pants: 0x1e1610, hat: 0x1a120c, coat: 0x5a2a12, eye: 0xff7a1a },
     { id: 'ghost', name: 'GHOST-WALKER COLE', ability: 'GHOST DASH', hp: 800, fireDelay: 900, speed: 4.0, shirt: 0x2a2a38, pants: 0x1a1a28, hat: 0x101018, coat: 0x3a3a50, eye: 0xccaaff },
     { id: 'slam', name: 'THUNDER-HOOF BART', ability: 'EARTHQUAKE', hp: 1300, fireDelay: 1400, speed: 2.8, shirt: 0x4a3818, pants: 0x2a2210, hat: 0x201808, coat: 0x5a4820, eye: 0xffaa33 },
     { id: 'poison', name: 'POISON-DOC REED', ability: 'TOXIC CLOUD', hp: 880, fireDelay: 1300, speed: 3.0, shirt: 0x184a28, pants: 0x102818, hat: 0x0c2010, coat: 0x205830, eye: 0x44ff66 },
@@ -6517,6 +6518,7 @@ const BOSS_PHASE2_TEXT = {
     snipe: 'ENRAGED \u00b7 CALLED FOR BACKUP',
     spray: 'ENRAGED \u00b7 RING OF LEAD',
     dynamite: 'ENRAGED \u00b7 TRIPLE TNT',
+    burning: 'ENRAGED \u00b7 FASTER GUNS',        // step 34a - becomes WILDFIRE with step 34c
     ghost: 'ENRAGED \u00b7 RESTLESS SPIRIT',
     slam: 'ENRAGED \u00b7 AFTERSHOCKS',
     poison: 'ENRAGED \u00b7 DOUBLE DOSE',
@@ -6657,7 +6659,7 @@ function showBossEnraged(bt, where, loud) {
    - it has no bone masks, so every clip is cut once into a lower half (legs and
      hips) and an upper half. The legs keep walking while the arms shoot.
    ========================================================================= */
-const MODEL_BASE_CDN = 'https://cdn.jsdelivr.net/gh/amitshellef-ui/wild-west-multiplayer@0aaeb42e9e6b62129a749fd61f875db12adc77a9/models/';   // robot Dance (skeleton Dance; ghost Dance; Walk: the cowboy's new Walk; F7c: cowboy Dance; Fly: dragon Fly; Strafe: StrafeL / StrafeR)
+const MODEL_BASE_CDN = 'https://cdn.jsdelivr.net/gh/amitshellef-ui/wild-west-multiplayer@d35c24f07ee2ecc7271e5544eff300d84ff50e40/models/';   // step 34a: burning.glb (robot Dance; skeleton Dance; ghost Dance; Walk: the cowboy's new Walk; F7c: cowboy Dance; Fly: dragon Fly; Strafe: StrafeL / StrafeR)
 const MODEL_BASE_LOCAL = '/models/';
 const MODEL_FORCE_CUBES = /[?&]cubes\b/.test(location.search);   // ?cubes = the old rig, for comparisons
 const MODEL_HITBOX_MUL = 1.2;                                       // the same margin the cube rig uses
@@ -6845,6 +6847,27 @@ const MODEL_SPECS = {
         ],
         muzzle: { bone: 'muzzle', pos: [0, 0, 0] },
         noShadow: true          // a ghost casts none
+    },
+    /* Boss 6 (step 34a, F8), THE BURNING MAN, worn at x1.45 (models/README.md). A cowboy's legs and
+       the skeleton's gait (3D/burning/burning_anims.py uses the same step lengths and frames, so the
+       skeleton's measured vWalk / vRun and footfalls hold). Two revolvers holstered on the thighs:
+       Shoot draws the RIGHT one (0-7), fires on frame 8 and holsters again (18-30) - the left one
+       comes out only for its abilities (34b). muzzleR is the tip of the right barrel. The boxes were
+       measured from the file in the rest pose by the bone that owns each vertex: legs (and the inner
+       coat) on the hips, the torso up to where the head box starts (1.55 after MODEL_HITBOX_MUL), the
+       skull with the hat's crown - not the brim. The coat bones (coat*) are lower body (MODEL_LOWER). */
+    burning: {
+        file: 'burning.glb',
+        vWalk: 0.625, vRun: 2.335,
+        gait: { idle: 0.3, runUp: 2.6, runDown: 2.2, walkTs: [0.6, 2.2], runTs: [0.6, 2.2] },
+        steps: { Walk: [0, 16 / 24], Run: [0, 8 / 24] },
+        shoot: { from: 7 / 24, to: 12 / 24, hold: 0.45, fadeIn: 0.1, fadeOut: 0.3 },
+        hit: [
+            { bone: 'hips', center: [0, 0.50, 0.03], size: [0.60, 1.00, 0.40] },      // legs, boots and the inner coat
+            { bone: 'spine', center: [0, 1.23, 0.04], size: [0.52, 0.50, 0.36] },
+            { bone: 'head', center: [0, 1.74, 0.06], size: [0.26, 0.32, 0.30], head: true }   // skull and hat crown, not the brim
+        ],
+        muzzle: { bone: 'muzzleR', pos: [0, 0, 0] }
     }
     /* A new model is one more entry here. What it can carry:
          file              the .glb in models/ (uploaded; pin MODEL_BASE_CDN to the new commit)
@@ -6888,6 +6911,8 @@ const BOSS_LOOKS = {
     robot:{ model: 'robot', scale: 1.5, tint: 0 },       // step 27: head at ~2.6m, the server's eye line 2.83
     snipe: {}, spray: {},
     dynamite: {}, slam: {}, poison: {},
+    // step 34a: glowMap keeps the painted embers (coat, hands, eyes, the face's lava cracks) in their own colours
+    burning: { model: 'burning', scale: 1.45, tint: 0, glow: 0.06, glowMap: 1.0 },   // head at ~2.75m, like the ghost
     ghost: { model: 'ghost', scale: 1.45, tint: 0, glow: 0.06, glowMap: 1.0 },   // step 31a: head at ~2.8m
     // step 33a: glowMap keeps the painted amber eyes in their own colours. Without it the eye
     // material takes the boss eye colour at 0.08 like the body, and the eyes go dark and tinted.
@@ -11820,6 +11845,7 @@ function botShoot(bot, dist) {
 
     let dmg = bot.isBoss ? 15 : 10;
     if (ability === 'skeleton') { dmg = 24; spread = 0.02 + dist * 0.0014; }     // GUN.skeleton in boss.js
+    if (ability === 'burning') dmg = 14;                                          // GUN.burning in boss.js (step 34a)
     if (ability === 'snipe') dmg = 32;
     if (ability === 'spray') dmg = 8;
     if (ability === 'slam') dmg = 18;
@@ -13217,10 +13243,10 @@ function resetGame() {
    7 m dances - no walking, no shooting - bandits 4 s, the boss 2.5 s, and they can
    be shot all the while. Online the room holds the balls (boogie.js): who has one,
    where it landed and who dances is the server's word; offline it is ours.
-   The cowboy (every bandit and the six cowboy bosses) dances its own Dance clip, a disco
+   The cowboy (every bandit and the five cowboy bosses) dances its own Dance clip, a disco
    step-touch at the same 120 bpm (step F7c, 3D/cowboy/cowboy_dance.py), and so does the ghost
    (in the air, 3D/ghost/ghost_dance.py), and so does the skeleton (the cowboy's step-touch, gun
-   holstered, 3D/skeleton/skeleton_dance.py) and the robot ("the Robot": a snap into a new pose
+   holstered, 3D/skeleton/skeleton_dance.py; the burning man dances the same one) and the robot ("the Robot": a snap into a new pose
    on every beat, 3D/robot/robot_dance.py); the dragon goes up instead (danceLift); a model
    without one gets a hop and a twist on the beat drawn in code.
    ========================================================================= */

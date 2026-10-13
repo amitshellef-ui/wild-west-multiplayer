@@ -3,8 +3,14 @@
 מסמך זה נכתב כדי שאפשר יהיה להמשיך את הפרויקט בצ'אט חדש בלי לאבד הקשר.
 **העלה אותו בתחילת השיחה הבאה.**
 
-**בקצרה — מה חשוב לדעת עכשיו (עודכן 2026-09-25, אחרי סקירת הקוד):**
-- **קבצים שעולים:** ה-HTML, 7 קבצי השרת (`server.js`, `boss.js`, `bandits.js`, `navigation.js`, `waves.js`, `missions.js`, `map-data.js`), `package.json`, `package-lock.json`, `models/`, ו-`HANDOFF.md`. לא עולים: `tests/`, `backup-step*/`, `PLAN-*.md`.
+**איפה אנחנו (עודכן 2026-10-07):** הכול עלה ואומת בשרת החי — commit `0eb2a57`. אין שום דבר שממתין להעלאה
+(חוץ מהמסמך הזה). מה נוסף מאז 2026-09-29: תוכנית החברים F1–F7, קבצי מגה סיטי (MC0), ריקוד לקאובוי ולרוח,
+הליכה חדשה לקאובוי, והדרקון שעולה לאוויר בבוגי בום — סעיף 9א. הגיבוי הנוכחי: `backup-stepGhostDance/`.
+מה הלאה: ריקוד לשלד ולרובוט (בלנדר, עם המשתמש), F8 (רשימת הבוסים החדשים — מהמשתמש), מגה סיטי MC1.
+
+**בקצרה — מה חשוב לדעת עכשיו (עודכן 2026-09-25, אחרי סקירת הקוד; רשימת הקבצים עודכנה 2026-10-07):**
+- **קבצים שעולים:** ה-HTML, 9 קבצי השרת (`server.js`, `boss.js`, `bandits.js`, `boogie.js`, `navigation.js`, `waves.js`, `missions.js`, `map-data.js`, `game-tables.js` — האחרון נקרא גם על ידי הדף), `package.json`, `package-lock.json`, `models/`, `maps/mega/` (עוד לא בשימוש), ו-`HANDOFF.md`. לא עולים: `tests/`, `backup-step*/`, `upload-queue/`, `PLAN-*.md`.
+- **מודלים:** הדף טוען אותם מ-jsDelivr לפי commit קבוע (`MODEL_BASE_CDN`). מודל שהשתנה = שני סבבים: קודם `models/`, ואז ה-HTML עם הכתובת החדשה.
 - **גרסאות:** נעולות ב-`package-lock.json` (express 5.2.1, socket.io 4.8.4 — מה ש-Render מתקין). שינוי גרסה = שלב בפני עצמו.
 - **המפה:** טביעה `4080abb0-902`. כל שינוי שמזיז קיר = `map-data.js` מיוצא מחדש מלקוח רץ, באותו קומיט עם ה-HTML. השער: `node tests/map-audit/replay/sim.js`.
 - **בדיקות:** `node tests/run-all.js` (מסנכרן את העותקים ב-`tests/`, השער, וכל הבדיקות; קוד יציאה 0 = הכול עבר). `tests/README.md` מפרט.
@@ -692,7 +698,7 @@ hash של המיקום (אותה נקודה = אותה גבשושית, בלי ס
 ### 21 — שלב 2 לבוסים
 מתחת ל-30% חיים, פעם אחת: אש ×0.75 זמן, מהירות ×1.15, זוהר אדום, פס פועם,
 ובנוסף לכל אחד: burst 5 כדורים (הוסר בשלב 30א — בוס 1 הוא השלד) · charge כל 2.8 שנ' · snipe מזמינה 3 בנדיטים
-ומתרחקת ל-18 מ' · spray טבעת 12 כדורים כל 3 שנ' · dynamite 3 מקלות במניפה ·
+ומתרחקת ל-18 מ' · spray טבעת 12 כדורים כל 3 שנ' · dynamite 3 מקלות במניפה (יצאה בשלב 34א — במקומה burning, רק החלק המשותף) ·
 ghost שתי הסתערויות Ghost Dash ברצף ו-Spectral Shot כל 5 שנ' (שלב 31ד; אופליין — נעלם כל 2.2 שנ') ·
 slam רדיוס 9 כל 3.2 שנ' · poison 2 בקבוקים וענן 8 שנ'.
 `PHASE2` ב-`boss.js`, `BOSS_PHASE2` ב-HTML (אותם מספרים, נבדק אוטומטית).
@@ -1326,6 +1332,67 @@ Spectral לתחילת Grave ולהפך). הקפיצה נשפטת עם המספר
 | `boss-roar-attack` `e: "roar"` | שרת → חדר | +1250ms | `{e, ms: 958, hit: [ids], safe: [ids], daze: 2000}` — `hit` = עד 45 מ' עם קו פתוח על הקרקע (`nav.losClear`) → טשטוש ורעד אצלו; `safe` = עד 45 מ' מאחורי משהו. בלי נזק |
 | `boss-roar-attack` `e: "done"` | שרת → חדר | +958ms | `{e}` |
 | `boss` | שרת → חדר | כמו תמיד | `[..., 28/29, "", ms שנשארו בחלק]` (מתנפח / שואג) — 11 שדות |
+
+---
+
+## 9א. תוכנית החברים F1–F7, MC0, ריקודים והליכה (2026-10-06 – 2026-10-07, הכול עלה ואומת)
+
+התוכנית: `PLAN-FRIENDS.md` (סעיף 3 — ההחלטות שהתקבלו בלי לשאול, ואיפה משנים כל מספר).
+סבבי ההעלאה ושמירת הטביעות: `upload-queue/` (תיעוד בלבד, לא עולה). בדיקות חיות: `tests/live-crowd.js`,
+`live-level.js`, `live-shield.js`, `live-bounce.js`, `live-boogie.js`.
+
+| שלב | מה | קבצים |
+|---|---|---|
+| F1 | בוסי קאובוי פי 1.35 (ראש 2.56 מ') — לא חותכים את הסוככים | html |
+| F2 | טעינה שהתחילה ממחסנית ריקה לא מתבטלת בקליק | html |
+| F3 | טעינה = מחסנית שלמה בסוף, זמן לכל נשק (`reload` בשורת `ARSENAL`); ביטול = לא נכנס כלום; אצל האחרים שני קליקים (`RELOAD_OUT`/`RELOAD_IN`) | html |
+| F4 | `addReserve(i, n)` — כל פרס עד `reserveMax`; קיל = מחסנית לכל נשק פתוח | html |
+| F5א | `CROWD` ב-`waves.js` — תקרה ×0.5/0.65/0.8/1 וחזרה ×1.6/1.35/1.15/1 לפי `room.humans` (נספר כל טיק ב-`waves.stepRoom`, בלי away); בנדיט שמת מעל התקרה `retired` ולא חוזר | waves.js, bandits.js |
+| F5ב | `LEVELS` ב-`waves.js` (easy/normal/hard) — מכפיל חיים/קצב ירי/פיזור ב-`difficultyFor`; `create-room {level}`, `room-joined.level` | waves.js, server.js, html |
+| F6א | המגן = נשק 7 (אינדקס 6) ב-`game-tables.js` (70/70, 40 מ', 600ms); `SHIELD` בדף (זריקה, פגיעה ראשונה, חזרה); `shotTargets()` משותף ל-`fireOneRay`; נפתח בבוס 7, בוס 6 = תחמושת, DEAD-EYE מבוס 8 | game-tables.js, html |
+| F6ב | קפיצות: `bounces: 3`, `bounceReach: 12` בטבלה; `bandit-hit {w: 6, targets: [1], from, n}` נשפט ב-`shieldBounce` מהבנדיט הקודם (`nav.shotClear`, 3 שנ' לכל השרשרת) | game-tables.js, server.js, html |
+| F7א | `boogie.js` (חדש): 3 על הקרקע בכל משחק, `boogie-pick`/`boogie-throw`; בנדיטים `danceUntil` (4 שנ'), בוס `danceWant` → `stepBoss` מתחיל כשהוא לא באמצע יכולת (`busyWithAbility`, עד `BOSS.danceWaitMs`) | boogie.js, bandits.js, boss.js, server.js |
+| F7ב | הדף: כדור דיסקו על הרצפה, G זורק (קשת), `danceStep` (קפיצה וסיבוב בקוד — אין קליפ Dance עדיין), אורות על הקרקע בלי אורות אמיתיים, `sfxDisco` | html |
+| MC0 | `maps/mega/` — העיר, התיבה, ונתוני המפה כ-UMD (`window.MEGA_MAP` / `module.exports`), נכתבים רק ע"י `city_gen.py` (`export_data`) | maps/mega/* (חדשים) |
+| F7ג | קליפ `Dance` לקאובוי (`3D/cowboy/cowboy_dance.py`, 48 פריימים = 4 פעמות ב-120 bpm); `danceStep` מנגן `Dance` כשיש למודל, אחרת הקפיצה בקוד; `rigDie` מותר באמצע `Dance` | models/cowboy.glb, html |
+| Walk | הליכת הקאובוי נבנתה מחדש (`3D/cowboy/cowboy_walk.py`): נקודת המגע זזה ב-1.08 מ'/ש' קבוע; `vWalk` 1.58 → 1.08, `gait` משלו (walkTs עד 2.2, Run מעל 2.4×scale), צעדים בפריימים 8/24 | models/cowboy.glb, html |
+| דרקון | בבוגי בום הדרקון לא רוקד — עולה ל-6 מ' ל-5 שנ' (`BOOGIE.dragonMs`, `liftOf` בשרת = אותה עקומה בדף, `danceLift` + קליפ `Hover`), אפשר לירות בו | boss.js, boogie.js, html |
+| רוח | קליפ `Dance` לרוח (`3D/ghost/ghost_dance.py`): ריקוד באוויר, הקנה לשמיים / לרוחב הגוף | models/ghost.glb, html |
+
+**ריקוד לכל מודל:** קאובוי ורוח — קליפ; דרקון — עולה לאוויר; שלד ורובוט — עדיין הקפיצה בקוד.
+
+**פרוטוקול חדש:**
+
+| אירוע | כיוון | מתי | תוכן |
+|---|---|---|---|
+| `create-room` | דף → שרת | יצירת חדר | `{level}` נוסף — `easy`/`normal`/`hard`; לא מוכר = normal |
+| `room-joined` / `room-restarted` | שרת → דף | כניסה / משחק חדש | `level` (רק joined), `boogie: [[id, x, z, holder]]` |
+| `bandit-hit` (מגן, קפיצה) | דף → שרת | המגן פגע בבנדיט הבא | `{w: 6, targets: [{id, body: 1, head: 0}], from: id קודם, n: 1..3}` — בלי cooldown |
+| `shoot` עם `w: 6` | דף → חדר | המגן הגיע לסוף הדרך | `{w: 6, o, e: [נקודה]}` — האחרים מציירים מגן עף ושב |
+| `boogie-pick` | דף → שרת | עומד על כדור (עד 1.4 מ', השרת מקבל 1.8) | `{id}` — אחד ביד בכל פעם |
+| `boogie-throw` | דף → שרת | הכדור נחת | `{x, z}` — עד 32 מ' מהזורק |
+| `boogie` | שרת → חדר | לקיחה / זריקה / מישהו יצא עם כדור | `{items: [[id, x, z, holder]], by?}` |
+| `boogie-boom` | שרת → חדר | נחת | `{by, x, z, b: [ids רוקדים], boss: ms או 0, ms: 4000, r: 7}` |
+| `boss-dance` | שרת → חדר | הבוס התחיל לרקוד | `{ms}` |
+
+**בדיקות חדשות:** t55-crowd, t56-level, t57-shield, t58-boogie, t59-megadata (בתוך `run-all.js`; `sync.js` מעתיק גם את `boogie.js`).
+
+---
+
+## 9ב. F8 — הבוסים החדשים (מ-2026-10-08)
+
+**הוחלט:** שלושת הבוסים של `NEW MODELS` — איש הלהבות, הקברן, איש הסוס — נכנסים למשחק, ואחרי ששלושתם בפנים
+**כל בוסי סקין הקאובוי יוצאים** (charge, snipe, spray, slam, poison, ו-dynamite שכבר יצאה). נשארים 7: השלד,
+הרובוט, הרוח, שלושת החדשים והדרקון. הסדר הסופי ייקבע בסוף F8. היכולות — מהמסמכים של המשתמש ב-Downloads
+(`איש הלהבות.docx`). כל בוס = תוכנית משלו (`PLAN-BURNING.md` וכו', לא עולות לריפו).
+
+**34א — THE BURNING MAN על בוס 6 (במקום DYNAMITE DAISY):** id חדש `burning` (1000 חיים, ירייה כל 1.2 שנ',
+מהירות 3.0, `GUN.burning` 14 נזק), תווית יכולת "COAT ERUPTION" (היכולת עצמה ב-34ד), שלב 2 = רק החלק המשותף
+("ENRAGED · FASTER GUNS" עד 34ג). מודל `models/burning.glb` (3.77MB, 16 קליפים, 28 עצמות, שני אקדחים
+`gunL`/`gunR` + `muzzleL`/`muzzleR`), `MODEL_SPECS.burning` + `BOSS_LOOKS.burning` (×1.45, glowMap). קוד ה-TNT
+של dynamite **נשאר רדום** ב-`boss.js` ובדף (ייצא בניקוי של סוף F8). `t29-phase2`: בדיקת dynamite הוחלפה בבדיקת
+burning. בדיקת דפדפן: `tests/run34.js` (פורט 3334, צד `BURN_PORT`: `/near`, `/p2`, `/hp1`). השרת (`server.js`)
+לא השתנה.
 
 ---
 

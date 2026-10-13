@@ -28,8 +28,9 @@
      burning   THE BURNING MAN (step 34a - took DYNAMITE DAISY's place, F8): a model of
                its own with two revolvers. EMBER REVOLVERS (34b): twelve slow glowing
                rounds from both guns that set you alight; WILDFIRE WALK (34c): it leaves
-               fire on the ground behind it - see BURNING. COAT ERUPTION comes in 34d
-               (PLAN-BURNING.md). DYNAMITE DAISY's TNT
+               fire on the ground behind it; COAT ERUPTION (34d): it charges and blows up
+               round itself - unless somebody puts enough into it first, and then it is
+               on its knees, taking double - see BURNING. DYNAMITE DAISY's TNT
                code below stays until the cowboy-skinned bosses all leave (end of F8)
      ghost     turns to mist, is gone for a second and comes out of the ground
                beside somebody at a run - GHOST DASH (step 31d, which took the
@@ -364,7 +365,8 @@ const GHOST = {
      charge    charges back to back
      snipe     calls three bandits to her and backs off to 18 metres
      spray     every 3 seconds, a ring of 12 rounds in every direction
-     burning   WILDFIRE: the fire walk lasts longer (p2.wildMs), the revolvers come every 6 s (BURNING.p2)
+     burning   WILDFIRE: the fire walk lasts longer (p2.wildMs), the revolvers come every 6 s, and it
+               takes more to break its eruption (BURNING.p2)
      ghost     two GHOST DASHes back to back, and a SPECTRAL SHOT every 5 seconds (GHOST.p2)
      slam      a wider, more frequent quake
      poison    two bottles a throw, and the cloud lingers for 8 seconds
@@ -412,7 +414,17 @@ const PHASE2 = {
    jump clears it (feet above spotClear) - takes spotDps, a burnTickMs slice at a time,
    however many patches they stand in. It shrinks the ground you can fight on: lead it
    where you do not mind losing. b.wild = { e: flare / walk, until, lx, lz };
-   room.fires = [{ x, z, from, until }], room.fireTick = { playerId: next }. */
+   room.fires = [{ x, z, from, until }], room.fireTick = { playerId: next }.
+
+   COAT ERUPTION (step 34d). Every eruptEveryMs (the first eruptFirstMs after it arrives),
+   when somebody is within eruptTrigger: it plants its feet, spreads its arms and the coat
+   starts to glow white (chargeMs). Everybody within muffleRadius hears the world go dull.
+   Then it blows: blastDamage to everybody within blastRadius - walls do not help, only
+   distance does (blastMs to stand again). Unless they break it first: breakAt of damage
+   to it during the charge (all of it, from everybody; p2.breakAt in phase two) and the
+   coat goes dark, it drops to its knees for kneelMs - and every hit on it then counts
+   kneelScale times - and gets up (upMs). b.erupt = { e: charge / blast / kneel / up, until,
+   dealt, need, sent }. */
 const BURNING = {
     revolversFirstMs: 6000, revolversEveryMs: 9000, revolversRange: 35,
     drawMs: 330, rounds: 12, roundEveryMs: 120, roundSpread: 0.105, holsterMs: 330,
@@ -421,8 +433,11 @@ const BURNING = {
     // step 34c - WILDFIRE WALK
     wildFirstMs: 12000, wildEveryMs: 16000, wildRange: 30, flareMs: 600, wildMs: 8000, wildSpeedScale: 1.1,
     spotEvery: 1.2, spotRadius: 1.0, spotGrowMs: 200, spotLifeMs: 6000, spotDps: 10, spotMax: 30, spotClear: 0.3,
+    // step 34d - COAT ERUPTION
+    eruptFirstMs: 15000, eruptEveryMs: 22000, eruptTrigger: 14, chargeMs: 2500, blastRadius: 10, blastDamage: 60,
+    blastMs: 500, breakAt: 150, kneelMs: 4000, kneelScale: 2, upMs: 1000, muffleRadius: 30,
     gapMs: 2500,
-    p2: { revolversEveryMs: 6000, wildMs: 11000 }
+    p2: { revolversEveryMs: 6000, wildMs: 11000, breakAt: 200 }
 };
 
 /* Per-ability gunplay. Anything missing falls back to the first row. */
@@ -516,6 +531,7 @@ function spawnBoss(room, players, now) {
         roarAt: Infinity,                               // step 33d - set when the dragon turns (phase two)
         revolversAt: now + BURNING.revolversFirstMs,    // step 34b - read by the burning man only
         wildAt: now + BURNING.wildFirstMs,              // step 34c - read by the burning man only
+        eruptAt: now + BURNING.eruptFirstMs,            // step 34d - read by the burning man only
         chargeUntil: 0
     };
     room.bossAlive = true;
@@ -1645,6 +1661,7 @@ function endRevolvers(b, now, sink, off) {
     b.revolvers = null;
     b.lastShot = now + 400;                                     // a breath before the ordinary gun
     b.wildAt = Math.max(b.wildAt || 0, now + BURNING.gapMs);    // step 34c: never back to back
+    b.eruptAt = Math.max(b.eruptAt || 0, now + BURNING.gapMs);  // step 34d: nor the eruption
     sink.burning.push(off ? { e: "ember-done", off: 1 } : { e: "ember-done" });
 }
 
@@ -1736,6 +1753,7 @@ function tickWild(room, b, now, sink) {
     if (now < w.until) return;
     b.wild = null;
     b.revolversAt = Math.max(b.revolversAt, now + BURNING.gapMs);     // never back to back
+    b.eruptAt = Math.max(b.eruptAt, now + BURNING.gapMs);             // step 34d
     sink.burning.push({ e: "wild-done" });
 }
 
@@ -1765,6 +1783,55 @@ function stepFires(room, players, now, sink) {
     }
 }
 
+/* ---- THE BURNING MAN's COAT ERUPTION (step 34d) ------------------------- */
+function eruptDue(room, players, b) {
+    const near = nearestPlayer(room, players, b.x, b.z);
+    return !!(near && near.dist <= BURNING.eruptTrigger);
+}
+
+function startErupt(b, now, sink) {
+    const need = b.phase === 2 ? BURNING.p2.breakAt : BURNING.breakAt;
+    b.erupt = { e: "charge", until: now + BURNING.chargeMs, dealt: 0, need: need, sent: need };
+    sink.burning.push({ e: "erupt", ms: BURNING.chargeMs, need: need, r: BURNING.blastRadius, m: BURNING.muffleRadius });
+}
+
+function endErupt(b, now, sink) {
+    b.erupt = null;
+    b.lastShot = now + 400;
+    b.revolversAt = Math.max(b.revolversAt, now + BURNING.gapMs);     // never back to back
+    b.wildAt = Math.max(b.wildAt, now + BURNING.gapMs);
+    sink.burning.push({ e: "erupt-done" });
+}
+
+/* charge (counting the damage) -> blast, or -> kneel (broken) -> up -> back to the fight */
+function tickErupt(room, b, players, now, sink) {
+    const r = b.erupt;
+    if (r.e === "charge") {
+        const left = Math.max(0, r.need - r.dealt);
+        if (left !== r.sent) { r.sent = left; sink.burning.push({ e: "left", n: Math.ceil(left) }); }
+        if (left <= 0) {
+            r.e = "kneel"; r.until = now + BURNING.kneelMs;
+            sink.burning.push({ e: "broken", ms: BURNING.kneelMs, x: BURNING.kneelScale });
+            return;
+        }
+        if (now < r.until) return;
+        const hit = [];
+        for (const id in players) {
+            const p = players[id];
+            if (p.room !== room.code || !p.alive) continue;
+            if (Math.hypot(p.x - b.x, p.z - b.z) > BURNING.blastRadius) continue;      // walls do not help
+            hit.push(p.id);
+            sink.hits.push({ playerId: p.id, damage: BURNING.blastDamage, from: "boss" });
+        }
+        r.e = "blast"; r.until = now + BURNING.blastMs;
+        sink.burning.push({ e: "blast", p: [round2(b.x), round2(b.z)], r: BURNING.blastRadius, hit: hit });
+        return;
+    }
+    if (now < r.until) return;
+    if (r.e === "kneel") { r.e = "up"; r.until = now + BURNING.upMs; sink.burning.push({ e: "up", ms: BURNING.upMs }); return; }
+    endErupt(b, now, sink);
+}
+
 /* ---- Abilities ---------------------------------------------------------- */
 function tickAbility(room, b, players, near, now, dt, sink) {
     const id = b.type.id;
@@ -1776,6 +1843,15 @@ function tickAbility(room, b, players, near, now, dt, sink) {
     if (id === "burning") {
         if (b.revolvers) { tickRevolvers(room, b, players, now, sink); return; }
         if (b.wild) { tickWild(room, b, now, sink); return; }   // step 34c: and the revolvers wait for it
+        if (b.erupt) { tickErupt(room, b, players, now, sink); return; }   // step 34d
+        if (now >= b.eruptAt) {
+            if (eruptDue(room, players, b)) {
+                b.eruptAt = now + BURNING.eruptEveryMs;
+                startErupt(b, now, sink);
+                return;
+            }
+            b.eruptAt = now + 1000;                             // nobody close enough - look again in a second
+        }
         if (now >= b.wildAt) {
             const p = wildTarget(room, players, b);
             if (p) {
@@ -1916,7 +1992,8 @@ function tickAbility(room, b, players, near, now, dt, sink) {
 function busyWithAbility(b, now) {
     return !!b.duel || !!(b.staggerUntil && now < b.staggerUntil) || !!b.scatter || !!b.harvest || !!b.spectral ||
         !!b.grave || !!b.dash || !!b.ember || !!b.tail || !!b.roar || !!b.revolvers ||
-        !!(b.wild && b.wild.e === "flare");                     // step 34c: the walk itself is walking
+        !!(b.wild && b.wild.e === "flare") ||                   // step 34c: the walk itself is walking
+        !!b.erupt;                                              // step 34d: planted from the charge to on its feet again
 }
 
 /* ---- The boss itself ---------------------------------------------------- */
@@ -2158,6 +2235,7 @@ function stepBoss(room, b, players, now, dt, sink) {
         else if (b.grave.x !== undefined) { faceX = b.grave.x; faceZ = b.grave.z; }
     }
     else if (b.tail) { /* step 33c: crouched, then spinning (the clients turn it): the yaw stays put */ }
+    else if (b.erupt) { /* step 34d: arms spread, then on its knees: it does not turn */ }
     else if (b.revolvers) {
         // step 34b: the guns follow whoever they are for
         const who = players[b.revolvers.target];
@@ -2293,6 +2371,10 @@ function snapshot(room, now) {
     else if (b.revolvers) snap.push(31, b.revolvers.target, b.revolvers.e === "holster" ? 0 : BURNING.rounds - b.revolvers.n);
     /* step 34c: WILDFIRE WALK - 33 flaring, 34 walking the fire (ms left in that part) */
     else if (b.wild) snap.push(b.wild.e === "flare" ? 33 : 34, "", Math.max(0, Math.round(b.wild.until - t)));
+    /* step 34d: COAT ERUPTION - 35 charging (damage still needed to break it, ms left), 36 the blast,
+       37 on its knees, 38 getting up (ms left) */
+    else if (b.erupt) snap.push({ charge: 35, blast: 36, kneel: 37, up: 38 }[b.erupt.e],
+        b.erupt.e === "charge" ? Math.ceil(Math.max(0, b.erupt.need - b.erupt.dealt)) : "", Math.max(0, Math.round(b.erupt.until - t)));
     /* and the patches still burning, once a second (field 11: [[x, z, ms left], ...]), so somebody who
        walked in sees the fire that hurts - fields 8-10 are 0, "", 0 when it is doing nothing else */
     if (room.fires && room.fires.length && b.type.id === "burning") {
@@ -2311,6 +2393,8 @@ function hurt(room, amount, now) {
     const t = now === undefined ? Date.now() : now;
     if (b.scatter && b.scatter.e === "gone") return null;       // step 30c: there is nothing there to hit
     if (b.dash && b.dash.e === "gone") return null;             // step 31d: nor while the ghost is mist
+    if (b.erupt && b.erupt.e === "charge") b.erupt.dealt += amount;           // step 34d: towards breaking it
+    else if (b.erupt && b.erupt.e === "kneel") amount *= BURNING.kneelScale;  // step 34d: on its knees, every hit twice
     b.health -= amount;
     if (b.health <= 0) {
         b.health = 0;

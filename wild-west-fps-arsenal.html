@@ -2057,7 +2057,7 @@ initNetwork();
 /* =========================================================================
    1. AUDIO ENGINE - fully procedural, spatialized (Web Audio API)
    ========================================================================= */
-const AUD = { ctx: null, master: null, noise: null, ready: false };
+const AUD = { ctx: null, master: null, noise: null, ready: false, muffle: null };
 
 function initAudio() {
     if (!AUD.ctx) {
@@ -2068,7 +2068,10 @@ function initAudio() {
         AUD.master.gain.value = 0.8;
         const comp = c.createDynamicsCompressor();
         comp.threshold.value = -16; comp.knee.value = 26; comp.ratio.value = 10;
-        AUD.master.connect(comp); comp.connect(c.destination);
+        // step 34d: THE BURNING MAN's COAT ERUPTION dulls the world while it charges (a low-pass, wide open otherwise)
+        AUD.muffle = c.createBiquadFilter();
+        AUD.muffle.type = 'lowpass'; AUD.muffle.frequency.value = 22000; AUD.muffle.Q.value = 0.7;
+        AUD.master.connect(AUD.muffle); AUD.muffle.connect(comp); comp.connect(c.destination);
 
         const len = c.sampleRate * 2;
         const buf = c.createBuffer(1, len, c.sampleRate);
@@ -2080,6 +2083,15 @@ function initAudio() {
         startAmbientWind();
     }
     if (AUD.ctx.state === 'suspended') AUD.ctx.resume();
+}
+
+/* step 34d: everything dull (on) or clear again (off), in `sec` seconds */
+function setMuffle(on, sec) {
+    if (!AUD.ready || !AUD.muffle) return;
+    const f = AUD.muffle.frequency, t = AUD.ctx.currentTime;
+    f.cancelScheduledValues(t);
+    f.setValueAtTime(f.value, t);
+    f.exponentialRampToValueAtTime(on ? 420 : 22000, t + (sec || 0.25));
 }
 
 /* Gain(+stereo pan) chain attenuated by distance. null = out of earshot. */
@@ -6610,9 +6622,12 @@ const BOSS_BURNING = {
     wildFirstMs: 12000, wildEveryMs: 16000, wildRange: 30, flareMs: 600,
     wildMs: 8000, wildSpeedScale: 1.1, spotEvery: 1.2, spotRadius: 1,
     spotGrowMs: 200, spotLifeMs: 6000, spotDps: 10, spotMax: 30,
-    spotClear: 0.3,
+    spotClear: 0.3, eruptFirstMs: 15000, eruptEveryMs: 22000, eruptTrigger: 14,
+    chargeMs: 2500, blastRadius: 10, blastDamage: 60, blastMs: 500,
+    breakAt: 150, kneelMs: 4000, kneelScale: 2, upMs: 1000,
+    muffleRadius: 30,
     gapMs: 2500,
-    p2: { revolversEveryMs: 6000, wildMs: 11000 }
+    p2: { revolversEveryMs: 6000, wildMs: 11000, breakAt: 200 }
 };
 const BOSS_GHOST = {
     spectralFirstMs: 5000, spectralEveryMs: 7000, spectralRange: 45,
@@ -9655,7 +9670,12 @@ function clearSpectralRounds() {
 const BURN = { on: false, target: '', fireAt: 0, standAt: 0, lastAt: 0, told: false, rounds: [], meUntil: 0, hud: null, others: {}, sparkAt: 0,
     wildUntil: 0, wildStandAt: 0, wildTold: false, coatAt: 0, spots: [], inFire: false };       // step 34c: WILDFIRE WALK
 const BURN_HEX = 0xff7a1a;
-const BURN_CLIPS = { EmberDraw: 1, EmberFire: 1, EmberEnd: 1, WildfireStart: 1 };
+const BURN_CLIPS = { EmberDraw: 1, EmberFire: 1, EmberEnd: 1, WildfireStart: 1, EruptCharge: 1, EruptBlast: 1, KneelDrop: 1, Kneel: 1, KneelUp: 1 };
+const EMBER_GUN_CLIPS = { EmberDraw: 1, EmberFire: 1, EmberEnd: 1 };      // the revolvers' - a missed end stands only these
+/* step 34d: COAT ERUPTION - charge (the coat goes white, the world dull for whoever is near, a ring
+   on the ground at the blast's reach, how much it still takes to break it), then the blast, or on
+   its knees taking double, then up */
+const ERUPT = { e: '', from: 0, until: 0, need: 0, left: 0, r: 10, muffled: false, ring: null, hud: null, standAt: 0, told: false, kneelLoopAt: 0 };
 const burnAt = new THREE.Vector3();
 
 function burnRig() {
@@ -9731,6 +9751,100 @@ function sfxWildfire(pos) {
     tone(d, { type: 'sawtooth', f0: 60, f1: 120, dur: 0.6, vol: 0.18 });
 }
 
+function eruptHud() {
+    if (ERUPT.hud) return ERUPT.hud;
+    const d = document.createElement('div');
+    d.id = 'erupt-hud';
+    d.style.cssText = 'position:fixed;top:17%;left:50%;transform:translate(-50%,-50%);z-index:40;pointer-events:none;display:none;' +
+        'text-align:center;font:bold 30px Georgia,serif;letter-spacing:3px;color:#fff3d0;text-shadow:0 0 14px #ff6a00,0 0 4px #000;white-space:nowrap';
+    document.body.appendChild(d);
+    return (ERUPT.hud = d);
+}
+function eruptRing() {
+    if (ERUPT.ring) return ERUPT.ring;
+    const g = new THREE.RingGeometry(0.94, 1, 64); g.rotateX(-Math.PI / 2);
+    const m = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: 0xffd9a0, transparent: true, opacity: 0.6, depthWrite: false, blending: THREE.AdditiveBlending }));
+    m.raycast = function () { };
+    m.visible = false;
+    scene.add(m);
+    return (ERUPT.ring = m);
+}
+/* the coat's own glow (the materials with a glow map): white-hot while it charges, near dark on its
+   knees; back to what it was (phase two's red included) through emissiveRest */
+function eruptGlow(k) {
+    if (!netBoss.rig || !netBoss.rig.parts || !netBoss.rig.parts.materials) return;
+    netBoss.rig.parts.materials.forEach(function (m) {
+        if (!m.emissive || m.userData.glowK === undefined) return;
+        if (k === null) emissiveRest(m, netBoss.rig.model && netBoss.rig.model.glow, netBoss.phase2);
+        else { m.emissive.setHex(0xffffff); m.emissiveIntensity = k; }
+    });
+}
+function sfxEruptBlast(pos) {
+    const d = chain(pos, 1.0, 120); if (!d) return;
+    tone(d, { type: 'sine', f0: 120, f1: 28, dur: 1.1, vol: 0.7 });
+    noiseBurst(d, { type: 'lowpass', freq: 2600, sweepTo: 120, q: 0.5, dur: 1.2, vol: 0.9 });
+}
+function eruptClear() {
+    if (ERUPT.muffled) { setMuffle(false, 0.2); ERUPT.muffled = false; }
+    if (ERUPT.e === 'charge' || ERUPT.e === 'kneel') eruptGlow(null);
+    ERUPT.e = ''; ERUPT.until = 0; ERUPT.standAt = 0; ERUPT.kneelLoopAt = 0;
+    if (ERUPT.ring) ERUPT.ring.visible = false;
+    if (ERUPT.hud) ERUPT.hud.style.display = 'none';
+}
+function eruptStep(m, late) {
+    const now = performance.now();
+    const rig = burnRig();
+    const pos = netBoss.mesh ? netBoss.mesh.position : camera.position;
+    if (m.e === 'erupt') {
+        const ms = typeof m.ms === 'number' ? m.ms : BOSS_BURNING.chargeMs;
+        ERUPT.e = 'charge'; ERUPT.from = now - (BOSS_BURNING.chargeMs - ms); ERUPT.until = now + ms;
+        ERUPT.need = m.need || BOSS_BURNING.breakAt; ERUPT.left = typeof m.left === 'number' ? m.left : ERUPT.need;
+        ERUPT.r = m.r || BOSS_BURNING.blastRadius; ERUPT.standAt = 0;
+        if (rig) rigFull(rig, 'EruptCharge', { fade: 0.12 });
+        const near = Math.hypot(camera.position.x - pos.x, camera.position.z - pos.z) <= (m.m || BOSS_BURNING.muffleRadius);
+        if (near && !ERUPT.muffled) { setMuffle(true, 0.6); ERUPT.muffled = true; }
+        if (!late && !ERUPT.told) {
+            ERUPT.told = true;
+            pushFeed('COAT ERUPTION — GET ' + ERUPT.r + ' M AWAY, OR SHOOT IT ' + ERUPT.need + ' TO BREAK IT');
+        }
+    } else if (m.e === 'left') {
+        if (typeof m.n === 'number') ERUPT.left = m.n;
+    } else if (m.e === 'blast') {
+        if (ERUPT.muffled) { setMuffle(false, 0.08); ERUPT.muffled = false; }
+        eruptGlow(null);
+        ERUPT.e = 'blast'; ERUPT.until = now + BOSS_BURNING.blastMs;
+        if (rig) rigFull(rig, 'EruptBlast', { fade: 0.05 });
+        ERUPT.standAt = now + BOSS_BURNING.blastMs + 30;
+        const at = m.p ? new THREE.Vector3(m.p[0], 0.2, m.p[1]) : pos.clone().setY(0.2);
+        for (let i = 0; i < 4; i++) spawnParticles(at.clone().setY(0.5 + i * 0.7), i % 2 ? 0xffc040 : BURN_HEX, 36, 9);
+        spawnDust(at.clone().setY(0.1), 40);
+        sfxEruptBlast(at);
+        const d = Math.hypot(camera.position.x - at.x, camera.position.z - at.z);
+        if (d < 22) camShake = Math.min(0.9, camShake + 0.6 * (1 - d / 22));
+        if (ERUPT.ring) ERUPT.ring.visible = false;
+        if (ERUPT.hud) ERUPT.hud.style.display = 'none';
+    } else if (m.e === 'broken') {
+        if (ERUPT.muffled) { setMuffle(false, 0.3); ERUPT.muffled = false; }
+        ERUPT.e = 'kneel'; ERUPT.until = now + (typeof m.ms === 'number' ? m.ms : BOSS_BURNING.kneelMs);
+        if (rig) rigFull(rig, 'KneelDrop', { fade: 0.08 });
+        ERUPT.kneelLoopAt = now + 420;
+        if (ERUPT.ring) ERUPT.ring.visible = false;
+        spawnParticles(pos.clone().setY(1.6), 0xfff0c0, 24, 4);
+        sfxBossRoar(pos);
+        pushFeed('THE COAT IS OUT — IT IS DOWN. EVERY HIT COUNTS TWICE');
+    } else if (m.e === 'up') {
+        eruptGlow(null);
+        ERUPT.e = 'up'; ERUPT.until = now + (typeof m.ms === 'number' ? m.ms : BOSS_BURNING.upMs);
+        if (rig) rigFull(rig, 'KneelUp', { fade: 0.1 });
+        ERUPT.standAt = ERUPT.until + 30;
+        if (ERUPT.hud) ERUPT.hud.style.display = 'none';
+    } else if (m.e === 'erupt-done') {
+        const was = ERUPT.e;
+        eruptClear();
+        if (rig && was && BURN_CLIPS[rig.full]) ERUPT.standAt = now + 30;
+    }
+}
+
 function burnHud() {
     if (BURN.hud) return BURN.hud;
     const d = document.createElement('div');
@@ -9752,6 +9866,7 @@ function sfxEmberShot(pos) {
 }
 
 function burnClear() {
+    eruptClear();                          // step 34d: never leave the world muffled
     const rig = burnRig();
     // a whole-body clip would keep Death from playing (rigDie) - let go of it
     if (rig && BURN_CLIPS[rig.full]) rig.full = null;
@@ -9776,11 +9891,11 @@ function burnStep(m, late) {
         }
     } else if (m.e === 'holster') {
         BURN.on = false;
-        if (rig && BURN_CLIPS[rig.full]) rigFull(rig, 'EmberEnd', { fade: 0.06 });
+        if (rig && EMBER_GUN_CLIPS[rig.full]) rigFull(rig, 'EmberEnd', { fade: 0.06 });
         BURN.standAt = now + (typeof m.ms === 'number' ? m.ms : BOSS_BURNING.holsterMs) + 40;
     } else if (m.e === 'ember-done') {
         BURN.on = false; BURN.target = '';
-        if (rig && BURN_CLIPS[rig.full] && !BURN.standAt) BURN.standAt = now + 30;
+        if (rig && EMBER_GUN_CLIPS[rig.full] && !BURN.standAt) BURN.standAt = now + 30;
     } else if (m.e === 'wild') {
         // step 34c: it flares (WildfireStart), then walks the fire for `walk` ms
         const ms = typeof m.ms === 'number' ? m.ms : BOSS_BURNING.flareMs;
@@ -9796,6 +9911,8 @@ function burnStep(m, late) {
         if (m.p) makeFireSpot(m.p[0], m.p[1], m.r || BOSS_BURNING.spotRadius, typeof m.g === 'number' ? m.g : BOSS_BURNING.spotGrowMs, typeof m.ms === 'number' ? m.ms : BOSS_BURNING.spotLifeMs);
     } else if (m.e === 'wild-done') {
         BURN.wildUntil = 0;
+    } else if (m.e === 'erupt' || m.e === 'left' || m.e === 'blast' || m.e === 'broken' || m.e === 'up' || m.e === 'erupt-done') {
+        eruptStep(m, late);                // step 34d
     } else if (m.e === 'burn') {
         const ms = typeof m.ms === 'number' ? m.ms : BOSS_BURNING.burnMs;
         if (m.p === NET.id) {
@@ -9823,8 +9940,17 @@ function burnFromSnapshot(r) {
             BURN.on = true; BURN.target = r[9] || ''; BURN.fireAt = now; BURN.standAt = 0;
             rigFull(rig, 'EmberFire', { loop: true, fade: 0.1 });
         }
-    } else if ((BURN.on || (BURN_CLIPS[rig.full] && rig.full !== 'WildfireStart')) && now - BURN.lastAt > 1500 && !BURN.standAt) {
+    } else if ((BURN.on || EMBER_GUN_CLIPS[rig.full]) && now - BURN.lastAt > 1500 && !BURN.standAt) {
         BURN.on = false; BURN.standAt = now;                   // the end never arrived: back on the feet
+    }
+    // step 34d: COAT ERUPTION - 35 charging (damage still needed, ms left), 36 the blast, 37 on its knees, 38 up
+    if (r[8] === 35 && typeof r[10] === 'number') {
+        if (ERUPT.e !== 'charge' && r[10] > 200) eruptStep({ e: 'erupt', ms: r[10], need: BOSS_BURNING.breakAt, left: typeof r[9] === 'number' ? r[9] : undefined }, true);
+        else if (typeof r[9] === 'number') ERUPT.left = r[9];
+    } else if (r[8] === 37 && ERUPT.e !== 'kneel' && typeof r[10] === 'number' && r[10] > 300) {
+        eruptStep({ e: 'broken', ms: r[10] }, true);
+    } else if (ERUPT.e && r[8] !== 35 && r[8] !== 36 && r[8] !== 37 && r[8] !== 38 && now > ERUPT.until + 1500) {
+        eruptStep({ e: 'erupt-done' }, true);             // the end never arrived
     }
     // step 34c: WILDFIRE WALK - 33 flaring, 34 walking (ms left), and the patches still burning (field 11)
     if ((r[8] === 33 || r[8] === 34) && typeof r[10] === 'number') {
@@ -9873,7 +9999,7 @@ function updateBurning(delta) {
     if (rig && BURN.on && rig.full === 'EmberDraw' && now >= BURN.fireAt) rigFull(rig, 'EmberFire', { loop: true, fade: 0.05 });
     if (BURN.standAt && now >= BURN.standAt) {
         BURN.standAt = 0;
-        if (rig && netBoss.alive && !BURN.on && BURN_CLIPS[rig.full]) rigStand(rig, 0.25);
+        if (rig && netBoss.alive && !BURN.on && EMBER_GUN_CLIPS[rig.full]) rigStand(rig, 0.25);     // only the revolvers' own clips
     }
     /* the rounds: slow, glowing, a spark now and then; a wall or the ground ends them */
     for (let i = BURN.rounds.length - 1; i >= 0; i--) {
@@ -9898,6 +10024,31 @@ function updateBurning(delta) {
             if (R.gone > BOSS_BURNING.emberReach || dc < 0.62) done = true;
         }
         if (done) { scene.remove(R.g); BURN.rounds.splice(i, 1); }
+    }
+    /* step 34d: the eruption - white-hot coat and a ring at its reach while it charges; the loop on its knees */
+    if (ERUPT.e === 'charge') {
+        const k = Math.min(1, Math.max(0, (now - ERUPT.from) / Math.max(1, ERUPT.until - ERUPT.from)));
+        eruptGlow(0.4 + 1.6 * k + 0.25 * Math.sin(now * 0.04) * k);
+        const ring = eruptRing();
+        if (netBoss.mesh) { ring.position.set(netBoss.mesh.position.x, 0.06, netBoss.mesh.position.z); }
+        ring.scale.setScalar(ERUPT.r);
+        ring.material.opacity = 0.25 + 0.45 * k + 0.2 * Math.sin(now * 0.02);
+        ring.visible = true;
+        const hud = eruptHud();
+        hud.style.display = 'block';
+        hud.textContent = '⚠ BREAK IT: ' + Math.max(0, Math.ceil(ERUPT.left)) + ' ⚠';
+        if (netBoss.mesh && Math.random() < 0.5) spawnParticles(netBoss.mesh.position.clone().setY(0.6 + Math.random() * 2.2), 0xfff0c0, 1, 2.5);
+    } else if (ERUPT.e === 'kneel') {
+        eruptGlow(0.08);
+        if (ERUPT.kneelLoopAt && now >= ERUPT.kneelLoopAt && rig && rig.full === 'KneelDrop') { ERUPT.kneelLoopAt = 0; rigFull(rig, 'Kneel', { loop: true, fade: 0.1 }); }
+        const hud = eruptHud();
+        hud.style.display = 'block';
+        hud.textContent = 'DOWN — DOUBLE DAMAGE ' + Math.max(0, Math.ceil((ERUPT.until - now) / 1000));
+    }
+    if (ERUPT.standAt && now >= ERUPT.standAt) {
+        ERUPT.standAt = 0;
+        if (ERUPT.e === 'blast' || ERUPT.e === 'up' || !ERUPT.e) { if (ERUPT.e !== 'up') ERUPT.e = ''; }
+        if (rig && netBoss.alive && BURN_CLIPS[rig.full] && (rig.full === 'EruptBlast' || rig.full === 'KneelUp' || !ERUPT.e)) rigStand(rig, 0.25);
     }
     /* step 34c: back on its feet after the flare; flames off its coat while it walks the fire */
     if (BURN.wildStandAt && now >= BURN.wildStandAt) {

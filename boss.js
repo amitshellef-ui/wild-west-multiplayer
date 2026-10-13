@@ -27,8 +27,9 @@
      spray     a wall of lead, cheap per bullet
      burning   THE BURNING MAN (step 34a - took DYNAMITE DAISY's place, F8): a model of
                its own with two revolvers. EMBER REVOLVERS (34b): twelve slow glowing
-               rounds from both guns that set you alight - see BURNING. The rest come
-               one step at a time (34c-34d, PLAN-BURNING.md). DYNAMITE DAISY's TNT
+               rounds from both guns that set you alight; WILDFIRE WALK (34c): it leaves
+               fire on the ground behind it - see BURNING. COAT ERUPTION comes in 34d
+               (PLAN-BURNING.md). DYNAMITE DAISY's TNT
                code below stays until the cowboy-skinned bosses all leave (end of F8)
      ghost     turns to mist, is gone for a second and comes out of the ground
                beside somebody at a run - GHOST DASH (step 31d, which took the
@@ -363,7 +364,7 @@ const GHOST = {
      charge    charges back to back
      snipe     calls three bandits to her and backs off to 18 metres
      spray     every 3 seconds, a ring of 12 rounds in every direction
-     burning   only the common part for now (fires a third faster) - step 34
+     burning   WILDFIRE: the fire walk lasts longer (p2.wildMs), the revolvers come every 6 s (BURNING.p2)
      ghost     two GHOST DASHes back to back, and a SPECTRAL SHOT every 5 seconds (GHOST.p2)
      slam      a wider, more frequent quake
      poison    two bottles a throw, and the cloud lingers for 8 seconds
@@ -400,14 +401,28 @@ const PHASE2 = {
    while burning starts the burnMs again; burns do not stack. A player who goes down
    stops burning. Then the guns go back (holsterMs). All through it: planted, the
    ordinary gun silent. b.revolvers = { e: draw / fire / holster, target, until, n }.
-   room.burns = { playerId: { until, next } }. */
+   room.burns = { playerId: { until, next } }.
+
+   WILDFIRE WALK (step 34c). Every wildEveryMs (the first wildFirstMs after it arrives),
+   when somebody is within wildRange: it stops and flares up (flareMs - planted), then for
+   wildMs (p2.wildMs in phase two) it comes after you a little faster (wildSpeedScale),
+   still shooting, and every spotEvery metres it walks leaves a patch of fire on the
+   ground: spotRadius, growing to full in spotGrowMs, burning for spotLifeMs, at most
+   spotMax at a time (the oldest goes). Anybody standing in one - and on the ground: a
+   jump clears it (feet above spotClear) - takes spotDps, a burnTickMs slice at a time,
+   however many patches they stand in. It shrinks the ground you can fight on: lead it
+   where you do not mind losing. b.wild = { e: flare / walk, until, lx, lz };
+   room.fires = [{ x, z, from, until }], room.fireTick = { playerId: next }. */
 const BURNING = {
     revolversFirstMs: 6000, revolversEveryMs: 9000, revolversRange: 35,
     drawMs: 330, rounds: 12, roundEveryMs: 120, roundSpread: 0.105, holsterMs: 330,
     emberDamage: 8, emberSpeed: 14, emberReach: 40, gunHeight: 2.0, gunSide: 0.38,
     burnMs: 3000, burnDps: 8, burnTickMs: 250,
+    // step 34c - WILDFIRE WALK
+    wildFirstMs: 12000, wildEveryMs: 16000, wildRange: 30, flareMs: 600, wildMs: 8000, wildSpeedScale: 1.1,
+    spotEvery: 1.2, spotRadius: 1.0, spotGrowMs: 200, spotLifeMs: 6000, spotDps: 10, spotMax: 30, spotClear: 0.3,
     gapMs: 2500,
-    p2: { revolversEveryMs: 6000 }
+    p2: { revolversEveryMs: 6000, wildMs: 11000 }
 };
 
 /* Per-ability gunplay. Anything missing falls back to the first row. */
@@ -500,6 +515,7 @@ function spawnBoss(room, players, now) {
         tailAt: now + DRAGON.tailFirstMs,               // step 33c - read by the dragon only
         roarAt: Infinity,                               // step 33d - set when the dragon turns (phase two)
         revolversAt: now + BURNING.revolversFirstMs,    // step 34b - read by the burning man only
+        wildAt: now + BURNING.wildFirstMs,              // step 34c - read by the burning man only
         chargeUntil: 0
     };
     room.bossAlive = true;
@@ -1628,6 +1644,7 @@ function startRevolvers(b, p, now, sink) {
 function endRevolvers(b, now, sink, off) {
     b.revolvers = null;
     b.lastShot = now + 400;                                     // a breath before the ordinary gun
+    b.wildAt = Math.max(b.wildAt || 0, now + BURNING.gapMs);    // step 34c: never back to back
     sink.burning.push(off ? { e: "ember-done", off: 1 } : { e: "ember-done" });
 }
 
@@ -1686,6 +1703,68 @@ function applyBurns(room, players, now, sink) {
     }
 }
 
+/* ---- THE BURNING MAN's WILDFIRE WALK (step 34c) ------------------------- */
+function wildTarget(room, players, b) {
+    const near = nearestPlayer(room, players, b.x, b.z);
+    return near && near.dist <= BURNING.wildRange ? near.player : null;
+}
+
+function startWild(b, now, sink) {
+    const walk = b.phase === 2 ? BURNING.p2.wildMs : BURNING.wildMs;
+    b.wild = { e: "flare", until: now + BURNING.flareMs, walk: walk };
+    sink.burning.push({ e: "wild", ms: BURNING.flareMs, walk: walk });
+}
+
+function dropSpot(room, b, now, sink) {
+    const fires = room.fires || (room.fires = []);
+    fires.push({ x: b.x, z: b.z, from: now + BURNING.spotGrowMs, until: now + BURNING.spotGrowMs + BURNING.spotLifeMs });
+    if (fires.length > BURNING.spotMax) fires.shift();
+    b.wild.lx = b.x; b.wild.lz = b.z;
+    sink.burning.push({ e: "spot", p: [round2(b.x), round2(b.z)], r: BURNING.spotRadius, g: BURNING.spotGrowMs, ms: BURNING.spotLifeMs });
+}
+
+/* flare (planted) -> walk (a patch every spotEvery metres) -> back to the fight */
+function tickWild(room, b, now, sink) {
+    const w = b.wild;
+    if (w.e === "flare") {
+        if (now < w.until) return;
+        w.e = "walk"; w.until = now + w.walk;
+        dropSpot(room, b, now, sink);
+        return;
+    }
+    if (Math.hypot(b.x - w.lx, b.z - w.lz) >= BURNING.spotEvery) dropSpot(room, b, now, sink);
+    if (now < w.until) return;
+    b.wild = null;
+    b.revolversAt = Math.max(b.revolversAt, now + BURNING.gapMs);     // never back to back
+    sink.burning.push({ e: "wild-done" });
+}
+
+/* Whoever stands in fire, on the ground, burns - spotDps however many patches they are in. */
+function stepFires(room, players, now, sink) {
+    const fires = room.fires;
+    if (!fires || !fires.length) return;
+    for (let i = fires.length - 1; i >= 0; i--) if (now >= fires[i].until) fires.splice(i, 1);
+    const tick = room.fireTick || (room.fireTick = {});
+    for (const id in players) {
+        const p = players[id];
+        if (p.room !== room.code || !p.alive) { delete tick[id]; continue; }
+        const feet = (typeof p.y === "number" ? p.y : 1.72) - 1.72;
+        let inside = false;
+        if (feet <= BURNING.spotClear) {
+            for (let i = 0; i < fires.length; i++) {
+                const f = fires[i];
+                if (now >= f.from && Math.hypot(p.x - f.x, p.z - f.z) <= BURNING.spotRadius) { inside = true; break; }
+            }
+        }
+        if (!inside) { delete tick[id]; continue; }
+        if (tick[id] === undefined) tick[id] = now;               // the first slice the moment they step in
+        while (tick[id] <= now) {
+            sink.hits.push({ playerId: id, damage: BURNING.spotDps * BURNING.burnTickMs / 1000, from: "boss" });
+            tick[id] += BURNING.burnTickMs;
+        }
+    }
+}
+
 /* ---- Abilities ---------------------------------------------------------- */
 function tickAbility(room, b, players, near, now, dt, sink) {
     const id = b.type.id;
@@ -1696,6 +1775,16 @@ function tickAbility(room, b, players, near, now, dt, sink) {
     /* step 34: THE BURNING MAN - one ability at a time, gapMs between them */
     if (id === "burning") {
         if (b.revolvers) { tickRevolvers(room, b, players, now, sink); return; }
+        if (b.wild) { tickWild(room, b, now, sink); return; }   // step 34c: and the revolvers wait for it
+        if (now >= b.wildAt) {
+            const p = wildTarget(room, players, b);
+            if (p) {
+                b.wildAt = now + BURNING.wildEveryMs;
+                startWild(b, now, sink);
+                return;
+            }
+            b.wildAt = now + 1000;                              // nobody near enough - look again in a second
+        }
         if (now >= b.revolversAt) {
             const p = revolversTarget(room, players, b);
             if (p) {
@@ -1826,7 +1915,8 @@ function tickAbility(room, b, players, near, now, dt, sink) {
    Shared by the walking below and the BOOGIE BOMB's dance (step F7a). */
 function busyWithAbility(b, now) {
     return !!b.duel || !!(b.staggerUntil && now < b.staggerUntil) || !!b.scatter || !!b.harvest || !!b.spectral ||
-        !!b.grave || !!b.dash || !!b.ember || !!b.tail || !!b.roar || !!b.revolvers;
+        !!b.grave || !!b.dash || !!b.ember || !!b.tail || !!b.roar || !!b.revolvers ||
+        !!(b.wild && b.wild.e === "flare");                     // step 34c: the walk itself is walking
 }
 
 /* ---- The boss itself ---------------------------------------------------- */
@@ -1957,7 +2047,8 @@ function stepBoss(room, b, players, now, dt, sink) {
     // the dragon from takeoff to landing in an EMBER RAIN (step 33b), and all through a TAIL SWEEP (step 33c)
     const dueling = busyWithAbility(b, now);
     const planted = b.gState === "spin" || b.gState === "fire" || dueling;
-    const baseSpeed = b.type.speed * (b.phase === 2 ? PHASE2.speedScale : 1);
+    const baseSpeed = b.type.speed * (b.phase === 2 ? PHASE2.speedScale : 1) *
+        (b.wild && b.wild.e === "walk" ? BURNING.wildSpeedScale : 1);       // step 34c: WILDFIRE WALK
     const speed = b.state === "chase" ? baseSpeed : baseSpeed * 0.55;
     let moved = false;
     if (!charging && !planted && wantsMove && b.path && b.pathIndex < b.path.length) {
@@ -2118,6 +2209,7 @@ function stepRoom(room, players, now, dt, sink) {
     if (room.boss && room.boss.alive) stepBoss(room, room.boss, players, now, dt, sink);
     stepHazards(room, players, dt, sink);
     applyBurns(room, players, now, sink);                       // step 34b: after the bullets of this tick
+    stepFires(room, players, now, sink);                        // step 34c: the WILDFIRE WALK's patches
     return sink;
 }
 
@@ -2199,6 +2291,17 @@ function snapshot(room, now) {
     /* step 34b: THE BURNING MAN's EMBER REVOLVERS - 31 while the guns are out (who they are for,
        rounds still to come). Its codes are 31-39. */
     else if (b.revolvers) snap.push(31, b.revolvers.target, b.revolvers.e === "holster" ? 0 : BURNING.rounds - b.revolvers.n);
+    /* step 34c: WILDFIRE WALK - 33 flaring, 34 walking the fire (ms left in that part) */
+    else if (b.wild) snap.push(b.wild.e === "flare" ? 33 : 34, "", Math.max(0, Math.round(b.wild.until - t)));
+    /* and the patches still burning, once a second (field 11: [[x, z, ms left], ...]), so somebody who
+       walked in sees the fire that hurts - fields 8-10 are 0, "", 0 when it is doing nothing else */
+    if (room.fires && room.fires.length && b.type.id === "burning") {
+        room.fireSnap = (room.fireSnap || 0) + 1;
+        if (room.fireSnap % 10 === 1) {
+            if (snap.length === 8) snap.push(0, "", 0);
+            snap[11] = room.fires.map((f) => [round2(f.x), round2(f.z), Math.max(0, Math.round(f.until - t))]);
+        }
+    }
     return snap;
 }
 
@@ -2214,6 +2317,7 @@ function hurt(room, amount, now) {
         b.alive = false;
         room.bossAlive = false;
         room.boss = null;                       // the slot is free for the next one
+        room.fires = [];                        // step 34c: its fire goes out with it
         room.nextBossAt = t + BOSS.nextBossMs;
         return { killed: true, boss: b };
     }

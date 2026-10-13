@@ -6520,7 +6520,7 @@ const BOSS_PHASE2_TEXT = {
     snipe: 'ENRAGED \u00b7 CALLED FOR BACKUP',
     spray: 'ENRAGED \u00b7 RING OF LEAD',
     dynamite: 'ENRAGED \u00b7 TRIPLE TNT',
-    burning: 'ENRAGED \u00b7 FASTER GUNS',        // step 34a - becomes WILDFIRE with step 34c
+    burning: 'ENRAGED \u00b7 WILDFIRE',           // step 34c: a longer fire walk, the revolvers every 6 s
     ghost: 'ENRAGED \u00b7 RESTLESS SPIRIT',
     slam: 'ENRAGED \u00b7 AFTERSHOCKS',
     poison: 'ENRAGED \u00b7 DOUBLE DOSE',
@@ -6603,12 +6603,16 @@ const BOSS_SKELETON = {
 /* step 34b: THE BURNING MAN's EMBER REVOLVERS - BURNING in boss.js; online those are the ones
    that count (t9-tables checks the two are the same). Online only, like the other bosses' abilities. */
 const BOSS_BURNING = {
-    revolversFirstMs: 6000, revolversEveryMs: 9000, revolversRange: 35,
-    drawMs: 330, rounds: 12, roundEveryMs: 120, roundSpread: 0.105, holsterMs: 330,
-    emberDamage: 8, emberSpeed: 14, emberReach: 40, gunHeight: 2, gunSide: 0.38,
-    burnMs: 3000, burnDps: 8, burnTickMs: 250,
+    revolversFirstMs: 6000, revolversEveryMs: 9000, revolversRange: 35, drawMs: 330,
+    rounds: 12, roundEveryMs: 120, roundSpread: 0.105, holsterMs: 330,
+    emberDamage: 8, emberSpeed: 14, emberReach: 40, gunHeight: 2,
+    gunSide: 0.38, burnMs: 3000, burnDps: 8, burnTickMs: 250,
+    wildFirstMs: 12000, wildEveryMs: 16000, wildRange: 30, flareMs: 600,
+    wildMs: 8000, wildSpeedScale: 1.1, spotEvery: 1.2, spotRadius: 1,
+    spotGrowMs: 200, spotLifeMs: 6000, spotDps: 10, spotMax: 30,
+    spotClear: 0.3,
     gapMs: 2500,
-    p2: { revolversEveryMs: 6000 }
+    p2: { revolversEveryMs: 6000, wildMs: 11000 }
 };
 const BOSS_GHOST = {
     spectralFirstMs: 5000, spectralEveryMs: 7000, spectralRange: 45,
@@ -8574,6 +8578,7 @@ function clearBanditBullets() {
     banditBullets.length = 0;
     clearSpectralRounds();                 // step 31b
     clearBurnRounds();                     // step 34b
+    clearFireSpots();                      // step 34c
 }
 
 function showBanditHealth(body) {
@@ -9647,9 +9652,10 @@ function clearSpectralRounds() {
    by walls like any round - and the burning: for us an orange flicker round the edge of
    the screen, for another player flames rising off them.
    ========================================================================= */
-const BURN = { on: false, target: '', fireAt: 0, standAt: 0, lastAt: 0, told: false, rounds: [], meUntil: 0, hud: null, others: {}, sparkAt: 0 };
+const BURN = { on: false, target: '', fireAt: 0, standAt: 0, lastAt: 0, told: false, rounds: [], meUntil: 0, hud: null, others: {}, sparkAt: 0,
+    wildUntil: 0, wildStandAt: 0, wildTold: false, coatAt: 0, spots: [], inFire: false };       // step 34c: WILDFIRE WALK
 const BURN_HEX = 0xff7a1a;
-const BURN_CLIPS = { EmberDraw: 1, EmberFire: 1, EmberEnd: 1 };
+const BURN_CLIPS = { EmberDraw: 1, EmberFire: 1, EmberEnd: 1, WildfireStart: 1 };
 const burnAt = new THREE.Vector3();
 
 function burnRig() {
@@ -9682,6 +9688,49 @@ const burnCoreMat = new THREE.MeshBasicMaterial({ color: 0xffd27a });
 function burnGlowMat() {
     return burnGlowMat.m || (burnGlowMat.m = new THREE.SpriteMaterial({ map: burnGlowMap(), color: 0xffffff, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
 }
+/* step 34c: a patch of fire on the ground - a glowing disc and three flames that flicker. Shared
+   geometry and materials (up to 30 at a time); it grows by scale and burns out by scale. */
+function fireSpotParts() {
+    if (fireSpotParts.p) return fireSpotParts.p;
+    const disc = new THREE.CircleGeometry(1, 24); disc.rotateX(-Math.PI / 2);
+    return (fireSpotParts.p = {
+        disc: disc,
+        outer: new THREE.MeshBasicMaterial({ color: 0xff5010, transparent: true, opacity: 0.5, depthWrite: false, blending: THREE.AdditiveBlending }),
+        inner: new THREE.MeshBasicMaterial({ color: 0xffb040, transparent: true, opacity: 0.55, depthWrite: false, blending: THREE.AdditiveBlending })
+    });
+}
+function makeFireSpot(x, z, r, growMs, ms) {
+    const P = fireSpotParts();
+    const g = new THREE.Group();
+    const o = new THREE.Mesh(P.disc, P.outer), i = new THREE.Mesh(P.disc, P.inner);
+    o.scale.set(r, 1, r); i.scale.set(r * 0.55, 1, r * 0.55); i.position.y = 0.01;
+    o.raycast = function () { }; i.raycast = function () { };
+    g.add(o); g.add(i);
+    const flames = [];
+    for (let k = 0; k < 3; k++) {
+        const sp = new THREE.Sprite(burnGlowMat());
+        sp.raycast = function () { };
+        const a = k * 2.1 + Math.random(), d = r * (0.2 + 0.4 * Math.random());
+        sp.position.set(Math.cos(a) * d, 0.35, Math.sin(a) * d);
+        g.add(sp); flames.push({ sp: sp, ph: Math.random() * 6 });
+    }
+    g.position.set(x, 0.04, z);
+    g.scale.setScalar(0.2);
+    scene.add(g);
+    const now = performance.now();
+    BURN.spots.push({ g: g, x: x, z: z, r: r, from: now, grown: now + growMs, until: now + growMs + ms, flames: flames });
+    if (BURN.spots.length > BOSS_BURNING.spotMax) scene.remove(BURN.spots.shift().g);
+}
+function clearFireSpots() {
+    BURN.spots.forEach(function (S) { scene.remove(S.g); });
+    BURN.spots.length = 0;
+}
+function sfxWildfire(pos) {
+    const d = chain(pos, 1.0, 60); if (!d) return;
+    noiseBurst(d, { type: 'lowpass', freq: 900, sweepTo: 2600, q: 0.6, dur: 0.7, vol: 0.6 });
+    tone(d, { type: 'sawtooth', f0: 60, f1: 120, dur: 0.6, vol: 0.18 });
+}
+
 function burnHud() {
     if (BURN.hud) return BURN.hud;
     const d = document.createElement('div');
@@ -9707,6 +9756,8 @@ function burnClear() {
     // a whole-body clip would keep Death from playing (rigDie) - let go of it
     if (rig && BURN_CLIPS[rig.full]) rig.full = null;
     BURN.on = false; BURN.target = ''; BURN.fireAt = 0; BURN.standAt = 0; BURN.lastAt = 0;
+    BURN.wildUntil = 0; BURN.wildStandAt = 0;
+    clearFireSpots();                      // step 34c: the server puts its fire out when it dies
 }
 
 function burnStep(m, late) {
@@ -9730,6 +9781,21 @@ function burnStep(m, late) {
     } else if (m.e === 'ember-done') {
         BURN.on = false; BURN.target = '';
         if (rig && BURN_CLIPS[rig.full] && !BURN.standAt) BURN.standAt = now + 30;
+    } else if (m.e === 'wild') {
+        // step 34c: it flares (WildfireStart), then walks the fire for `walk` ms
+        const ms = typeof m.ms === 'number' ? m.ms : BOSS_BURNING.flareMs;
+        BURN.wildUntil = now + ms + (typeof m.walk === 'number' ? m.walk : BOSS_BURNING.wildMs);
+        if (rig) rigFull(rig, 'WildfireStart', { fade: 0.08 });
+        BURN.wildStandAt = now + ms + 30;
+        if (netBoss.mesh) sfxWildfire(netBoss.mesh.position);
+        if (!late && !BURN.wildTold) {
+            BURN.wildTold = true;
+            pushFeed('WILDFIRE WALK — IT LEAVES FIRE BEHIND IT. LEAD IT WHERE YOU DO NOT NEED THE GROUND');
+        }
+    } else if (m.e === 'spot') {
+        if (m.p) makeFireSpot(m.p[0], m.p[1], m.r || BOSS_BURNING.spotRadius, typeof m.g === 'number' ? m.g : BOSS_BURNING.spotGrowMs, typeof m.ms === 'number' ? m.ms : BOSS_BURNING.spotLifeMs);
+    } else if (m.e === 'wild-done') {
+        BURN.wildUntil = 0;
     } else if (m.e === 'burn') {
         const ms = typeof m.ms === 'number' ? m.ms : BOSS_BURNING.burnMs;
         if (m.p === NET.id) {
@@ -9757,8 +9823,19 @@ function burnFromSnapshot(r) {
             BURN.on = true; BURN.target = r[9] || ''; BURN.fireAt = now; BURN.standAt = 0;
             rigFull(rig, 'EmberFire', { loop: true, fade: 0.1 });
         }
-    } else if ((BURN.on || BURN_CLIPS[rig.full]) && now - BURN.lastAt > 1500 && !BURN.standAt) {
+    } else if ((BURN.on || (BURN_CLIPS[rig.full] && rig.full !== 'WildfireStart')) && now - BURN.lastAt > 1500 && !BURN.standAt) {
         BURN.on = false; BURN.standAt = now;                   // the end never arrived: back on the feet
+    }
+    // step 34c: WILDFIRE WALK - 33 flaring, 34 walking (ms left), and the patches still burning (field 11)
+    if ((r[8] === 33 || r[8] === 34) && typeof r[10] === 'number') {
+        if (!BURN.wildUntil) BURN.wildUntil = now + r[10] + (r[8] === 33 ? BOSS_BURNING.wildMs : 0);
+    } else if (BURN.wildUntil && now > BURN.wildUntil + 1500) BURN.wildUntil = 0;
+    if (Array.isArray(r[11])) {
+        r[11].forEach(function (f) {
+            if (!Array.isArray(f) || f.length < 3) return;
+            const known = BURN.spots.some(function (S) { return Math.abs(S.x - f[0]) < 0.3 && Math.abs(S.z - f[1]) < 0.3; });
+            if (!known && f[2] > 200) makeFireSpot(f[0], f[1], BOSS_BURNING.spotRadius, 0, f[2]);
+        });
     }
 }
 
@@ -9822,10 +9899,37 @@ function updateBurning(delta) {
         }
         if (done) { scene.remove(R.g); BURN.rounds.splice(i, 1); }
     }
-    /* us, alight: the edge of the screen flickers orange */
-    const hud = BURN.hud || (BURN.meUntil > now ? burnHud() : null);
+    /* step 34c: back on its feet after the flare; flames off its coat while it walks the fire */
+    if (BURN.wildStandAt && now >= BURN.wildStandAt) {
+        BURN.wildStandAt = 0;
+        if (rig && netBoss.alive && rig.full === 'WildfireStart') rigStand(rig, 0.25);
+    }
+    if (BURN.wildUntil > now && netBoss.mesh && now - BURN.coatAt > 70) {
+        BURN.coatAt = now;
+        const q = netBoss.mesh.position.clone();
+        const s0 = (netBoss.rig && netBoss.rig.scale) || 1.45;
+        q.y += (0.3 + Math.random() * 0.8) * s0; q.x += (Math.random() - 0.5) * 0.7 * s0; q.z += (Math.random() - 0.5) * 0.7 * s0;
+        spawnParticles(q, Math.random() < 0.6 ? BURN_HEX : 0xffc040, 2, 1.6);
+    }
+    /* the patches: grow, flicker, burn out; are we standing in one? */
+    BURN.inFire = false;
+    for (let i = BURN.spots.length - 1; i >= 0; i--) {
+        const S = BURN.spots[i];
+        if (now >= S.until) { scene.remove(S.g); BURN.spots.splice(i, 1); continue; }
+        const grow = S.grown > S.from ? Math.min(1, (now - S.from) / (S.grown - S.from)) : 1;
+        const out = Math.min(1, (S.until - now) / 700);
+        S.g.scale.setScalar(Math.max(0.05, Math.min(grow, out)));
+        for (let k = 0; k < S.flames.length; k++) {
+            const F = S.flames[k], fl = 0.75 + 0.35 * Math.sin(now * 0.013 + F.ph) * Math.sin(now * 0.007 + F.ph * 2);
+            F.sp.scale.set(0.55 * fl * S.r, 0.95 * fl * S.r, 1);
+            F.sp.position.y = 0.3 + 0.12 * fl;
+        }
+        if (now >= S.grown && Math.hypot(camera.position.x - S.x, camera.position.z - S.z) <= S.r && camera.position.y - EYE_HEIGHT <= BOSS_BURNING.spotClear) BURN.inFire = true;
+    }
+    /* us, alight or standing in fire: the edge of the screen flickers orange */
+    const hud = BURN.hud || (BURN.meUntil > now || BURN.inFire ? burnHud() : null);
     if (hud) {
-        if (BURN.meUntil > now && playerHealth > 0) {
+        if ((BURN.meUntil > now || BURN.inFire) && playerHealth > 0) {
             hud.style.display = 'block';
             hud.style.opacity = (0.55 + 0.35 * Math.sin(now * 0.025) * Math.sin(now * 0.011)).toFixed(2);
         } else hud.style.display = 'none';

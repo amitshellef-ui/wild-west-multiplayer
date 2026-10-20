@@ -289,6 +289,36 @@
     #victory .vc-note { font-size: 11px; color: #9c8156; margin-top: 8px; direction: rtl; font-family: 'Segoe UI', Tahoma, sans-serif; min-height: 14px; }
 
     #loading { position: absolute; bottom: 24px; color: #6b5330; font-size: 11px; font-family: 'Segoe UI', Tahoma, sans-serif; }
+
+    /* The loading screen (BOOT in the script). Above everything, menu included, until the town,
+       the server and every model are in. The spinner and the shine on the bar are transform-only
+       animations, so they keep moving while the main thread is busy building the town. */
+    #boot {
+        position: fixed; inset: 0; z-index: 100; text-align: center; cursor: default;
+        background: radial-gradient(ellipse at 50% 35%, rgba(90,60,25,0.35), rgba(0,0,0,0.93) 70%), linear-gradient(180deg,#2a1c0c,#120a03);
+        display: flex; flex-direction: column; justify-content: center; align-items: center;
+        transition: opacity 0.6s ease-out;
+    }
+    #boot.out { opacity: 0; pointer-events: none; }
+    #boot h1 { font-size: 56px; margin: 0; color: #e8b64c; letter-spacing: 6px; text-shadow: 0 0 22px rgba(232,182,76,0.35), 3px 4px 0 #3a2208; }
+    #boot h2 { font-size: 16px; margin: 6px 0 30px; color: #b9884a; letter-spacing: 3px; font-weight: normal; }
+    #boot-spin { width: 34px; height: 34px; margin-bottom: 22px; border-radius: 50%;
+        border: 3px solid rgba(232,182,76,0.18); border-top-color: #e8b64c; animation: bootSpin 0.9s linear infinite; }
+    @keyframes bootSpin { to { transform: rotate(360deg); } }
+    #boot-bar { position: relative; overflow: hidden; width: 360px; max-width: 80vw; height: 14px;
+        background: rgba(0,0,0,0.55); border: 1px solid #8b5a2b; border-radius: 3px; }
+    #boot-fill { height: 100%; width: 0%; background: linear-gradient(180deg,#f0c35a,#b07a22); transition: width 0.35s ease-out; }
+    #boot-bar::after { content: ''; position: absolute; top: 0; bottom: 0; left: 0; width: 30%;
+        background: linear-gradient(90deg, rgba(255,240,200,0), rgba(255,240,200,0.22), rgba(255,240,200,0));
+        animation: bootShine 1.6s linear infinite; }
+    @keyframes bootShine { from { transform: translateX(-100%); } to { transform: translateX(340%); } }
+    #boot-step { margin-top: 12px; font-size: 13px; color: #c49a5a; direction: rtl; font-family: 'Segoe UI', Tahoma, sans-serif; min-height: 18px; }
+    #boot-tip { margin-top: 34px; max-width: 520px; padding: 0 16px; font-size: 15px; color: #f0dfc0; direction: rtl;
+        font-family: 'Segoe UI', Tahoma, sans-serif; line-height: 1.6; min-height: 48px; }
+    #boot-tip b { color: #e8b64c; }
+    #boot-skip { display: none; margin-top: 22px; font-family: 'Segoe UI', Tahoma, sans-serif; font-size: 15px; color: #ffe1a0;
+        background: rgba(90,50,14,0.85); border: 2px solid #c47a2b; border-radius: 3px; padding: 8px 26px; cursor: pointer; }
+    #boot-skip:hover { background: rgba(130,72,20,0.95); }
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <!-- Step 26a: the character models. If these fail to load the game stays on the cube rig. -->
@@ -303,6 +333,16 @@
 <script src="game-tables.js"></script>
 </head>
 <body>
+<!-- First in the body so it is on screen before the rest of the page is read -->
+<div id="boot">
+    <h1>DUSTY GULCH</h1>
+    <h2>ARSENAL &middot; BOSS HUNT</h2>
+    <div id="boot-spin"></div>
+    <div id="boot-bar"><div id="boot-fill"></div></div>
+    <div id="boot-step">בונה את העיירה...</div>
+    <div id="boot-tip"></div>
+    <button id="boot-skip">להתחיל בכל זאת</button>
+</div>
 
 <div id="canvas-container"></div>
 <div id="vignette"></div>
@@ -452,6 +492,98 @@
 
 <script>
 window.addEventListener('contextmenu', e => e.preventDefault());
+
+/* =========================================================================
+   LOADING SCREEN (#boot)
+
+   Stays over the menu until three things are in: the town (this script has run
+   to the end), the server (the first room-joined; at once when there is no
+   server) and every character model (loaded, or given up on - that one stays
+   on the cube rig as before). The bar is 10% town, 10% server and 80% models,
+   each model by its downloaded bytes when the size is known. After skipMs a
+   button lets the player go to the menu anyway; whatever is still loading
+   carries on in the background, exactly as it did before this screen existed.
+
+   It cannot cover a sleeping Render server: until the server wakes, this page
+   has not arrived yet.
+
+   This block is a script of its own, and the game script after it
+   (#game-main) is started one paint later by the small script at the end of
+   the page. A script the parser meets runs before anything is drawn, and
+   building the town took 8 seconds plus 8 more for the first frame on the
+   Intel laptop (measured 2026-10-20) - all of it on a blank page.
+   ========================================================================= */
+const BOOT = {
+    el: document.getElementById('boot'),
+    fill: document.getElementById('boot-fill'),
+    step: document.getElementById('boot-step'),
+    tip: document.getElementById('boot-tip'),
+    skip: document.getElementById('boot-skip'),
+    world: false,
+    server: false,
+    models: {},             // key -> 0..1 downloaded, true once loaded or given up on
+    done: false,
+    skipMs: 20000,
+    tipMs: 4500,
+    tipTimer: null,
+    tips: [
+        'חבר נפל? עמדו לידו והחזיקו <b>E</b> חמש שניות כדי להחיות אותו',
+        'החזיקו <b>Tab</b> כדי לראות את טבלת הניקוד',
+        'כל הריגה נותנת מחסנית לכל הנשקים שכבר פתחתם',
+        'כל בוס שנופל פותח נשק חדש. מחליפים נשק במקשים <b>1-7</b>',
+        'מצאתם בוגי בום על הרצפה? עברו עליו ולחצו <b>G</b>: כל מי שבסביבה רוקד ולא יורה',
+        'המגן נפתח אחרי הבוס השביעי. זורקים אותו והוא קופץ בין האויבים',
+        'איש הלהבות טוען את המעיל? ירו לו בגוף, לא ברגליים, כדי לשבור את הפיצוץ',
+        'רוצים לשחק עם חברים? צרו חדר פרטי ולחצו <b>העתק קישור</b>'
+    ]
+};
+
+function bootModelStart(key) { if (BOOT.models[key] === undefined) BOOT.models[key] = 0; }
+function bootModelProgress(key, e) {
+    if (BOOT.models[key] === true || !e || !e.lengthComputable || !e.total) return;
+    BOOT.models[key] = Math.min(e.loaded / e.total, 0.99);
+    bootUpdate();
+}
+function bootModelDone(key) { BOOT.models[key] = true; bootUpdate(); }
+function bootMark(part) { BOOT[part] = true; bootUpdate(); }
+
+function bootUpdate() {
+    if (BOOT.done || !BOOT.el) return;
+    const keys = Object.keys(BOOT.models);
+    const ready = keys.filter(function (k) { return BOOT.models[k] === true; }).length;
+    let got = 0;
+    keys.forEach(function (k) { got += BOOT.models[k] === true ? 1 : BOOT.models[k]; });
+    const modelPart = keys.length ? got / keys.length : 0;
+    const pct = (BOOT.world ? 10 : 0) + (BOOT.server ? 10 : 0) + 80 * modelPart;
+    BOOT.fill.style.width = pct.toFixed(1) + '%';
+    if (!BOOT.world) BOOT.step.textContent = 'בונה את העיירה...';
+    else if (keys.length && ready < keys.length) BOOT.step.textContent = 'מוריד דמויות ' + ready + '/' + keys.length + '...';
+    else if (!BOOT.server) BOOT.step.textContent = 'מתחבר לשרת...';
+    if (BOOT.world && BOOT.server && ready === keys.length) bootFinish();
+}
+
+function bootFinish() {
+    if (BOOT.done || !BOOT.el) return;
+    BOOT.done = true;
+    clearInterval(BOOT.tipTimer);
+    BOOT.fill.style.width = '100%';
+    BOOT.el.classList.add('out');
+    setTimeout(function () { BOOT.el.style.display = 'none'; }, 650);
+}
+
+(function () {
+    if (!BOOT.el) return;
+    let i = Math.floor(Math.random() * BOOT.tips.length);
+    BOOT.tip.innerHTML = BOOT.tips[i];
+    BOOT.tipTimer = setInterval(function () {
+        i = (i + 1) % BOOT.tips.length;
+        BOOT.tip.innerHTML = BOOT.tips[i];
+    }, BOOT.tipMs);
+    setTimeout(function () { if (!BOOT.done) BOOT.skip.style.display = 'inline-block'; }, BOOT.skipMs);
+    BOOT.skip.addEventListener('click', bootFinish);
+})();
+</script>
+<script type="text/x-game" id="game-main">
 
 /* =========================================================================
    0. NETWORK - Socket.IO connection (multiplayer, step 1)
@@ -1446,6 +1578,7 @@ function initNetwork() {
         setNetStatus('OFFLINE - SINGLE PLAYER', 'off');
         setRoomMsg('משחק מקומי - אין שרת', false);
         console.warn('[NET] socket.io client not loaded (opened from disk?) - staying offline');
+        bootMark('server');
         return;
     }
 
@@ -1493,6 +1626,7 @@ function initNetwork() {
            tracking belongs to the room we just left. --- */
     NET.socket.on('room-joined', function (data) {
         if (!data) return;
+        bootMark('server');
         NET.room = data.code;
         if (data.mode) NET.mode = data.mode;
         NET.level = data.level || 'normal';
@@ -6979,23 +7113,28 @@ function modelReady(key) {
 }
 
 function loadCharacterModel(key) {
-    if (MODEL_FORCE_CUBES) { console.log('[MODELS] ?cubes - staying on the cube rig'); return; }
+    bootModelStart(key);
+    if (MODEL_FORCE_CUBES) { console.log('[MODELS] ?cubes - staying on the cube rig'); bootModelDone(key); return; }
     if (!THREE.GLTFLoader || !THREE.DRACOLoader || !THREE.SkeletonUtils) {
         console.warn('[MODELS] loaders did not arrive - staying on the cube rig');
+        bootModelDone(key);
         return;
     }
     const spec = MODEL_SPECS[key];
-    if (!spec) { console.warn('[MODELS] no MODEL_SPECS entry for "' + key + '" - that boss stays a cowboy'); return; }
+    if (!spec) { console.warn('[MODELS] no MODEL_SPECS entry for "' + key + '" - that boss stays a cowboy'); bootModelDone(key); return; }
     const draco = new THREE.DRACOLoader();
     draco.setDecoderPath('https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/libs/draco/');
     const loader = new THREE.GLTFLoader();
     loader.setDRACOLoader(draco);
     const t0 = performance.now();
     (function attempt(urls) {
-        if (!urls.length) { console.warn('[MODELS] ' + key + ' unavailable - staying on the cube rig'); return; }
+        if (!urls.length) { console.warn('[MODELS] ' + key + ' unavailable - staying on the cube rig'); bootModelDone(key); return; }
         loader.load(urls[0],
-            function (gltf) { onCharacterModel(key, gltf, urls[0], performance.now() - t0); },
-            undefined,
+            function (gltf) {
+                // the loading screen is told even if unpacking throws, so it never waits forever
+                try { onCharacterModel(key, gltf, urls[0], performance.now() - t0); } finally { bootModelDone(key); }
+            },
+            function (e) { bootModelProgress(key, e); },
             function (err) { console.warn('[MODELS] ' + urls[0] + ' failed', err); attempt(urls.slice(1)); });
     })([MODEL_BASE_CDN + spec.file, MODEL_BASE_LOCAL + spec.file]);
 }
@@ -14971,7 +15110,25 @@ nextWaveAt = performance.now() + 45000;
 nextBossAt = performance.now() + 90000;
 bindWeaponVisual();
 wantedModels().forEach(loadCharacterModel);
+bootMark('world');
 animate();
+</script>
+<script>
+/* Starts the game script above after the loading screen has been drawn once (see LOADING
+   SCREEN). It runs as an ordinary page script, so everything it declares is global as before.
+   The timeout is for a hidden tab, which draws no frames. */
+(function () {
+    let started = false;
+    function start() {
+        if (started) return;
+        started = true;
+        const s = document.createElement('script');
+        s.text = document.getElementById('game-main').text;
+        document.body.appendChild(s);
+    }
+    requestAnimationFrame(function () { setTimeout(start, 0); });
+    setTimeout(start, 250);
+})();
 </script>
 </body>
 </html>
